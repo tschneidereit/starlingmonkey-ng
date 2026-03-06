@@ -1,0 +1,860 @@
+{
+  "btoa(\"עברית\") must raise INVALID_CHARACTER_ERR": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ab\") == \"YWI=\"": {
+    "status": "PASS"
+  },
+  "btoa(\"abc\") == \"YWJj\"": {
+    "status": "PASS"
+  },
+  "btoa(\"abcd\") == \"YWJjZA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"abcde\") == \"YWJjZGU=\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ÿÿÀ\") == \"///A\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\0a\") == \"AGE=\"": {
+    "status": "PASS"
+  },
+  "btoa(\"a\\0b\") == \"YQBi\"": {
+    "status": "PASS"
+  },
+  "btoa(undefined) == \"dW5kZWZpbmVk\"": {
+    "status": "PASS"
+  },
+  "btoa(null) == \"bnVsbA==\"": {
+    "status": "PASS"
+  },
+  "btoa(7) == \"Nw==\"": {
+    "status": "PASS"
+  },
+  "btoa(12) == \"MTI=\"": {
+    "status": "PASS"
+  },
+  "btoa(1.5) == \"MS41\"": {
+    "status": "PASS"
+  },
+  "btoa(true) == \"dHJ1ZQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(false) == \"ZmFsc2U=\"": {
+    "status": "PASS"
+  },
+  "btoa(NaN) == \"TmFO\"": {
+    "status": "PASS"
+  },
+  "btoa(Infinity) == \"SW5maW5pdHk=\"": {
+    "status": "PASS"
+  },
+  "btoa(-Infinity) == \"LUluZmluaXR5\"": {
+    "status": "PASS"
+  },
+  "btoa(0) == \"MA==\"": {
+    "status": "PASS"
+  },
+  "btoa(-0) == \"MA==\"": {
+    "status": "PASS"
+  },
+  "btoa(object \"foo\") == \"Zm9v\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\0\") == \"AA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x01\") == \"AQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x02\") == \"Ag==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x03\") == \"Aw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x04\") == \"BA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x05\") == \"BQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x06\") == \"Bg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x07\") == \"Bw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\b\") == \"CA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\t\") == \"CQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\n\") == \"Cg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\v\") == \"Cw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\f\") == \"DA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\r\") == \"DQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x0e\") == \"Dg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x0f\") == \"Dw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x10\") == \"EA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x11\") == \"EQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x12\") == \"Eg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x13\") == \"Ew==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x14\") == \"FA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x15\") == \"FQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x16\") == \"Fg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x17\") == \"Fw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x18\") == \"GA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x19\") == \"GQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x1a\") == \"Gg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x1b\") == \"Gw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x1c\") == \"HA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x1d\") == \"HQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x1e\") == \"Hg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\x1f\") == \"Hw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\" \") == \"IA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"!\") == \"IQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\\"\") == \"Ig==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"#\") == \"Iw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"$\") == \"JA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"%\") == \"JQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"&\") == \"Jg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"'\") == \"Jw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"(\") == \"KA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\")\") == \"KQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"*\") == \"Kg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"+\") == \"Kw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\",\") == \"LA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"-\") == \"LQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\".\") == \"Lg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"/\") == \"Lw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"0\") == \"MA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"1\") == \"MQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"2\") == \"Mg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"3\") == \"Mw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"4\") == \"NA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"5\") == \"NQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"6\") == \"Ng==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"7\") == \"Nw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"8\") == \"OA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"9\") == \"OQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\":\") == \"Og==\"": {
+    "status": "PASS"
+  },
+  "btoa(\";\") == \"Ow==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"<\") == \"PA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"=\") == \"PQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\">\") == \"Pg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"?\") == \"Pw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"@\") == \"QA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"A\") == \"QQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"B\") == \"Qg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"C\") == \"Qw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"D\") == \"RA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"E\") == \"RQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"F\") == \"Rg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"G\") == \"Rw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"H\") == \"SA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"I\") == \"SQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"J\") == \"Sg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"K\") == \"Sw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"L\") == \"TA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"M\") == \"TQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"N\") == \"Tg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"O\") == \"Tw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"P\") == \"UA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Q\") == \"UQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"R\") == \"Ug==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"S\") == \"Uw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"T\") == \"VA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"U\") == \"VQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"V\") == \"Vg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"W\") == \"Vw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"X\") == \"WA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Y\") == \"WQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Z\") == \"Wg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"[\") == \"Ww==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\\\\\") == \"XA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"]\") == \"XQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"^\") == \"Xg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"_\") == \"Xw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"`\") == \"YA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"a\") == \"YQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"b\") == \"Yg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"c\") == \"Yw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"d\") == \"ZA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"e\") == \"ZQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"f\") == \"Zg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"g\") == \"Zw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"h\") == \"aA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"i\") == \"aQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"j\") == \"ag==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"k\") == \"aw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"l\") == \"bA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"m\") == \"bQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"n\") == \"bg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"o\") == \"bw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"p\") == \"cA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"q\") == \"cQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"r\") == \"cg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"s\") == \"cw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"t\") == \"dA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"u\") == \"dQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"v\") == \"dg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"w\") == \"dw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"x\") == \"eA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"y\") == \"eQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"z\") == \"eg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"{\") == \"ew==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"|\") == \"fA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"}\") == \"fQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"~\") == \"fg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"fw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"gA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"gQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"gg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"gw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"hA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"hQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"hg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"hw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"iA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"iQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"ig==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"iw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"jA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"jQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"jg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"jw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"kA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"kQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"kg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"kw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"lA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"lQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"lg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"lw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"mA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"mQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"mg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"mw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"nA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"nQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"ng==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"\") == \"nw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\" \") == \"oA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¡\") == \"oQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¢\") == \"og==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"£\") == \"ow==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¤\") == \"pA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¥\") == \"pQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¦\") == \"pg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"§\") == \"pw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¨\") == \"qA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"©\") == \"qQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ª\") == \"qg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"«\") == \"qw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¬\") == \"rA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"­\") == \"rQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"®\") == \"rg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¯\") == \"rw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"°\") == \"sA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"±\") == \"sQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"²\") == \"sg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"³\") == \"sw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"´\") == \"tA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"µ\") == \"tQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¶\") == \"tg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"·\") == \"tw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¸\") == \"uA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¹\") == \"uQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"º\") == \"ug==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"»\") == \"uw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¼\") == \"vA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"½\") == \"vQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¾\") == \"vg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"¿\") == \"vw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"À\") == \"wA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Á\") == \"wQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Â\") == \"wg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ã\") == \"ww==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ä\") == \"xA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Å\") == \"xQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Æ\") == \"xg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ç\") == \"xw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"È\") == \"yA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"É\") == \"yQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ê\") == \"yg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ë\") == \"yw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ì\") == \"zA==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Í\") == \"zQ==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Î\") == \"zg==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ï\") == \"zw==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ð\") == \"0A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ñ\") == \"0Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ò\") == \"0g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ó\") == \"0w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ô\") == \"1A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Õ\") == \"1Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ö\") == \"1g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"×\") == \"1w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ø\") == \"2A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ù\") == \"2Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ú\") == \"2g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Û\") == \"2w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ü\") == \"3A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ý\") == \"3Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Þ\") == \"3g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ß\") == \"3w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"à\") == \"4A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"á\") == \"4Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"â\") == \"4g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ã\") == \"4w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ä\") == \"5A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"å\") == \"5Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"æ\") == \"5g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ç\") == \"5w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"è\") == \"6A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"é\") == \"6Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ê\") == \"6g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ë\") == \"6w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ì\") == \"7A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"í\") == \"7Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"î\") == \"7g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ï\") == \"7w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ð\") == \"8A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ñ\") == \"8Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ò\") == \"8g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ó\") == \"8w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ô\") == \"9A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"õ\") == \"9Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ö\") == \"9g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"÷\") == \"9w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ø\") == \"+A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ù\") == \"+Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ú\") == \"+g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"û\") == \"+w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ü\") == \"/A==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ý\") == \"/Q==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"þ\") == \"/g==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"ÿ\") == \"/w==\"": {
+    "status": "PASS"
+  },
+  "btoa(\"Ā\") must raise INVALID_CHARACTER_ERR": {
+    "status": "PASS"
+  },
+  "btoa(\"ā\") must raise INVALID_CHARACTER_ERR": {
+    "status": "PASS"
+  },
+  "btoa(\"✐\") must raise INVALID_CHARACTER_ERR": {
+    "status": "PASS"
+  },
+  "btoa(\"\\ufffe\") must raise INVALID_CHARACTER_ERR": {
+    "status": "PASS"
+  },
+  "btoa(\"\\uffff\") must raise INVALID_CHARACTER_ERR": {
+    "status": "PASS"
+  },
+  "btoa(\"𐀀\") must raise INVALID_CHARACTER_ERR": {
+    "status": "PASS"
+  },
+  "btoa(first 256 code points concatenated)": {
+    "status": "PASS"
+  },
+  "atob() setup.": {
+    "status": "FAIL"
+  }
+}

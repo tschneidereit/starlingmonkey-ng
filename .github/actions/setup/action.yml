@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
+name: Setup build environment
+description: Install system deps, Rust toolchain, WASI SDK, wasmtime, and configure cargo cache.
+
+inputs:
+  target:
+    description: Build target — "native" or "wasm32-wasip2"
+    required: true
+  cache-key-prefix:
+    description: Prefix for the cargo cache key
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential python3 m4 libclang-dev llvm
+
+    - name: Install Rust toolchain
+      shell: bash
+      run: rustup show
+
+    - name: Add wasm32-wasip2 target
+      if: inputs.target == 'wasm32-wasip2'
+      shell: bash
+      run: rustup target add wasm32-wasip2
+
+    - name: Install WASI SDK
+      if: inputs.target == 'wasm32-wasip2'
+      shell: bash
+      run: |
+        sudo mkdir -p /opt/wasi-sdk
+        curl -sSfL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+          | sudo tar xz --strip-components=1 -C /opt/wasi-sdk
+        echo "WASI_SDK_PATH=/opt/wasi-sdk" >> "$GITHUB_ENV"
+
+    - name: Install wasmtime
+      if: inputs.target == 'wasm32-wasip2'
+      shell: bash
+      run: |
+        curl -sSf https://wasmtime.dev/install.sh | bash
+        echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+    - name: Cache Cargo registry & target
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ inputs.cache-key-prefix }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-

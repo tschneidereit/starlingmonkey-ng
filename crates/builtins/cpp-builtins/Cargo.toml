@@ -1,0 +1,23 @@
+[package]
+name = "cpp-builtins"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[features]
+debugmozjs = []
+
+[dependencies]
+js.workspace = true
+mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "starling" }
+mozjs_sys = { git = "https://github.com/tschneidereit/mozjs.git", branch = "starling" }
+starling-macro.workspace = true
+
+[build-dependencies]
+cc = "1.2.56"
+
+[dev-dependencies]
+core-runtime.workspace = true
+libstarling.workspace = true

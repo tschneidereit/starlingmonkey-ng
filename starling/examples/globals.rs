@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
+
+//! Example demonstrating `#[jsglobals]` — installing functions and constants
+//! directly onto the JS global object (instead of as an ES module).
+//!
+//! This is useful for polyfills, built-in APIs like `console.log`, `atob`, etc.
+
+use std::ptr;
+
+use js::compile::evaluate_with_filename;
+use js::string as jsstring;
+use libstarling::config::RuntimeConfig;
+use libstarling::jsglobals;
+use libstarling::runtime::Runtime;
+
+// ============================================================================
+// Define globals
+// ============================================================================
+
+#[jsglobals]
+mod my_globals {
+    pub const VERSION: &str = "1.0.0";
+    pub const MAX_RETRIES: i32 = 3;
+
+    pub fn add(a: f64, b: f64) -> f64 {
+        a + b
+    }
+
+    pub fn greet(name: String) -> String {
+        format!("Hello, {name}!")
+    }
+
+    pub fn safe_divide(a: f64, b: f64) -> Result<f64, String> {
+        if b == 0.0 {
+            Err("Division by zero".to_string())
+        } else {
+            Ok(a / b)
+        }
+    }
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() {
+    let rt = Runtime::init(&RuntimeConfig::default());
+    let scope = rt.default_global();
+    let global = scope.global();
+
+    // Install globals
+    unsafe { my_globals::add_to_global(&scope, global) };
+
+    // ====================================================================
+    // Test 1: Rust-side calls still work
+    // ====================================================================
+    println!("Test 1: Rust-side calls");
+    assert_eq!(my_globals::add(2.0, 3.0), 5.0);
+    assert_eq!(my_globals::greet("World".into()), "Hello, World!");
+    assert_eq!(my_globals::safe_divide(10.0, 2.0), Ok(5.0));
+    assert!(my_globals::safe_divide(1.0, 0.0).is_err());
+    println!("  PASSED");
+
+    // ====================================================================
+    // Test 2: Call global function from JS
+    // ====================================================================
+    println!("Test 2: add(10, 20) from JS");
+    let rval = evaluate_with_filename(&scope, "add(10, 20)", "test.js", 1).expect("add() failed");
+    assert_eq!(rval.to_double(), 30.0);
+    println!("  PASSED: add(10, 20) = 30");
+
+    // ====================================================================
+    // Test 3: String function from JS
+    // ====================================================================
+    println!("Test 3: greet('SpiderMonkey') from JS");
+    let rval = evaluate_with_filename(&scope, "greet('SpiderMonkey')", "test2.js", 1)
+        .expect("greet() failed");
+    assert!(rval.is_string());
+    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
+    let result_str = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    assert_eq!(result_str, "Hello, SpiderMonkey!");
+    println!("  PASSED: greet('SpiderMonkey') = '{}'", result_str);
+
+    // ====================================================================
+    // Test 4: Constants available on global
+    // ====================================================================
+    println!("Test 4: Global constants");
+    let rval = evaluate_with_filename(&scope, "version", "test3.js", 1).expect("version failed");
+    assert!(rval.is_string());
+    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
+    let version = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    assert_eq!(version, "1.0.0");
+    println!("  PASSED: version = '{}'", version);
+
+    let rval =
+        evaluate_with_filename(&scope, "maxRetries", "test4.js", 1).expect("maxRetries failed");
+    assert!(rval.is_int32());
+    assert_eq!(rval.to_int32(), 3);
+    println!("  PASSED: maxRetries = {}", rval.to_int32());
+
+    // ====================================================================
+    // Test 5: Error-returning function
+    // ====================================================================
+    println!("Test 5: safeDivide error handling");
+    let rval = evaluate_with_filename(&scope, "safeDivide(10, 2)", "test5.js", 1)
+        .expect("safeDivide(10, 2) failed");
+    assert_eq!(rval.to_double(), 5.0);
+    println!("  PASSED: safeDivide(10, 2) = 5");
+
+    // Division by zero should throw
+    let rval = evaluate_with_filename(
+        &scope,
+        r#"
+            try { safeDivide(1, 0); "no error" }
+            catch (e) { e.message }
+        "#,
+        "test6.js",
+        1,
+    )
+    .expect("safeDivide error test failed");
+    assert!(rval.is_string());
+    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
+    let err_str = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    assert_eq!(err_str, "Division by zero");
+    println!("  PASSED: safeDivide(1, 0) throws '{}'", err_str);
+
+    println!("\nAll jsglobals tests passed!");
+}

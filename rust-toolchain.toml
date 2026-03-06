@@ -1,0 +1,16 @@
+[toolchain]
+channel = "1.91"
+
+components = [
+    "clippy",
+    # For support/crown
+    "llvm-tools",
+    # For support/crown
+    "rustc-dev",
+    # For formatting
+    "rustfmt",
+]
+targets = [
+    "wasm32-wasip2",
+]
+profile = "minimal"

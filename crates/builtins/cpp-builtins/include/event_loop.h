@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
+#ifndef JS_RUNTIME_EVENT_LOOP_H
+#define JS_RUNTIME_EVENT_LOOP_H
+
+#include "extension-api.h"
+#include "jsapi.h"
+
+namespace core {
+
+class EventLoop {
+public:
+  /**
+   * Initialize the event loop
+   */
+  static void init(JSContext *cx);
+
+  /**
+   * Check if there are any pending tasks (io requests or timers) to process.
+   */
+  static bool has_pending_async_tasks();
+
+  /**
+   * Run the event loop until all interests are complete.
+   * See run_event_loop in extension-api.h for the complete description.
+   */
+  static bool run_event_loop(api::Engine *engine, double total_compute);
+
+  static void incr_event_loop_interest();
+  static void decr_event_loop_interest();
+
+  /**
+   * Queue a new async task.
+   */
+  static void queue_async_task(const RefPtr<api::AsyncTask>& task);
+
+  /**
+   * Remove a queued async task.
+   */
+  static bool cancel_async_task(api::Engine *engine, const RefPtr<api::AsyncTask>& task);
+};
+
+} // namespace core
+
+#endif

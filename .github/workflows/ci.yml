@@ -1,0 +1,126 @@
+# SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  WASI_SDK_VERSION: "25"
+  MOZJS_FROM_SOURCE: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cargo tests: {native, wasm32-wasip2} × {debug+debugmozjs, release}
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (${{ matrix.target }}, ${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [native, wasm32-wasip2]
+        profile: [debug, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          target: ${{ matrix.target }}
+          cache-key-prefix: ${{ matrix.target }}-${{ matrix.profile }}
+
+      - name: Run tests
+        run: |
+          TARGET_FLAG=""
+          FEATURE_FLAG=""
+          RELEASE_FLAG=""
+          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
+            TARGET_FLAG="--target wasm32-wasip2"
+          fi
+          if [[ "${{ matrix.profile }}" == "debug" ]]; then
+            FEATURE_FLAG="--features debugmozjs"
+          else
+            RELEASE_FLAG="--release"
+          fi
+          cargo test --workspace $TARGET_FLAG $FEATURE_FLAG $RELEASE_FLAG
+          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
+            cargo test --workspace --examples $TARGET_FLAG $FEATURE_FLAG $RELEASE_FLAG
+          fi
+
+  # ---------------------------------------------------------------------------
+  # WPT suite: {native, wasm32-wasip2}
+  # ---------------------------------------------------------------------------
+  wpt:
+    name: WPT (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [native, wasm32-wasip2]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          target: ${{ matrix.target }}
+          cache-key-prefix: wpt-${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Build
+        run: |
+          TARGET_FLAG=""
+          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
+            TARGET_FLAG="--target wasm32-wasip2"
+          fi
+          cargo build --features debugmozjs $TARGET_FLAG
+
+      - name: Clone WPT suite
+        run: ./scripts/clone-wpt.sh
+
+      - name: Run WPT tests
+        run: |
+          WPT_TARGET=""
+          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
+            WPT_TARGET="--target=wasm"
+          fi
+          node tests/wpt-harness/run-wpt.mjs $WPT_TARGET
+
+  gc_rooting:
+    name: GC Rooting Checks
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          target: native
+          cache-key-prefix: gc-rooting-native
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Crown static analysis
+        run: |
+          ./scripts/check-crown.sh --workspace --examples
+
+      - name: GC Zeal tests
+        run: |
+          ./scripts/test-gc-zeal.sh --zeal full --examples --workspace

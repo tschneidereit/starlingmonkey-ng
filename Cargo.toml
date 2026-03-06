@@ -1,0 +1,59 @@
+[workspace.package]
+version = "0.3.0"
+repository = "https://github.com/bytecodealliance/starlingmonkey"
+license = "Apache-2.0 WITH LLVM-exception"
+authors = ["The StarlingMonkey project contributors"]
+edition = "2021"
+
+[workspace]
+members = [
+    "starling",
+    "crates/builtins/*",
+]
+default-members = ["starling"]
+exclude = ["crown"]
+
+resolver = "2"
+
+[workspace.dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
+core-runtime = { path = "crates/core-runtime" }
+js = { path = "crates/js" }
+libstarling = { path = "crates/libstarling" }
+oxc_allocator = "0.116.0"
+oxc_ast = "0.116.0"
+oxc_parser = "0.116.0"
+oxc_resolver = "11.19.1"
+oxc_span = "0.116.0"
+starling-macro = { path = "crates/starling-macro" }
+wasip3 = { version = "0.4", features = ["http-compat"] }
+# wit-bindgen = { version = "0.51", features = ["async", "async-spawn"] }
+
+# bindgen = { version = "0.72", default-features = false, features = [
+#     "runtime",
+#     "prettyplease",
+#     "experimental",
+# ] }
+
+# Builtins
+simple-http = { path = "crates/builtins/simple-http" }
+web-globals = { path = "crates/builtins/web-globals" }
+cpp-builtins = { path = "crates/builtins/cpp-builtins" }
+
+
+[profile.release]
+lto = "thin"
+panic = 'abort'
+strip = "symbols"
+
+[profile.dev]
+lto = false
+
+# [profile.dev.build-override]
+# opt-level = 3
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(crown)'] }
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"

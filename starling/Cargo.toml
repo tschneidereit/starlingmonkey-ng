@@ -1,0 +1,27 @@
+[package]
+name = "starlingmonkey"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "starling"
+path = "src/main.rs"
+
+[features]
+debugmozjs = ['libstarling/debugmozjs']
+profilemozjs = ['js/profilemozjs']
+jitspew = ['js/jitspew']
+intl = ['js/intl']
+
+[dependencies]
+clap.workspace = true
+core-runtime.workspace = true
+js.workspace = true
+libstarling.workspace = true
+wasip3.workspace = true
+
+[lints]
+workspace = true

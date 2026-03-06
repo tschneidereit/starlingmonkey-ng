@@ -1,0 +1,8 @@
+[target.wasm32-wasip1]
+runner = 'wasmtime run --dir=.::/cwd --dir=. --dir=/tmp -Sinherit-env=y,inherit-network=y,http=y,tcp=y,udp=y,p3=y -Wcomponent-model-async=y'
+
+[target.wasm32-wasip2]
+runner = 'wasmtime run --dir=.::/cwd --dir=. --dir=/tmp -Sinherit-env=y,inherit-network=y,http=y,tcp=y,udp=y,p3=y -Wcomponent-model-async=y'
+
+[target.wasm32-wasip3]
+runner = 'wasmtime run --dir=.::/cwd --dir=. --dir=/tmp -Sinherit-env=y,inherit-network=y,http=y,tcp=y,udp=y,p3=y -Wcomponent-model-async=y'

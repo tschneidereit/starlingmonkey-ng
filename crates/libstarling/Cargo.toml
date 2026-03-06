@@ -1,0 +1,20 @@
+[package]
+name = "libstarling"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[features]
+debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs"]
+
+[dependencies]
+core-runtime.workspace = true
+js.workspace = true
+simple-http.workspace = true
+web-globals.workspace = true
+cpp-builtins.workspace = true
+
+[lints]
+workspace = true

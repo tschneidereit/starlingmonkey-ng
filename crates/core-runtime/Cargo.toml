@@ -1,0 +1,24 @@
+[package]
+name = "core-runtime"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[features]
+debugmozjs = ['js/debugmozjs']
+jitspew = ['js/jitspew']
+profilemozjs = ['js/profilemozjs']
+
+[dependencies]
+clap.workspace = true
+# cpp-support.workspace = true
+js.workspace = true
+oxc_resolver.workspace = true
+shlex = "1.3.0"
+tempfile = "3"
+wasip3.workspace = true
+
+[lints]
+workspace = true

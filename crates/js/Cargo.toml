@@ -1,0 +1,22 @@
+[package]
+name = "js"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[features]
+crown = ['mozjs/crown']
+debugmozjs = ['mozjs/debugmozjs']
+jitspew = ['mozjs/jitspew']
+profilemozjs = ['mozjs/profilemozjs']
+intl = ['mozjs/intl']
+
+[lints]
+workspace = true
+
+[dependencies]
+mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "starling", default-features = false, features = ["jit", "libz-sys"] }
+mozjs_sys = { git = "https://github.com/tschneidereit/mozjs.git", branch = "starling" }
+starling-macro.workspace = true

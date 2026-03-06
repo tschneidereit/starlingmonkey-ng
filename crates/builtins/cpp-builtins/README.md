@@ -1,0 +1,1 @@
+This library contains a compatibility layer for StarlingMonkey's legacy C++ builtins in terms of the new runtime implementation in Rust, as well as said builtins.

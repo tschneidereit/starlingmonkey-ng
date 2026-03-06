@@ -1,0 +1,15 @@
+[package]
+name = "simple-http"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+core-runtime.workspace = true
+js.workspace = true
+wasip3.workspace = true
+
+[lints]
+workspace = true

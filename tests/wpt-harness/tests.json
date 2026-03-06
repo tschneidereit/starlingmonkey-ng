@@ -1,0 +1,14 @@
+[
+  "console/console-is-a-namespace.any.js",
+  "console/console-label-conversion.any.js",
+  "SKIP console/console-log-large-array.any.js",
+  "console/console-log-symbol.any.js",
+  "console/console-namespace-object-class-string.any.js",
+  "console/console-tests-historical.any.js",
+  "console/idlharness.any.js",
+  "html/webappapis/atob/base64.any.js",
+  "webidl/ecmascript-binding/es-exceptions/DOMException-constants.any.js",
+  "webidl/ecmascript-binding/es-exceptions/DOMException-constructor-and-prototype.any.js",
+  "webidl/ecmascript-binding/es-exceptions/DOMException-constructor-behavior.any.js",
+  "webidl/ecmascript-binding/es-exceptions/DOMException-custom-bindings.any.js"
+]
