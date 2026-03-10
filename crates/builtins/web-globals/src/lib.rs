@@ -16,7 +16,7 @@ pub mod base64;
 pub mod dom_exception;
 pub mod wpt_support;
 
-pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::object::Object<'_>) {
+pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
     unsafe {
         // Note: the Rust console builtin isn't currently used: we use the C++ version for now.
         // console::console_ns::add_to_global(scope, global);

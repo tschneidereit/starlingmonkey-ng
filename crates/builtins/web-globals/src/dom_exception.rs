@@ -13,6 +13,7 @@
 
 use std::ptr::NonNull;
 
+use js::error::ThrowException;
 use js::gc::scope::Scope;
 use js::native::{ExceptionStackBehavior, HandleValueArray};
 
@@ -295,7 +296,7 @@ impl std::fmt::Display for DOMExceptionError {
 
 impl std::error::Error for DOMExceptionError {}
 
-impl core_runtime::class::ThrowException for DOMExceptionError {
+impl ThrowException for DOMExceptionError {
     unsafe fn throw(self, scope: &Scope<'_>) {
         throw_dom_exception(scope, self.name, &self.message);
     }

@@ -62,7 +62,7 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use super::pool::{ScopeAlloc, SlotTag};
-use crate::object::Object;
+use crate::Object;
 use mozjs::context::JSContext;
 use mozjs::gc::Handle;
 use mozjs::jsapi::JSContext as RawJSContext;

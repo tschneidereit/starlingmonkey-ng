@@ -2,19 +2,18 @@
 
 //! Object creation, property access, prototype chain, and object utilities.
 //!
-//! The [`Object`] newtype wraps a scope-rooted `Handle<'s, *mut JSObject>`,
-//! making it safe by construction — no manual `rooted!` needed. All other
-//! builtins (Array, Promise, etc.) implement `Deref` to `Object`, so these
-//! methods are available on every builtin type.
+//! The [`Object`] marker type implements [`JsType`](crate::gc::handle::JsType),
+//! enabling [`Object<'s>`](crate::Object) as the scope-rooted object handle
+//! type. All other builtins (`Array<'s>`, `Promise<'s>`, etc.) deref to
+//! `Object<'s>`, so property access methods are available on every builtin
+//! type.
 //!
 //! # Property Access
 //!
 //! Properties can be accessed by name (`&CStr`) or by index (`u32`):
 //!
 //! ```ignore
-//! use crate::object::Object;
-//!
-//! let obj = Object::new(&scope, None)?;
+//! let obj = Object::new_plain(&scope)?;
 //! obj.set_property(&scope, c"foo", val)?;
 //! let val = obj.get_property(&scope, c"foo")?;
 //! ```
@@ -24,6 +23,7 @@ use std::os::raw::c_uint;
 use std::ptr::NonNull;
 
 use crate::error::ConversionError;
+use crate::gc::handle::{JsType, Stack};
 use crate::gc::scope::Scope;
 use crate::value;
 use mozjs::conversions::ToJSValConvertible;
@@ -32,8 +32,7 @@ use mozjs::gc::{
     MutableHandleValue,
 };
 use mozjs::jsapi::{
-    HandleObject as RawHandleObject, JSClass, JSFunctionSpec, JSObject, JSPropertySpec,
-    ObjectOpResult, PropertyDescriptor, Value,
+    JSClass, JSFunctionSpec, JSObject, JSPropertySpec, ObjectOpResult, PropertyDescriptor, Value,
 };
 use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
@@ -41,26 +40,25 @@ use mozjs::rust::wrappers2;
 
 use super::error::JSError;
 
-/// A JavaScript object, rooted in a scope's [`HandlePool`](crate::gc::pool::HandlePool).
+/// Marker type for JavaScript `Object` — the base type for all JS objects.
 ///
-/// `Object<'s>` is `Copy` and wraps a `Handle<'s, *mut JSObject>` — the
-/// lifetime `'s` ties it to the scope that rooted it. Construction via
-/// [`Object::new`] automatically roots in the pool, so no `rooted!` macro
-/// is needed:
+/// [`Object<'s>`](crate::Object) is the scope-rooted handle type:
 ///
 /// ```ignore
-/// let obj = Object::new(&scope, None)?;
+/// let obj = Object::new_plain(&scope)?;
 /// obj.set_property(&scope, c"x", val)?;
 /// ```
 ///
-/// All builtin types ([`Array`](super::array::Array),
-/// [`Promise`](super::promise::Promise), etc.) implement `Deref` to `Object`,
-/// so all property access methods are available on every builtin.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug)]
-pub struct Object<'s>(pub(crate) Handle<'s, *mut JSObject>);
+/// All builtin types ([`Array<'s>`](crate::Array),
+/// [`Promise<'s>`](crate::Promise), etc.) deref to `Object<'s>`, so all
+/// property access methods are available on every builtin.
+pub struct Object;
 
-impl<'s> Object<'s> {
+impl JsType for Object {
+    const JS_NAME: &'static str = "Object";
+}
+
+impl<'s> Stack<'s, Object> {
     // ---------------------------------------------------------------------------
     // Object creation
     // ---------------------------------------------------------------------------
@@ -76,7 +74,7 @@ impl<'s> Object<'s> {
             }
         };
         NonNull::new(obj)
-            .map(|nn| Object(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
@@ -84,7 +82,7 @@ impl<'s> Object<'s> {
     pub fn new_plain(scope: &'s Scope<'_>) -> Result<Self, JSError> {
         let obj = unsafe { wrappers2::JS_NewPlainObject(scope.cx_mut()) };
         NonNull::new(obj)
-            .map(|nn| Object(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
@@ -92,12 +90,12 @@ impl<'s> Object<'s> {
     pub fn new_with_proto(
         scope: &'s Scope<'_>,
         clasp: &'static JSClass,
-        proto: Object<'s>,
+        proto: Stack<'s, Object>,
     ) -> Result<Self, JSError> {
         let obj =
             unsafe { wrappers2::JS_NewObjectWithGivenProto(scope.cx_mut(), clasp, proto.handle()) };
         NonNull::new(obj)
-            .map(|nn| Object(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
@@ -109,7 +107,7 @@ impl<'s> Object<'s> {
     ) -> Result<Self, JSError> {
         let obj = unsafe { wrappers2::JS_NewObjectForConstructor(scope.cx_mut(), clasp, args) };
         NonNull::new(obj)
-            .map(|nn| Object(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
@@ -117,46 +115,47 @@ impl<'s> Object<'s> {
     // Pointer access
     // ---------------------------------------------------------------------------
 
-    /// Get the rooted handle to the underlying `JSObject`.
-    pub fn handle(&'_ self) -> HandleObject<'_> {
-        self.0
-    }
-
-    /// Get the lifetime-erased handle to the underlying `JSObject`.
-    pub(crate) fn raw_handle(&self) -> RawHandleObject {
-        self.handle().into()
-    }
-
     /// Get a raw `NonNull` pointer to the underlying `JSObject`.
     pub fn as_non_null(self) -> Option<NonNull<JSObject>> {
-        NonNull::new(self.0.get())
-    }
-
-    /// Get the raw `*mut JSObject` pointer.
-    pub fn as_raw(self) -> *mut JSObject {
-        self.0.get()
+        NonNull::new(self.handle().get())
     }
 
     /// Wrap a raw `*mut JSObject` pointer, rooting it in the scope's pool.
     ///
     /// Returns `None` if `ptr` is null.
-    pub fn from_raw(scope: &'s Scope<'_>, ptr: *mut JSObject) -> Option<Self> {
-        NonNull::new(ptr).map(|nn| Object(scope.root_object(nn)))
+    pub fn from_raw_obj(scope: &'s Scope<'_>, ptr: *mut JSObject) -> Option<Self> {
+        NonNull::new(ptr).map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
     }
 
+    /// Create from a JS value. Returns an error if the value is not an object.
     pub fn from_value(scope: &'s Scope<'_>, val: Value) -> Result<Self, ConversionError> {
         if val.is_object() {
-            Ok(Self::from_raw(scope, val.to_object()).unwrap())
+            Ok(Self::from_raw_obj(scope, val.to_object()).unwrap())
         } else {
             Err(ConversionError("Value isn't an object"))
         }
     }
 
-    /// Wrap an existing rooted handle in an `Object`.
+    /// Wrap an existing rooted handle.
     ///
     /// This is useful for interop with code that already has rooted handles.
     pub fn from_handle(handle: Handle<'s, *mut JSObject>) -> Self {
-        Object(handle)
+        // SAFETY: Handle is already rooted and valid.
+        unsafe { Self::from_handle_unchecked(handle) }
+    }
+
+    /// Type-checked cast to a [`StackType`](crate::class::StackType) (e.g. `Dog<'s>`).
+    ///
+    /// Returns `Ok(T)` if this object's class tag matches `T` (or a subclass),
+    /// `Err(CastError)` otherwise.
+    ///
+    /// ```ignore
+    /// let animal: Animal<'s> = [...]
+    /// let dog: Dog<'s> = animal.cast::<Dog>()?;
+    /// ```
+    pub fn cast<T: crate::class::StackType<'s>>(self) -> Result<T, crate::class::CastError> {
+        crate::gc::handle::Stack::<T::Inner>::from_object(self)
+            .map(|stack| unsafe { T::from_handle_unchecked(stack.handle()) })
     }
 
     // -----------------------------------------------------------------------
@@ -166,19 +165,19 @@ impl<'s> Object<'s> {
     /// Get a property by name.
     #[inline]
     pub fn get_property(&self, scope: &Scope<'_>, name: &CStr) -> Result<Value, JSError> {
-        get_property(scope, self.0, name)
+        get_property(scope, self.handle(), name)
     }
 
     /// Get a property by property key (jsid).
     #[inline]
     pub fn get_property_by_id(&self, scope: &Scope<'_>, id: HandleId) -> Result<Value, JSError> {
-        get_property_by_id(scope, self.0, id)
+        get_property_by_id(scope, self.handle(), id)
     }
 
     /// Get an array element by index.
     #[inline]
     pub fn get_element(&self, scope: &Scope<'_>, index: u32) -> Result<Value, JSError> {
-        get_element(scope, self.0, index)
+        get_element(scope, self.handle(), index)
     }
 
     /// Set a property by name.
@@ -189,7 +188,7 @@ impl<'s> Object<'s> {
         name: &CStr,
         value: HandleValue,
     ) -> Result<(), JSError> {
-        set_property(scope, self.0, name, value)
+        set_property(scope, self.handle(), name, value)
     }
 
     /// Set a property by property key (jsid).
@@ -200,7 +199,7 @@ impl<'s> Object<'s> {
         id: HandleId,
         value: HandleValue,
     ) -> Result<(), JSError> {
-        set_property_by_id(scope, self.0, id, value)
+        set_property_by_id(scope, self.handle(), id, value)
     }
 
     /// Set an array element by index.
@@ -211,43 +210,43 @@ impl<'s> Object<'s> {
         index: u32,
         value: HandleValue,
     ) -> Result<(), JSError> {
-        set_element(scope, self.0, index, value)
+        set_element(scope, self.handle(), index, value)
     }
 
     /// Check whether this object has a property with the given name.
     #[inline]
     pub fn has_property(&self, scope: &Scope<'_>, name: &CStr) -> Result<bool, JSError> {
-        has_property(scope, self.0, name)
+        has_property(scope, self.handle(), name)
     }
 
     /// Check whether this object has a property with the given id.
     #[inline]
     pub fn has_property_by_id(&self, scope: &Scope<'_>, id: HandleId) -> Result<bool, JSError> {
-        has_property_by_id(scope, self.0, id)
+        has_property_by_id(scope, self.handle(), id)
     }
 
     /// Check whether this object has an element at the given index.
     #[inline]
     pub fn has_element(&self, scope: &Scope<'_>, index: u32) -> Result<bool, JSError> {
-        has_element(scope, self.0, index)
+        has_element(scope, self.handle(), index)
     }
 
     /// Check whether this object has an own property with the given name.
     #[inline]
     pub fn has_own_property(&self, scope: &Scope<'_>, name: &CStr) -> Result<bool, JSError> {
-        has_own_property(scope, self.0, name)
+        has_own_property(scope, self.handle(), name)
     }
 
     /// Check whether this object has an own property with the given id.
     #[inline]
     pub fn has_own_property_by_id(&self, scope: &Scope<'_>, id: HandleId) -> Result<bool, JSError> {
-        has_own_property_by_id(scope, self.0, id)
+        has_own_property_by_id(scope, self.handle(), id)
     }
 
     /// Delete a property by name.
     #[inline]
     pub fn delete_property(&self, scope: &Scope<'_>, name: &CStr) -> Result<(), JSError> {
-        delete_property(scope, self.0, name)
+        delete_property(scope, self.handle(), name)
     }
 
     /// Delete a property by name, returning the operation result.
@@ -258,13 +257,13 @@ impl<'s> Object<'s> {
         name: &CStr,
         result: &mut ObjectOpResult,
     ) -> Result<(), JSError> {
-        delete_property_with_result(scope, self.0, name, result)
+        delete_property_with_result(scope, self.handle(), name, result)
     }
 
     /// Delete an element by index.
     #[inline]
     pub fn delete_element(&self, scope: &Scope<'_>, index: u32) -> Result<(), JSError> {
-        delete_element(scope, self.0, index)
+        delete_element(scope, self.handle(), index)
     }
 
     // -----------------------------------------------------------------------
@@ -280,7 +279,7 @@ impl<'s> Object<'s> {
         value: &V,
         attrs: c_uint,
     ) -> Result<(), JSError> {
-        define_property(scope, self.0, name, value, attrs)
+        define_property(scope, self.handle(), name, value, attrs)
     }
 
     /// Define a property using a property descriptor.
@@ -291,7 +290,7 @@ impl<'s> Object<'s> {
         id: HandleId,
         desc: Handle<'_, PropertyDescriptor>,
     ) -> Result<(), JSError> {
-        define_property_by_id(scope, self.0, id, desc)
+        define_property_by_id(scope, self.handle(), id, desc)
     }
 
     // -----------------------------------------------------------------------
@@ -300,25 +299,27 @@ impl<'s> Object<'s> {
 
     /// Get the prototype of this object.
     #[inline]
-    pub fn get_prototype(&self, scope: &'s Scope<'_>) -> Result<Object<'s>, JSError> {
+    pub fn get_prototype(&self, scope: &'s Scope<'_>) -> Result<Stack<'s, Object>, JSError> {
         rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut result: *mut JSObject = std::ptr::null_mut());
-        let ok = unsafe { wrappers2::JS_GetPrototype(scope.cx_mut(), self.0, result.handle_mut()) };
+        let ok = unsafe {
+            wrappers2::JS_GetPrototype(scope.cx_mut(), self.handle(), result.handle_mut())
+        };
         JSError::check(ok)?;
         NonNull::new(result.get())
-            .map(|nn| Object(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
     /// Set the prototype of this object.
     #[inline]
     pub fn set_prototype(&self, scope: &Scope<'_>, proto: HandleObject) -> Result<(), JSError> {
-        set_prototype(scope, self.0, proto)
+        set_prototype(scope, self.handle(), proto)
     }
 
     /// Check whether this object is extensible.
     #[inline]
     pub fn is_extensible(&self, scope: &Scope<'_>) -> Result<bool, JSError> {
-        is_extensible(scope, self.0)
+        is_extensible(scope, self.handle())
     }
 
     /// Prevent extensions on this object.
@@ -328,20 +329,20 @@ impl<'s> Object<'s> {
         scope: &Scope<'_>,
         result: &mut ObjectOpResult,
     ) -> Result<(), JSError> {
-        prevent_extensions(scope, self.0, result)
+        prevent_extensions(scope, self.handle(), result)
     }
 
     /// Freeze this object (make all properties non-configurable and
     /// non-writable).
     #[inline]
     pub fn freeze(&self, scope: &Scope<'_>) -> Result<(), JSError> {
-        freeze(scope, self.0)
+        freeze(scope, self.handle())
     }
 
     /// Deep-freeze this object and all objects reachable from it.
     #[inline]
     pub fn deep_freeze(&self, scope: &Scope<'_>) -> Result<(), JSError> {
-        deep_freeze(scope, self.0)
+        deep_freeze(scope, self.handle())
     }
 }
 
@@ -824,10 +825,5 @@ pub unsafe fn set_reserved_slot(obj: *mut JSObject, slot: u32, val: &Value) {
     mozjs::jsapi::JS_SetReservedSlot(obj, slot, val);
 }
 
-impl<'s> std::ops::Deref for Object<'s> {
-    type Target = Handle<'s, *mut JSObject>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+// Object<'s> is the base type; no further Deref needed.
+// Other builtins (Array, Promise, etc.) Deref to Object<'s>.

@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
-//! Garbage collection control and configuration.
+//! Garbage collection control, configuration, and rooted handle types.
 //!
 //! This module provides safe wrappers for controlling SpiderMonkey's garbage
 //! collector, including triggering collections, configuring GC parameters,
 //! and managing incremental GC.
+//!
+//! The [`handle`] submodule defines [`Stack`](handle::Stack) and
+//! [`Heap`](handle::Heap) — the typed wrappers for scope-rooted and
+//! heap-traced JS object references.
 
+pub mod handle;
 pub mod pool;
 pub mod scope;
 

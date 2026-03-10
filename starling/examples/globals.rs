@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
 //! Example demonstrating `#[jsglobals]` — installing functions and constants
-//! directly onto the JS global object (instead of as an ES module).
+//! directly onto the JS global object.
 //!
-//! This is useful for polyfills, built-in APIs like `console.log`, `atob`, etc.
+//! This is useful for APIs like `atob`, `self`, etc.
 
 use std::ptr;
 

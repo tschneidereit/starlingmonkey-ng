@@ -10,17 +10,17 @@ use std::ptr::NonNull;
 use core_runtime::config::RuntimeConfig;
 use core_runtime::runtime::Runtime;
 
-use js::array::Array;
 use js::builtins::{Boolean, Double, Int32, Null, StringPrimitive, SymbolPrimitive, Undefined};
 use js::builtins::{Is, IsPrimitive, To};
-use js::collections::map::Map;
-use js::collections::set::Set;
-use js::date::Date;
 use js::error::{CapturedError, JSError};
-use js::object::Object;
-use js::promise::Promise;
 use js::rooted;
 use js::value::{self, IntoJSVal, TryFromJSVal};
+use js::Array;
+use js::Date;
+use js::Map;
+use js::Object;
+use js::Promise;
+use js::Set;
 
 // --- Pure tests (no engine needed) ---
 
@@ -234,7 +234,7 @@ fn test_js_api_with_runtime() {
     // --- Date builtins ---
     {
         let rval = js::compile::evaluate(&scope, "new Date(2024, 0, 15)").unwrap();
-        let date_obj = Object::from_raw(&scope, rval.to_object()).unwrap();
+        let date_obj = Object::from_raw_obj(&scope, rval.to_object()).unwrap();
         let js_date: Date<'_> = date_obj.to(&scope).unwrap();
         assert!(js_date.is_valid(&scope).unwrap());
     }
@@ -243,7 +243,7 @@ fn test_js_api_with_runtime() {
     {
         let rval = js::compile::evaluate(&scope, "new Promise(function(resolve) { resolve(42) })")
             .unwrap();
-        let promise_obj = Object::from_raw(&scope, rval.to_object()).unwrap();
+        let promise_obj = Object::from_raw_obj(&scope, rval.to_object()).unwrap();
         let js_promise: Promise<'_> = promise_obj.to(&scope).unwrap();
         let _id = js_promise.id();
     }

@@ -38,7 +38,7 @@ use std::ptr;
 use std::ptr::NonNull;
 
 use crate::gc::scope::Scope;
-use crate::object::Object;
+use crate::Object;
 use mozjs::gc::{Handle, HandleFunction, HandleObject, HandleValue};
 use mozjs::jsapi::{
     GCContext, HandleValueArray, JSClass, JSClassOps, JSFunction, JSNative, JSObject, Value,
@@ -171,7 +171,7 @@ pub fn construct<'s>(
     // SAFETY: Scope guarantees a valid context with an entered realm.
     let ok = unsafe { wrappers2::Construct1(scope.cx_mut(), fun, args, result.handle_mut()) };
     JSError::check(ok)?;
-    Object::from_raw(scope, result.get()).ok_or(JSError)
+    Object::from_raw_obj(scope, result.get()).ok_or(JSError)
 }
 
 /// Invoke the `new` operator on a constructor with an explicit `new.target`.
@@ -186,7 +186,7 @@ pub fn construct_with_new_target<'s>(
     let ok =
         unsafe { wrappers2::Construct(scope.cx_mut(), fun, new_target, args, result.handle_mut()) };
     JSError::check(ok)?;
-    Object::from_raw(scope, result.get()).ok_or(JSError)
+    Object::from_raw_obj(scope, result.get()).ok_or(JSError)
 }
 
 // ---------------------------------------------------------------------------

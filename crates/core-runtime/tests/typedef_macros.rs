@@ -5,7 +5,6 @@
 //! Tests that need a JS runtime are grouped in a single test because
 //! `JSEngine` can only be initialized once per process.
 
-
 /// Tests for `#[jsclass(js_proto = "Error")]` — inheriting from a JS built-in prototype.
 mod js_proto_tests {
     use core_runtime::jsclass;
@@ -172,8 +171,8 @@ mod constant_tests {
 /// constants on both constructor AND prototype.
 mod webidl_interface_tests {
     use core_runtime::jsmethods;
-    use core_runtime::webidl_interface;
     use core_runtime::test_util::eval_with_setup;
+    use core_runtime::webidl_interface;
 
     /// A WebIDL-style interface with constants and methods.
     #[webidl_interface]

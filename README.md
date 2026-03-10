@@ -157,9 +157,9 @@ the type to be used from JS and Rust while ensuring proper GC rooting:
 
 | Generated type | Purpose |
 |----------------|---------|
-| `__CounterInner` | Inner data struct implementing `ClassDef`. |
-| `Counter<'s>` | Stack newtype — use within a GC scope. |
-| `CounterRef` | Heap ref — store inside `#[derive(Traceable)]` structs. |
+| `CounterImpl` | Inner data struct implementing `ClassDef` (`#[doc(hidden)]`). |
+| `Counter<'s>` | Stack newtype wrapping `Stack<'s, CounterImpl>` — use within a GC scope. |
+| `CounterRef` | Heap ref wrapping `Heap<CounterImpl>` — store inside `#[derive(Traceable)]` structs, such as other builtins. |
 
 **`#[jsclass]` options:**
 
@@ -373,7 +373,7 @@ struct Shape { color: String }
 
 #[jsclass(extends = Shape)]
 struct Circle {
-    parent: __ShapeInner,      // first field must be the parent inner type
+    parent: Shape,      // first field must be the parent type
     radius: f64,
 }
 
@@ -381,7 +381,7 @@ struct Circle {
 impl Circle {
     #[constructor]
     fn new(color: String, radius: f64) -> Self {
-        Self { parent: __ShapeInner::new(color), radius }
+        Self { parent: Shape::init(color), radius }
     }
 
     #[method]
@@ -394,17 +394,19 @@ Upcast and downcast from Rust:
 ```rust
 let circle: Circle<'s> = /* ... */;
 let shape: Shape<'s> = circle.upcast();             // always succeeds
-let back: Option<Circle<'s>> = shape.cast::<Circle<'_>>();  // type-checked
+let back: Result<Circle<'s>, _> = shape.cast::<Circle<'_>>();  // type-checked
 ```
 
 ---
 
 ## Promise / Async
 
+**NOTE**: This area under heavy construction!
+
 Return `JSPromise` from any method to create a JS `Promise`:
 
 ```rust
-use libstarling::class::JSPromise;
+use libstarling::js::JSPromise;
 
 #[jsmethods]
 impl Fetcher {
@@ -544,7 +546,6 @@ crates/
     src/
       lib.rs            # run() entry point
       runtime.rs        # Engine singleton, Runtime struct, GC lifecycle
-      class.rs          # ClassDef trait, HeapRef, StackNewtype, ClassRegistry
       module.rs         # NativeModule trait, file resolver, resolve hook
       config.rs         # RuntimeConfig (clap CLI parsing)
       event_loop.rs     # Task-based event loop (timers, promises)
@@ -564,8 +565,8 @@ tests/wpt-harness/      # WPT runner and expectation files
 StarlingMonkey provides safe abstractions that ensure GC references are
 properly rooted on both the stack and the heap:
 
-- *Stack* — `Foo<'s>` (a `StackNewtype`) with lifetime tied to the GC scope.
-- *Heap* — `FooRef` (a `HeapRef<__FooInner>`) inside a `Trace`-implementing struct.
+- *Stack* — `Foo<'s>` wrapping `Stack<'s, FooImpl>` with lifetime tied to the GC scope.
+- *Heap* — `Heap<FooImpl>` inside a `Trace`-implementing struct for persistent references.
 
 These make proper rooting the default and much easier to get right. The
 GC rooting linter will additionally catch almost all violations of GC rooting.

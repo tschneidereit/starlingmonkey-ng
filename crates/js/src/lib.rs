@@ -166,10 +166,11 @@ pub mod native {
     pub use mozjs::jsapi::Handle as RawHandle;
 }
 
-/// Class definition types and constants.
+/// Raw class definition types and constants from SpiderMonkey.
 ///
-/// Used by code that defines custom `JSClass` structures for backing
-/// Rust types as JavaScript objects.
+/// These are primarily used by generated proc macro code (`#[jsclass]`,
+/// `#[jsmethods]`, etc.) and should rarely be referenced directly.
+/// Prefer the higher-level abstractions in [`class`] for hand-written code.
 pub mod class_spec {
     pub use mozjs::jsapi::{
         JSClass, JSClassOps, JSFunctionSpec, JSNativeWrapper, JSPropertySpec,
@@ -214,9 +215,7 @@ pub mod module_raw {
         CompileModule1, GetModuleRequestSpecifier, JSRuntime, SetModulePrivate,
     };
     pub use mozjs::rust::{
-        evaluate_script, transform_str_to_source_text,
-        wrappers2::CompileModule1 as CompileModule1Wrapper, wrappers2::GetModuleEnvironment,
-        wrappers2::ModuleEvaluate, wrappers2::ModuleLink, CompileOptionsWrapper,
+        transform_str_to_source_text, wrappers2::GetModuleEnvironment, CompileOptionsWrapper,
     };
 }
 
@@ -227,3 +226,36 @@ pub mod module_raw {
 pub use mozjs::rooted;
 
 pub use macros::{allow_unrooted, allow_unrooted_interior, must_root};
+
+use crate::gc::handle::Stack;
+
+// ---------------------------------------------------------------------------
+// Type aliases — scope-rooted handles for builtin JS types
+// ---------------------------------------------------------------------------
+
+/// A scope-rooted handle to a JavaScript object.
+///
+/// This is the primary type for interacting with JS objects.
+/// All builtin handle types (`Array<'s>`, `Promise<'s>`, etc.) deref to this.
+pub type Object<'s> = Stack<'s, object::Object>;
+
+/// A scope-rooted handle to a JavaScript `Array` object.
+pub type Array<'s> = Stack<'s, array::Array>;
+
+/// A scope-rooted handle to a JavaScript `Promise` object.
+pub type Promise<'s> = Stack<'s, promise::Promise>;
+
+/// A scope-rooted handle to a JavaScript `Date` object.
+pub type Date<'s> = Stack<'s, date::Date>;
+
+/// A scope-rooted handle to a JavaScript `RegExp` object.
+pub type RegExp<'s> = Stack<'s, regexp::RegExp>;
+
+/// A scope-rooted handle to a JavaScript `Map` object.
+pub type Map<'s> = Stack<'s, collections::map::Map>;
+
+/// A scope-rooted handle to a JavaScript `Set` object.
+pub type Set<'s> = Stack<'s, collections::set::Set>;
+
+/// A scope-rooted handle to a JavaScript `WeakMap` object.
+pub type WeakMap<'s> = Stack<'s, collections::weak_map::WeakMap>;

@@ -16,6 +16,7 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
+use js::error::throw_error;
 use js::heap::{Heap, RootedTraceableBox, Trace};
 use js::native::{JSObject, JSTracer};
 
@@ -182,7 +183,7 @@ use js::gc::scope::RootScope;
 ///
 /// - `scope` must have an active realm.
 /// - `global` must be the realm's global object.
-pub unsafe fn install_timer_globals(scope: &Scope<'_>, global: js::object::Object<'_>) {
+pub unsafe fn install_timer_globals(scope: &Scope<'_>, global: js::Object<'_>) {
     let set_timeout = c"setTimeout";
     let set_interval = c"setInterval";
     let clear_timeout = c"clearTimeout";
@@ -261,7 +262,7 @@ unsafe fn queue_timer_from_js(
 
     // Argument 0: callback (required)
     if argc == 0 || !args.get(0).is_object() {
-        crate::class::throw_error(
+        throw_error(
             &scope,
             "setTimeout/setInterval requires a function argument",
         );
@@ -308,7 +309,7 @@ unsafe fn queue_timer_from_js(
             true
         }
         None => {
-            crate::class::throw_error(&scope, "No active event loop");
+            throw_error(&scope, "No active event loop");
             false
         }
     }

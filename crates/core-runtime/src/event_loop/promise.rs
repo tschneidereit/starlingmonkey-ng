@@ -16,12 +16,12 @@ use std::ffi::CString;
 
 use js::heap::{Heap, RootedTraceableBox, Trace};
 use js::native::{JSObject, JSTracer};
-use js::promise::Promise;
 use js::rooted;
 use js::value;
+use js::Promise;
 
-use crate::class::PromiseOutcome;
 use js::gc::scope::Scope;
+use js::promise::PromiseOutcome;
 
 use super::Task;
 
@@ -68,7 +68,8 @@ impl Task for PromiseTask {
         }
 
         unsafe {
-            let promise = Promise::from_handle(promise_handle);
+            // SAFETY: self.promise stores a known Promise object.
+            let promise = Promise::from_handle_unchecked(promise_handle);
             match self.outcome {
                 PromiseOutcome::Resolve(set_value) => {
                     rooted!(in(scope.raw_cx_no_gc()) let mut val = value::undefined());

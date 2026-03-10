@@ -23,6 +23,7 @@
 //! }
 //! ```
 
+use crate::gc::handle::{JsType, Stack};
 use crate::gc::scope::Scope;
 use mozjs::gc::{HandleObject, HandleValue};
 use mozjs::jsapi::Value;
@@ -41,6 +42,13 @@ pub trait Is {
     /// Some checks (like `IsPromiseObject`) don't need `cx`; for uniformity,
     /// the trait always takes `scope`.
     fn is(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError>;
+}
+
+/// Blanket impl: `Stack<'s, T>` inherits `Is` from the inner marker `T`.
+impl<T: JsType + Is> Is for Stack<'_, T> {
+    fn is(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError> {
+        T::is(scope, obj)
+    }
 }
 
 /// Trait for checking whether a [`Value`] is an instance of a specific

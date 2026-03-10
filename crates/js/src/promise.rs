@@ -2,43 +2,45 @@
 
 //! Promise creation, resolution, rejection, and reaction management.
 //!
-//! The [`Promise`] newtype wraps a scope-rooted `Handle<'s, *mut JSObject>`
-//! known to be a Promise object. It provides methods for state inspection,
-//! resolution/rejection, and adding reactions.
+//! The [`Promise`] marker type implements [`JsType`](crate::gc::handle::JsType),
+//! enabling [`Promise<'s>`](crate::Promise) as the scope-rooted
+//! handle type. It provides methods for state inspection, resolution/rejection,
+//! and adding reactions.
 
 use std::ptr::NonNull;
 
+use crate::gc::handle::{JsType, Stack};
 use crate::gc::scope::Scope;
-use mozjs::gc::Handle;
 use mozjs::jsapi::{JSObject, PromiseState};
 use mozjs::rust::wrappers2;
 use mozjs::rust::{HandleObject, HandleValue};
 
 use super::builtins::{Is, To};
 use super::error::JSError;
-use super::object::Object;
+use crate::Object;
 
-/// A JavaScript `Promise` object, rooted in a scope's pool.
+/// Marker type for JavaScript `Promise` objects.
 ///
-/// `Promise<'s>` wraps a `Handle<'s, *mut JSObject>` known to be a Promise.
-/// Construction automatically roots in the scope:
+/// [`Promise<'s>`](crate::Promise) is the scope-rooted handle type:
 ///
 /// ```ignore
 /// let promise = Promise::new(&scope, executor.handle())?;
 /// let state = promise.state();
 /// ```
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug)]
-pub struct Promise<'s>(pub(crate) Handle<'s, *mut JSObject>);
+pub struct Promise;
 
-impl<'s> Promise<'s> {
+impl JsType for Promise {
+    const JS_NAME: &'static str = "Promise";
+}
+
+impl<'s> Stack<'s, Promise> {
     /// Create a new `Promise` object from an executor function.
     ///
     /// The executor is called immediately with `(resolve, reject)` functions.
     pub fn new(scope: &'s Scope<'_>, executor: HandleObject) -> Result<Self, JSError> {
         let obj = unsafe { wrappers2::NewPromiseObject(scope.cx_mut(), executor) };
         NonNull::new(obj)
-            .map(|nn| Promise(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
@@ -50,28 +52,8 @@ impl<'s> Promise<'s> {
     pub fn new_pending(scope: &'s Scope<'_>) -> Result<Self, JSError> {
         let obj = unsafe { wrappers2::NewPromiseObject(scope.cx_mut(), HandleObject::null()) };
         NonNull::new(obj)
-            .map(|nn| Promise(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
-    }
-
-    /// Get the rooted handle to the underlying `JSObject`.
-    pub fn handle(&self) -> HandleObject<'s> {
-        self.0
-    }
-
-    /// Get a raw `NonNull` pointer to the underlying `JSObject`.
-    pub fn as_non_null(self) -> Option<NonNull<JSObject>> {
-        NonNull::new(self.0.get())
-    }
-
-    /// Get the raw `*mut JSObject` pointer.
-    pub fn as_raw(self) -> *mut JSObject {
-        self.0.get()
-    }
-
-    /// Wrap an existing rooted handle in a `Promise`.
-    pub fn from_handle(handle: Handle<'s, *mut JSObject>) -> Self {
-        Promise(handle)
     }
 
     /// Check whether an object is a `Promise`.
@@ -82,53 +64,53 @@ impl<'s> Promise<'s> {
 
     /// Get the current state of this promise.
     pub fn state(&self) -> PromiseState {
-        // SAFETY: self.0 is a rooted handle to a valid Promise object.
-        unsafe { wrappers2::GetPromiseState(self.0) }
+        // SAFETY: self is a rooted handle to a valid Promise object.
+        unsafe { wrappers2::GetPromiseState(self.handle()) }
     }
 
     /// Get the unique ID of this promise (for debugging/tracking).
     pub fn id(&self) -> u64 {
-        // SAFETY: self.0 is a rooted handle to a valid Promise object.
-        unsafe { wrappers2::GetPromiseID(self.0) }
+        // SAFETY: self is a rooted handle to a valid Promise object.
+        unsafe { wrappers2::GetPromiseID(self.handle()) }
     }
 
     /// Check whether this promise has been handled (i.e., has a rejection handler).
     pub fn is_handled(&self) -> bool {
-        // SAFETY: self.0 is a rooted handle to a valid Promise object.
-        unsafe { wrappers2::GetPromiseIsHandled(self.0) }
+        // SAFETY: self is a rooted handle to a valid Promise object.
+        unsafe { wrappers2::GetPromiseIsHandled(self.handle()) }
     }
 
     /// Mark a settled promise as handled, suppressing unhandled rejection warnings.
     pub fn set_settled_is_handled(&self, scope: &Scope<'_>) -> Result<(), JSError> {
-        let ok = unsafe { wrappers2::SetSettledPromiseIsHandled(scope.cx_mut(), self.0) };
+        let ok = unsafe { wrappers2::SetSettledPromiseIsHandled(scope.cx_mut(), self.handle()) };
         JSError::check(ok)
     }
 
     /// Mark any promise (including pending) as handled.
     pub fn set_any_is_handled(&self, scope: &Scope<'_>) -> Result<(), JSError> {
-        let ok = unsafe { wrappers2::SetAnyPromiseIsHandled(scope.cx_mut(), self.0) };
+        let ok = unsafe { wrappers2::SetAnyPromiseIsHandled(scope.cx_mut(), self.handle()) };
         JSError::check(ok)
     }
 
     /// Get the allocation site of this promise (a `SavedFrame`, if available).
     pub fn allocation_site(&self) -> Option<NonNull<JSObject>> {
-        NonNull::new(unsafe { wrappers2::GetPromiseAllocationSite(self.0) })
+        NonNull::new(unsafe { wrappers2::GetPromiseAllocationSite(self.handle()) })
     }
 
     /// Get the resolution site of this promise (a `SavedFrame`, if available).
     pub fn resolution_site(&self) -> Option<NonNull<JSObject>> {
-        NonNull::new(unsafe { wrappers2::GetPromiseResolutionSite(self.0) })
+        NonNull::new(unsafe { wrappers2::GetPromiseResolutionSite(self.handle()) })
     }
 
     /// Resolve this promise with the given value.
     pub fn resolve(&self, scope: &Scope<'_>, value: HandleValue) -> Result<(), JSError> {
-        let ok = unsafe { wrappers2::ResolvePromise(scope.cx_mut(), self.0, value) };
+        let ok = unsafe { wrappers2::ResolvePromise(scope.cx_mut(), self.handle(), value) };
         JSError::check(ok)
     }
 
     /// Reject this promise with the given value.
     pub fn reject(&self, scope: &Scope<'_>, value: HandleValue) -> Result<(), JSError> {
-        let ok = unsafe { wrappers2::RejectPromise(scope.cx_mut(), self.0, value) };
+        let ok = unsafe { wrappers2::RejectPromise(scope.cx_mut(), self.handle(), value) };
         JSError::check(ok)
     }
 
@@ -140,7 +122,7 @@ impl<'s> Promise<'s> {
         on_rejected: HandleObject,
     ) -> Result<(), JSError> {
         let ok = unsafe {
-            wrappers2::AddPromiseReactions(scope.cx_mut(), self.0, on_fulfilled, on_rejected)
+            wrappers2::AddPromiseReactions(scope.cx_mut(), self.handle(), on_fulfilled, on_rejected)
         };
         JSError::check(ok)
     }
@@ -155,7 +137,7 @@ impl<'s> Promise<'s> {
         let ok = unsafe {
             wrappers2::AddPromiseReactionsIgnoringUnhandledRejection(
                 scope.cx_mut(),
-                self.0,
+                self.handle(),
                 on_fulfilled,
                 on_rejected,
             )
@@ -171,7 +153,7 @@ impl<'s> Promise<'s> {
         let obj =
             unsafe { wrappers2::CallOriginalPromiseResolve(scope.cx_mut(), resolution_value) };
         NonNull::new(obj)
-            .map(|nn| Promise(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
@@ -182,7 +164,7 @@ impl<'s> Promise<'s> {
     ) -> Result<Self, JSError> {
         let obj = unsafe { wrappers2::CallOriginalPromiseReject(scope.cx_mut(), rejection_value) };
         NonNull::new(obj)
-            .map(|nn| Promise(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
@@ -196,10 +178,15 @@ impl<'s> Promise<'s> {
         on_rejected: HandleObject,
     ) -> Result<Self, JSError> {
         let obj = unsafe {
-            wrappers2::CallOriginalPromiseThen(scope.cx_mut(), self.0, on_fulfilled, on_rejected)
+            wrappers2::CallOriginalPromiseThen(
+                scope.cx_mut(),
+                self.handle(),
+                on_fulfilled,
+                on_rejected,
+            )
         };
         NonNull::new(obj)
-            .map(|nn| Promise(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
     }
 
@@ -214,12 +201,14 @@ impl<'s> Promise<'s> {
     ) -> Result<Self, JSError> {
         let obj = wrappers2::GetWaitForAllPromise(scope.cx_mut(), promises);
         NonNull::new(obj)
-            .map(|nn| Promise(scope.root_object(nn)))
+            .map(|nn| Self::from_handle_unchecked(scope.root_object(nn)))
             .ok_or(JSError)
     }
 
     /// Get the `Promise` constructor for the current realm.
-    pub fn constructor(scope: &'s Scope<'_>) -> Result<Handle<'s, *mut JSObject>, JSError> {
+    pub fn constructor(
+        scope: &'s Scope<'_>,
+    ) -> Result<mozjs::gc::Handle<'s, *mut JSObject>, JSError> {
         let obj = unsafe { wrappers2::GetPromiseConstructor(scope.cx_mut()) };
         NonNull::new(obj)
             .map(|p| scope.root_object(p))
@@ -227,7 +216,9 @@ impl<'s> Promise<'s> {
     }
 
     /// Get the `Promise.prototype` for the current realm.
-    pub fn prototype(scope: &'s Scope<'_>) -> Result<Handle<'s, *mut JSObject>, JSError> {
+    pub fn prototype(
+        scope: &'s Scope<'_>,
+    ) -> Result<mozjs::gc::Handle<'s, *mut JSObject>, JSError> {
         let obj = unsafe { wrappers2::GetPromisePrototype(scope.cx_mut()) };
         NonNull::new(obj)
             .map(|p| scope.root_object(p))
@@ -235,28 +226,172 @@ impl<'s> Promise<'s> {
     }
 }
 
-impl Is for Promise<'_> {
+impl Is for Promise {
     fn is(_scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError> {
-        Ok(Promise::is_promise(obj))
+        Ok(Stack::<Promise>::is_promise(obj))
     }
 }
 
-impl<'s> To<Promise<'s>> for Object<'s> {
-    fn to(&self, scope: &Scope<'_>) -> Result<Promise<'s>, JSError> {
-        if Promise::is(scope, self.0)? {
-            Ok(Promise(self.0))
+impl<'s> To<Stack<'s, Promise>> for Object<'s> {
+    fn to(&self, scope: &Scope<'_>) -> Result<Stack<'s, Promise>, JSError> {
+        if Promise::is(scope, self.handle())? {
+            // SAFETY: We just verified the object is a Promise.
+            Ok(unsafe { Stack::from_handle_unchecked(self.handle()) })
         } else {
             Err(JSError)
         }
     }
 }
 
-impl<'s> std::ops::Deref for Promise<'s> {
+impl<'s> std::ops::Deref for Stack<'s, Promise> {
     type Target = Object<'s>;
 
     fn deref(&self) -> &Object<'s> {
-        // SAFETY: Promise and Object are both repr(transparent) over
-        // Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Promise<'s> as *const Object<'s>) }
+        // SAFETY: Stack<Promise> and Stack<Object> are both repr(transparent)
+        // over Handle<'s, *mut JSObject>.
+        unsafe { &*(self as *const Stack<'s, Promise> as *const Object<'s>) }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Async promise support — JSPromise, PromiseOutcome, __spawn_promise
+// ---------------------------------------------------------------------------
+
+use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
+
+use crate::conversions::ToJSValConvertible;
+use crate::heap::{Heap as MozHeap, RootedTraceableBox};
+use crate::native::{MutableHandleValue, RawJSContext};
+use crate::value;
+
+/// Callback that sets a resolved value on a `MutableHandleValue`.
+type ResolveCallback = Box<dyn FnOnce(*mut RawJSContext, MutableHandleValue) -> bool>;
+
+/// A pending promise paired with its future.
+pub(crate) type PendingPromise = (
+    RootedTraceableBox<MozHeap<*mut JSObject>>,
+    Pin<Box<dyn Future<Output = PromiseOutcome> + 'static>>,
+);
+
+/// The outcome of an async method — either resolve with a convertible value
+/// or reject with an error message.
+pub enum PromiseOutcome {
+    /// Resolve the promise. The boxed closure sets the return value on the
+    /// provided `MutableHandleValue` and returns `true` on success.
+    Resolve(ResolveCallback),
+    /// Reject the promise with the given error message.
+    Reject(String),
+}
+
+/// A future that resolves or rejects a JS Promise.
+///
+/// Use `JSPromise::new` in a `#[method]` to return a promise from an async
+/// operation. The macro detects the `JSPromise` return type and generates
+/// code to create a bare SpiderMonkey Promise, spawn the future, and
+/// resolve/reject the promise when the future completes.
+///
+/// The design is async-runtime agnostic: call `drain_promises` with your
+/// executor in your event loop to resolve/reject completed promises.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[method]
+/// fn slow_greet(&self, name: String) -> JSPromise {
+///     let greeting = self.prefix.clone();
+///     JSPromise::new(async move {
+///         // simulate async work
+///         Ok(format!("{}, {}!", greeting, name))
+///     })
+/// }
+/// ```
+pub struct JSPromise {
+    pub(crate) future: Pin<Box<dyn Future<Output = PromiseOutcome> + 'static>>,
+}
+
+impl JSPromise {
+    /// Create a `JSPromise` from a future that returns `Result<T, E>`.
+    ///
+    /// - `Ok(value)` resolves the promise; `value` must implement `ToJSValConvertible`.
+    /// - `Err(e)` rejects the promise with `e.to_string()` as the error message.
+    pub fn new<T, E, F>(future: F) -> Self
+    where
+        T: ToJSValConvertible + 'static,
+        E: std::fmt::Display + 'static,
+        F: Future<Output = Result<T, E>> + 'static,
+    {
+        JSPromise {
+            future: Box::pin(async move {
+                match future.await {
+                    Ok(value) => PromiseOutcome::Resolve(Box::new(
+                        move |cx: *mut RawJSContext, rval: MutableHandleValue| unsafe {
+                            value.to_jsval(cx, rval);
+                            true
+                        },
+                    )),
+                    Err(e) => PromiseOutcome::Reject(e.to_string()),
+                }
+            }),
+        }
+    }
+
+    /// Create a `JSPromise` from a future that resolves to `()` (void).
+    pub fn new_void<E, F>(future: F) -> Self
+    where
+        E: std::fmt::Display + 'static,
+        F: Future<Output = Result<(), E>> + 'static,
+    {
+        JSPromise {
+            future: Box::pin(async move {
+                match future.await {
+                    Ok(()) => PromiseOutcome::Resolve(Box::new(
+                        move |_cx: *mut RawJSContext, mut rval: MutableHandleValue| {
+                            rval.set(value::undefined());
+                            true
+                        },
+                    )),
+                    Err(e) => PromiseOutcome::Reject(e.to_string()),
+                }
+            }),
+        }
+    }
+}
+
+thread_local! {
+    // Crown: `PendingPromise` is self-rooting via `RootedTraceableBox`, so we
+    // don't need to root the Vec itself.
+    #[crate::allow_unrooted_interior]
+    static PENDING_FUTURES: RefCell<Vec<PendingPromise>> = RefCell::new(Vec::new());
+}
+
+/// Queue a future that will resolve or reject a JS Promise.
+///
+/// This is called by generated JSNative wrappers. It stores the promise
+/// object in a `RootedTraceableBox<MozHeap<*mut JSObject>>` for GC safety
+/// and queues the future for later execution via `drain_promises`.
+///
+/// # Safety
+///
+/// - `promise_obj` must be a valid JS Promise object.
+#[doc(hidden)]
+// Crown: The provided `promise_obj` is rooted immediately.
+#[crate::allow_unrooted_interior]
+pub unsafe fn __spawn_promise(promise_obj: *mut JSObject, js_promise: JSPromise) {
+    let boxed_heap = RootedTraceableBox::new(MozHeap::default());
+    boxed_heap.set(promise_obj);
+
+    PENDING_FUTURES.with(|f| {
+        f.borrow_mut().push((boxed_heap, js_promise.future));
+    });
+}
+
+/// Take all pending promise futures, returning them for execution.
+///
+/// This drains the internal queue. Callers (typically the event loop) are
+/// responsible for running each future and resolving/rejecting its paired
+/// JS promise.
+pub fn take_pending_futures() -> Vec<PendingPromise> {
+    PENDING_FUTURES.with(|f| std::mem::take(&mut *f.borrow_mut()))
 }

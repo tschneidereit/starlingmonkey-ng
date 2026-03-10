@@ -13,7 +13,7 @@
 //! - `RestArgs<T>` (typed variadic arguments)
 //! - `Result<T, String>` error-throwing methods
 //! - `-> Self` return from methods/static methods (creates new JS objects)
-//! - `StackNewtype::cast` / `upcast()` for type-checked casts
+//! - `StackType::cast` / `upcast()` for type-checked casts
 //! - Constructing objects from Rust via the stack newtype's `new()`
 //! - Calling methods from Rust via forwarded stack newtype methods
 //! - Loading an external `.js` ES module file that exercises everything
@@ -23,7 +23,6 @@ use std::ptr;
 use js::compile::evaluate_with_filename;
 use js::native::Value;
 use js::string as jsstring;
-use libstarling::class::StackNewtype;
 use libstarling::config::RuntimeConfig;
 use libstarling::module::evaluate_module;
 use libstarling::runtime::Runtime;
@@ -146,7 +145,7 @@ impl Circle {
     #[constructor]
     fn new(color: String, radius: f64) -> Self {
         Self {
-            parent: __ShapeInner::new(color),
+            parent: Shape::init(color),
             radius,
         }
     }
@@ -185,7 +184,7 @@ impl Rect {
     #[constructor]
     fn new(color: String, width: f64, height: f64) -> Self {
         Self {
-            parent: __ShapeInner::new(color),
+            parent: Shape::init(color),
             width,
             height,
         }
@@ -412,9 +411,9 @@ fn main() {
     );
 
     // Downcast to wrong type fails:
-    let bad: Option<Rect> = as_shape.cast::<Rect>();
-    assert!(bad.is_none());
-    println!("  shape.cast::<Rect>() = None (correct)");
+    let bad: Result<Rect, _> = as_shape.cast::<Rect>();
+    assert!(bad.is_err());
+    println!("  shape.cast::<Rect>() = Err (correct)");
     println!("  PASSED\n");
 
     // --- Verify instanceof from JS ---
@@ -498,7 +497,7 @@ checks.join(", ")
     println!("  #[jsmodule]         — math module (constants + functions)");
     println!("  #[jsglobals]        — app_globals (constants + functions)");
     println!("  Result<T, String>   — safe_divide throws on error");
-    println!("  StackNewtype::new() — Rust-side construction");
+    println!("  StackType::new() — Rust-side construction");
     println!("  Forwarded getters   — .x(), .y(), .radius(), .color()");
     println!("  Forwarded setter    — .set_color()");
     println!("  Forwarded methods   — .length(), .scale()");

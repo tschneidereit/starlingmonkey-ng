@@ -16,9 +16,9 @@ use core_runtime::runtime::Runtime;
 use js::gc::{GCOptions, GCReason, SetGCZeal};
 use js::value;
 
-use js::array::Array;
-use js::collections::map::Map;
-use js::object::Object;
+use js::Array;
+use js::Map;
+use js::Object;
 use js::{gc, string};
 
 /// Helper: set GC zeal mode on the scope's context.

@@ -7,9 +7,10 @@
 //! shared across calls. This emulates the behavior of HTML `<script>` tags
 //! and is required by the WPT test harness.
 
+use js::error::throw_error;
 use js::gc::scope::Scope;
 use js::native::RawJSContext;
-use js::object::Object;
+use js::Object;
 
 /// Install WPT-specific globals on the given global object.
 ///
@@ -49,7 +50,7 @@ unsafe extern "C" fn eval_script_native(
 
     // Get the source string argument.
     if args.argc_ < 1 || !args.get(0).is_string() {
-        core_runtime::class::throw_error(&scope, "evalScript: argument must be a string");
+        throw_error(&scope, "evalScript: argument must be a string");
         return false;
     }
     let source_val = args.get(0);
@@ -58,7 +59,7 @@ unsafe extern "C" fn eval_script_native(
     let source_str = match source_str {
         Some(s) => s,
         None => {
-            core_runtime::class::throw_error(&scope, "evalScript: null string argument");
+            throw_error(&scope, "evalScript: null string argument");
             return false;
         }
     };
@@ -66,10 +67,7 @@ unsafe extern "C" fn eval_script_native(
     let source = match js::string::to_utf8(&scope, source_str) {
         Ok(s) => s,
         Err(_) => {
-            core_runtime::class::throw_error(
-                &scope,
-                "evalScript: failed to convert string to UTF-8",
-            );
+            throw_error(&scope, "evalScript: failed to convert string to UTF-8");
             return false;
         }
     };

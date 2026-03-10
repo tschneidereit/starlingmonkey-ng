@@ -368,22 +368,20 @@ pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>)
     }
 
     // 2. Compile module
-    let cx = scope.cx_mut();
     let filename = CString::new(T::NAME).unwrap();
-    let options = CompileOptionsWrapper::new(cx, filename, 1);
+    let options = CompileOptionsWrapper::new(scope.cx_mut(), filename, 1);
 
     let mut src = transform_str_to_source_text(&source);
-    let module_obj = unsafe { js::module_raw::CompileModule1(cx.raw_cx(), options.ptr, &mut src) };
-    if module_obj.is_null() {
-        return false;
-    }
+    let module = match unsafe { js::module::compile_module(scope, options.ptr, &mut src) } {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let module_obj = module.get();
 
     // Set the module private so the resolve hook receives a valid
     // referencing module when this module's imports are resolved.
     let private = unsafe { value::from_object(module_obj) };
     unsafe { SetModulePrivate(module_obj, &private) };
-
-    js::rooted!(in(unsafe { scope.raw_cx_no_gc() }) let module = module_obj);
 
     // 3. Store in registry before linking (resolve hook must find it)
     MODULE_REGISTRY.with(|reg| {
@@ -396,7 +394,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>)
     });
 
     // 4. Link
-    if !unsafe { js::module_raw::ModuleLink(scope.cx_mut(), module.handle()) } {
+    if js::module::link(scope, module).is_err() {
         MODULE_REGISTRY.with(|reg| {
             reg.borrow_mut().remove(T::NAME);
         });
@@ -404,10 +402,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>)
     }
 
     // 5. Evaluate (runs the `export var ...` initializations)
-    js::rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = value::undefined());
-    if !unsafe {
-        js::module_raw::ModuleEvaluate(scope.cx_mut(), module.handle(), rval.handle_mut())
-    } {
+    if js::module::evaluate(scope, module).is_err() {
         MODULE_REGISTRY.with(|reg| {
             reg.borrow_mut().remove(T::NAME);
         });
@@ -415,7 +410,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>)
     }
 
     // 6. Get the module environment and populate it
-    let env = unsafe { js::module_raw::GetModuleEnvironment(scope.cx_mut(), module.handle()) };
+    let env = unsafe { js::module_raw::GetModuleEnvironment(scope.cx_mut(), module) };
     if env.is_null() {
         return false;
     }
@@ -472,17 +467,18 @@ pub unsafe fn evaluate_module(
     let options = CompileOptionsWrapper::new(scope.cx_mut(), c_filename, 1);
 
     let mut src = transform_str_to_source_text(source);
-    let module_obj = js::module_raw::CompileModule1Wrapper(scope.cx_mut(), options.ptr, &mut src);
-    if module_obj.is_null() {
-        return Err(());
-    }
+    let module =
+        unsafe { js::module::compile_module(scope, options.ptr, &mut src) }.map_err(|_| ())?;
+    let module_obj = module.get();
 
     // Set the module private so the resolve hook receives a valid
     // referencing module when this module's imports are resolved.
     let private = unsafe { value::from_object(module_obj) };
     unsafe { SetModulePrivate(module_obj, &private) };
 
-    // If the filename is a real path, update the base path for relative imports
+    // If the filename is a real path, update the base path for relative
+    // imports. The empty-path guard prevents WASI from treating
+    // `Path::new("").exists()` as a valid root directory.
     let path = Path::new(filename);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && parent.exists() {
@@ -495,16 +491,8 @@ pub unsafe fn evaluate_module(
         }
     }
 
-    js::rooted!(in(unsafe { scope.raw_cx_no_gc() }) let module = module_obj);
-
-    if !js::module_raw::ModuleLink(scope.cx_mut(), module.handle()) {
-        return Err(());
-    }
-
-    js::rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = value::undefined());
-    if !js::module_raw::ModuleEvaluate(scope.cx_mut(), module.handle(), rval.handle_mut()) {
-        return Err(());
-    }
+    js::module::link(scope, module).map_err(|_| ())?;
+    js::module::evaluate(scope, module).map_err(|_| ())?;
 
     Ok(())
 }

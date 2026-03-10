@@ -14,7 +14,6 @@ use js::compile::evaluate_with_filename;
 use js::gc::scope::Scope;
 use js::native::Value;
 use js::string as jsstring;
-use libstarling::class::StackNewtype;
 use libstarling::config::RuntimeConfig;
 use libstarling::runtime::Runtime;
 use libstarling::{jsclass, jsmethods};
@@ -58,7 +57,7 @@ impl Dog {
     #[constructor]
     fn new(name: String, breed: String) -> Self {
         Self {
-            parent: __AnimalInner::new(name),
+            parent: Animal::init(name),
             breed,
         }
     }
@@ -91,7 +90,7 @@ impl Puppy {
     #[constructor]
     fn new(name: String, breed: String, age_months: i32) -> Self {
         Self {
-            parent: __DogInner::new(name, breed),
+            parent: Dog::init(name, breed),
             age_months,
         }
     }
@@ -243,9 +242,9 @@ r.join(", ")
     println!("  Downcast Animal->Dog breed: {}", dog_breed);
 
     // Downcast to wrong type should fail
-    let bad_down: Option<Puppy> = animal.cast::<Puppy>();
-    assert!(bad_down.is_none(), "Expected failed downcast to Puppy");
-    println!("  Downcast Animal->Puppy: None (correct)");
+    let bad_down: Result<Puppy, _> = animal.cast::<Puppy>();
+    assert!(bad_down.is_err(), "Expected failed downcast to Puppy");
+    println!("  Downcast Animal->Puppy: Err (correct)");
 
     // ====================================================================
     // Test 8: Multi-level upcast/downcast

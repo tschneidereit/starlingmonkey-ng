@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
-//! Port of rquickjs's class-methods example to mozjs using proc macros.
-//!
-//! This demonstrates the ergonomic proc-macro API for defining JavaScript classes.
-//! Compare with `class_methods.rs` which uses the manual ClassDef + declarative macros.
+//! Demonstrates defining a JS class with methods using `#[jsclass]` and `#[jsmethods]`.
 
 use std::ptr;
 
@@ -49,10 +46,6 @@ impl MyClass {
         Ok(self.data.clone())
     }
 }
-
-// ============================================================================
-// Main
-// ============================================================================
 
 fn main() {
     let rt = Runtime::init(&RuntimeConfig::default());

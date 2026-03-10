@@ -18,8 +18,8 @@ use js::{
     heap::{Heap, Trace},
     native::JS_GetRuntime,
     native::{JSObject, JSRuntime, JSTracer},
-    object::Object,
     prelude::RootScope,
+    Object,
 };
 
 // ---------------------------------------------------------------------------
@@ -243,7 +243,7 @@ impl Runtime {
         let cx = self.mozjs_rt_mut().cx();
         let scope = RootScope::new_global(
             cx,
-            &crate::class::STARLING_GLOBAL_CLASS,
+            &js::class::STARLING_GLOBAL_CLASS,
             RealmOptions::default(),
         );
         let _global = scope.global();
@@ -384,7 +384,7 @@ unsafe extern "C" fn trace_runtime_cb(trc: *mut JSTracer, data: *mut c_void) {
     // Trace the per-global class registry stored in the global's reserved slot.
     let global = rt.default_global.get();
     if !global.is_null() {
-        crate::class::trace_class_registry_for_global(trc, global);
+        js::class::trace_class_registry_for_global(trc, global);
     }
     // Trace all tasks in the event loop (they may hold JS object references).
     rt.event_loop.borrow().trace(trc);

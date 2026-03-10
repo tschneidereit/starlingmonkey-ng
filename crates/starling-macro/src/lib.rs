@@ -77,10 +77,9 @@ impl Parse for AttrOpts {
 /// stack newtype for ergonomic use.
 ///
 /// Given `struct Foo { ... }`, this macro:
-/// 1. Renames the data struct to `__FooInner` (hidden, implements `ClassDef`)
-/// 2. Generates `Foo<'s>` — a `#[repr(transparent)]` newtype over `Handle<'s, *mut JSObject>`
-///    matching the mozjs builtin pattern (like `Date<'s>`, `Array<'s>`)
-/// 3. Generates `type FooRef = HeapRef<__FooInner>` for heap references
+/// 1. Renames the data struct to `FooImpl` (hidden, implements `ClassDef`)
+/// 2. Generates `Foo<'s>` — a `#[repr(transparent)]` newtype wrapping
+///    `Stack<'s, FooImpl>` (inherits handle access via deref chain)
 ///
 /// # Usage
 ///
@@ -90,9 +89,8 @@ impl Parse for AttrOpts {
 ///     data: String,
 /// }
 /// // Generates:
-/// //   __MyClassInner { data: String } — the data struct (ClassDef)
-/// //   MyClass<'s>                     — stack newtype (Handle wrapper)
-/// //   type MyClassRef                 — HeapRef<__MyClassInner>
+/// //   MyClassImpl { data: String }    — the data struct (ClassDef)
+/// //   MyClass<'s>                     — stack newtype (Stack<FooImpl> wrapper)
 /// ```
 #[proc_macro_attribute]
 pub fn jsclass(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -158,12 +156,11 @@ impl ClassConfig {
 
 /// Shared implementation for `#[jsclass]` and `#[webidl_interface]`.
 ///
-/// Processes the attributed struct and generates all ClassDef machinery,
-/// stack newtypes, and heap reference wrappers.
+/// Processes the attributed struct and generates all ClassDef machinery
+/// and stack newtypes.
 fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig) -> TokenStream {
     let struct_name = input.ident.clone();
-    let inner_name = format_ident!("__{}Inner", struct_name);
-    let ref_alias = format_ident!("{}Ref", struct_name);
+    let inner_name = format_ident!("{}Impl", struct_name);
     let js_name = opts
         .name
         .unwrap_or_else(|| struct_name.to_string().to_upper_camel_case());
@@ -177,10 +174,10 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
 
     // If extends is set, compute the inner parent name and rewrite the parent field type
     let opts_extends_ident = opts.extends.clone();
-    let inner_parent = opts.extends.as_ref().map(|p| format_ident!("__{}Inner", p));
+    let inner_parent = opts.extends.as_ref().map(|p| format_ident!("{}Impl", p));
 
     if let Some(ref inner_parent_name) = inner_parent {
-        // Rewrite the `parent` field's type from `Parent` to `__ParentInner`
+        // Rewrite the `parent` field's type from `Parent` to `ParentImpl`
         if let Fields::Named(ref mut fields) = input.fields {
             for field in &mut fields.named {
                 if field.ident.as_ref().map(|i| i == "parent").unwrap_or(false) {
@@ -190,31 +187,33 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         }
     }
 
-    // Rename the struct to __FooInner and make it pub (since it's referenced
-    // in the public API of the generated stack newtype and HeapRef wrapper).
+    // Rename the struct to FooImpl. It needs to be `pub` because it's used in
+    // trait impls and as the Heap/Stack type parameter, but `#[doc(hidden)]`
+    // keeps it out of generated documentation.
     input.ident = inner_name.clone();
     input.vis = syn::Visibility::Public(syn::token::Pub::default());
+    input.attrs.push(syn::parse_quote! { #[doc(hidden)] });
 
     // Generate parent_prototype / register_inheritance / ensure_parent_registered
     // methods if extends or js_proto is set.
     let parent_classdef_methods = if let Some(ref inner_parent_name) = inner_parent {
         quote! {
             fn parent_prototype(scope: &::js::gc::scope::Scope<'_>) -> *mut ::js::native::JSObject {
-                ::core_runtime::class::get_prototype_for::<#inner_parent_name>(scope)
+                ::js::class::get_prototype_for::<#inner_parent_name>(scope)
                     .unwrap_or(::std::ptr::null_mut())
             }
 
             fn register_inheritance() {
-                ::core_runtime::class::register_parent_info::<Self>();
+                ::js::class::register_parent_info::<Self>();
             }
 
             fn ensure_parent_registered(
                 scope: &::js::gc::scope::Scope<'_>,
-                global: ::js::object::Object<'_>,
+                global: ::js::Object<'_>,
             ) {
                 unsafe {
                     // SAFETY: register_class is safe to call if scope and global are valid.
-                    ::core_runtime::class::register_class::<#inner_parent_name>(scope, global);
+                    ::js::class::register_class::<#inner_parent_name>(scope, global);
                 }
             }
         }
@@ -287,10 +286,10 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
             newEnumerate: None,
             resolve: None,
             mayResolve: None,
-            finalize: Some(::core_runtime::class::generic_class_finalize::<#inner_name>),
+            finalize: Some(::js::class::generic_class_finalize::<#inner_name>),
             call: None,
             construct: None,
-            trace: Some(::core_runtime::class::generic_class_trace::<#inner_name>),
+            trace: Some(::js::class::generic_class_trace::<#inner_name>),
         };
 
         // Static JSClass for this type — its address serves as the type tag.
@@ -298,12 +297,12 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         static #class_static: ::js::class_spec::JSClass = {
             // Ensure at least MIN_CLASS_RESERVED_SLOTS for private data (slot 0).
             // Use a const block so the max() is evaluated at compile time.
-            const SLOTS: u32 = if <#inner_name as ::core_runtime::class::ClassDef>::RESERVED_SLOTS
-                > ::core_runtime::class::MIN_CLASS_RESERVED_SLOTS
+            const SLOTS: u32 = if <#inner_name as ::js::class::ClassDef>::RESERVED_SLOTS
+                > ::js::class::MIN_CLASS_RESERVED_SLOTS
             {
-                <#inner_name as ::core_runtime::class::ClassDef>::RESERVED_SLOTS
+                <#inner_name as ::js::class::ClassDef>::RESERVED_SLOTS
             } else {
-                ::core_runtime::class::MIN_CLASS_RESERVED_SLOTS
+                ::js::class::MIN_CLASS_RESERVED_SLOTS
             };
 
             ::js::class_spec::JSClass {
@@ -321,7 +320,7 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         // Generated ClassDef impl using autoref specialization.
         // The constructor and method registration delegate to companion types
         // that are populated by #[jsmethods].
-        impl ::core_runtime::class::ClassDef for #inner_name {
+        impl ::js::class::ClassDef for #inner_name {
             const NAME: &'static str = #js_name;
 
             fn class() -> &'static ::js::class_spec::JSClass {
@@ -332,38 +331,38 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
                 scope: &::js::gc::scope::Scope<'_>,
                 args: &::js::native::CallArgs,
             ) -> Result<Self, ()> {
-                use ::core_runtime::class::__ConstructorRegistrar;
-                let reg = ::core_runtime::class::__CtorReg::<Self>::new();
+                use ::js::class::__ConstructorRegistrar;
+                let reg = ::js::class::__CtorReg::<Self>::new();
                 (&reg).construct(scope, args)
             }
 
             fn register_class_methods(
-                builder: ::core_runtime::class::ClassBuilder<Self>,
-            ) -> ::core_runtime::class::ClassBuilder<Self> {
-                use ::core_runtime::class::__MethodRegistrar;
-                let reg = ::core_runtime::class::__MethodReg::<Self>::new();
+                builder: ::js::class::ClassBuilder<Self>,
+            ) -> ::js::class::ClassBuilder<Self> {
+                use ::js::class::__MethodRegistrar;
+                let reg = ::js::class::__MethodReg::<Self>::new();
                 (&reg).register(builder)
             }
 
             fn register_static_methods(
-                builder: ::core_runtime::class::ClassBuilder<Self>,
-            ) -> ::core_runtime::class::ClassBuilder<Self> {
-                use ::core_runtime::class::__StaticMethodRegistrar;
-                let reg = ::core_runtime::class::__StaticMethodReg::<Self>::new();
+                builder: ::js::class::ClassBuilder<Self>,
+            ) -> ::js::class::ClassBuilder<Self> {
+                use ::js::class::__StaticMethodRegistrar;
+                let reg = ::js::class::__StaticMethodReg::<Self>::new();
                 (&reg).register(builder)
             }
 
             fn destructor(&mut self) {
-                use ::core_runtime::class::__DestructorRegistrar;
-                let reg = ::core_runtime::class::__DtorReg::<Self>::new();
+                use ::js::class::__DestructorRegistrar;
+                let reg = ::js::class::__DtorReg::<Self>::new();
                 (&reg).destruct(self);
             }
 
             fn register_constants(
-                builder: ::core_runtime::class::ClassBuilder<Self>,
-            ) -> ::core_runtime::class::ClassBuilder<Self> {
-                use ::core_runtime::class::__ConstantRegistrar;
-                let reg = ::core_runtime::class::__ConstantReg::<Self>::new();
+                builder: ::js::class::ClassBuilder<Self>,
+            ) -> ::js::class::ClassBuilder<Self> {
+                use ::js::class::__ConstantRegistrar;
+                let reg = ::js::class::__ConstantReg::<Self>::new();
                 (&reg).register(builder)
             }
 
@@ -374,257 +373,106 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         }
 
         // Reflexive DerivedFrom: every class derives from itself
-        impl ::core_runtime::class::DerivedFrom<#inner_name> for #inner_name {}
+        impl ::js::class::DerivedFrom<#inner_name> for #inner_name {}
 
         // ================================================================
-        // Stack newtype: Foo<'s> — a transparent Handle wrapper
+        // Foo<'s> — stack newtype wrapping Stack<'s, FooImpl>
         // ================================================================
-
-        /// Stack newtype wrapping a rooted JS object handle.
-        ///
-        /// This type follows the same pattern as `crate::js::date::Date<'s>`,
-        /// `crate::js::promise::Promise<'s>`, etc. It is `Copy + Clone` and
-        /// dereferences to `Object<'s>`.
         #[repr(transparent)]
-        #[derive(Clone, Copy, Debug)]
-        pub struct #struct_name<'s>(::js::native::GCHandle<'s, *mut ::js::native::JSObject>);
+        #[derive(Copy, Clone)]
+        pub struct #struct_name<'s>(::js::gc::handle::Stack<'s, #inner_name>);
 
-        impl<'s> #struct_name<'s> {
-            /// Get the underlying `HandleObject`.
-            #[inline]
-            pub fn handle(&self) -> ::js::native::GCHandle<'s, *mut ::js::native::JSObject> {
-                self.0
-            }
-
-            /// Get the raw `*mut JSObject` pointer.
-            #[inline]
-            pub fn as_raw(self) -> *mut ::js::native::JSObject {
-                self.0.get()
-            }
-
-            /// Create from a rooted handle. Does not verify the object type.
-            ///
-            /// # Safety
-            ///
-            /// The handle must point to a JS object that was created via
-            /// the class registration for this type.
-            #[inline]
-            pub unsafe fn from_handle(
-                h: ::js::native::GCHandle<'s, *mut ::js::native::JSObject>,
-            ) -> Self {
-                #struct_name(h)
-            }
-
-            /// Root a raw pointer and wrap it, returning `None` if null or not
-            /// an instance of this class.
-            ///
-            /// # Safety
-            ///
-            /// `ptr` must be either null or a valid pointer to a live JS object.
-            pub unsafe fn from_raw(
-                scope: &'s ::js::gc::scope::Scope<'_>,
-                ptr: *mut ::js::native::JSObject,
-            ) -> Option<Self> {
-                let nn = ::std::ptr::NonNull::new(ptr)?;
-                // Verify type tag via JSClass pointer
-                let concrete_tag = ::core_runtime::class::get_class_tag(ptr);
-                let target_tag = ::core_runtime::class::class_tag::<#inner_name>();
-                if !::core_runtime::class::is_derived_from_type(concrete_tag, target_tag) {
-                    return None;
-                }
-                Some(#struct_name(scope.root_object(nn)))
-            }
-
-            /// Get an immutable reference to the Rust data stored in this object.
-            ///
-            /// # Safety
-            ///
-            /// The handle must point to a live JS object with private data of
-            /// the expected inner type.
-            #[inline]
-            pub unsafe fn data(&self) -> &#inner_name {
-                ::core_runtime::class::get_private_or_ancestor::<#inner_name>(self.as_raw())
-                    .expect("object does not have expected private data")
-            }
-
-            /// Get a mutable reference to the Rust data stored in this object.
-            ///
-            /// # Safety
-            ///
-            /// Same as [`data`](Self::data), plus no other references to the
-            /// data may exist simultaneously.
-            #[inline]
-            #[allow(clippy::mut_from_ref)]
-            pub unsafe fn data_mut(&self) -> &mut #inner_name {
-                ::core_runtime::class::get_private_or_ancestor_mut::<#inner_name>(self.as_raw())
-                    .expect("object does not have expected private data")
-            }
-
-            /// Type-checked cast from any `Object`.
-            ///
-            /// Returns `Some(Self)` if `obj` was created as this class (or a
-            /// subclass), `None` otherwise.  This is the primary downcast
-            /// mechanism for stack newtypes.
-            pub fn from_object(scope: &'s ::js::gc::scope::Scope<'_>, obj: ::js::object::Object<'s>) -> Option<Self> {
-                let ptr = obj.as_raw();
-                let concrete_tag = unsafe { ::core_runtime::class::get_class_tag(ptr) };
-                let target_tag = ::core_runtime::class::class_tag::<#inner_name>();
-                if !::core_runtime::class::is_derived_from_type(concrete_tag, target_tag) {
-                    return None;
-                }
-                // SAFETY: we verified the type tag, and the pointer came from
-                // a live Object handle.
-                let nn = ::std::ptr::NonNull::new(ptr).unwrap();
-                Some(#struct_name(scope.root_object(nn)))
-            }
-        }
-
-        impl<'s> ::core_runtime::class::StackNewtype<'s> for #struct_name<'s> {
+        impl<'s> ::js::class::StackType<'s> for #struct_name<'s> {
             type Inner = #inner_name;
 
             unsafe fn from_handle_unchecked(
                 h: ::js::native::GCHandle<'s, *mut ::js::native::JSObject>,
             ) -> Self {
-                #struct_name(h)
+                #struct_name(::js::gc::handle::Stack::from_handle_unchecked(h))
             }
 
             fn js_handle(self) -> ::js::native::GCHandle<'s, *mut ::js::native::JSObject> {
-                self.0
+                self.0.handle()
             }
         }
 
-        impl<'s> ::std::ops::Deref for #struct_name<'s> {
-            type Target = ::js::object::Object<'s>;
-            fn deref(&self) -> &Self::Target {
-                // SAFETY: Both Foo<'s> and Object<'s> are #[repr(transparent)]
-                // wrappers over Handle<'s, *mut JSObject>.
-                unsafe { ::std::mem::transmute(self) }
+        impl<'s> #struct_name<'s> {
+            /// Type-checked construction from an untyped `Object`.
+            pub fn from_object(obj: ::js::Object<'s>) -> ::std::result::Result<Self, ::js::class::CastError> {
+                ::js::gc::handle::Stack::<#inner_name>::from_object(obj).map(#struct_name)
             }
         }
 
-        // ================================================================
-        // FooRef — heap reference newtype with get() method
-        // ================================================================
-
-        /// Heap reference to a [`#struct_name`] JS object.
-        ///
-        /// Use [`get`](Self::get) to root the object and obtain a stack
-        /// newtype for method calls.
-        #[js::must_root]
-        pub struct #ref_alias(::core_runtime::class::HeapRef<#inner_name>);
-
-        impl #ref_alias {
-            /// Root the heap-stored JS object and return the stack newtype.
-            ///
-            /// Returns `None` if the underlying JS object is null.
-            pub fn get<'s>(&self, scope: &'s ::js::gc::scope::Scope<'_>) -> Option<#struct_name<'s>> {
-                let obj = self.0.get_jsobject();
-                let nn = ::std::ptr::NonNull::new(obj)?;
-                Some(#struct_name(scope.root_object(nn)))
-            }
-
-            /// Create from an `Object` handle.
-            ///
-            /// **For use by generated code only.** `FooRef` stores a `HeapRef`
-            /// which must live inside a `Traceable` struct — never on the
-            /// stack. Use the stack newtype (e.g. `Foo<'s>`) for locals.
-            ///
-            /// # Safety
-            ///
-            /// `obj` must be a JS object created via the class for this type.
-            #[doc(hidden)]
-            pub unsafe fn from_object<'s>(obj: ::js::object::Object<'s>) -> Self {
-                #ref_alias(::core_runtime::class::HeapRef::from_object(obj))
-            }
-
-            /// Create from a raw JS object pointer.
-            ///
-            /// **For use by generated code only.** `FooRef` stores a `HeapRef`
-            /// which must live inside a `Traceable` struct — never on the
-            /// stack. Use the stack newtype (e.g. `Foo<'s>`) for locals.
-            ///
-            /// # Safety
-            ///
-            /// `obj` must be a valid, non-null JS object pointer with private
-            /// data of the expected inner type.
-            #[doc(hidden)]
-            pub unsafe fn from_raw(obj: *mut ::js::native::JSObject) -> Self {
-                #ref_alias(::core_runtime::class::HeapRef::from_raw(obj))
-            }
-
-            /// Get the raw JS object pointer.
-            pub fn get_jsobject(&self) -> *mut ::js::native::JSObject {
-                self.0.get_jsobject()
-            }
-        }
-
-        impl From<::core_runtime::class::HeapRef<#inner_name>> for #ref_alias {
-            #[js::allow_unrooted]
-            fn from(hr: ::core_runtime::class::HeapRef<#inner_name>) -> Self {
-                #ref_alias(hr)
-            }
-        }
-
-        impl ::std::ops::Deref for #ref_alias {
-            type Target = ::core_runtime::class::HeapRef<#inner_name>;
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-
-        impl ::std::ops::DerefMut for #ref_alias {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
-            }
-        }
-
-        unsafe impl ::js::heap::Trace for #ref_alias {
+        impl<'s> ::js::conversions::ToJSValConvertible for #struct_name<'s> {
             #[inline]
-            unsafe fn trace(&self, trc: *mut ::js::native::JSTracer) {
-                self.0.trace(trc);
+            unsafe fn to_jsval(
+                &self,
+                cx: *mut ::js::native::RawJSContext,
+                rval: ::js::native::MutableHandleValue<'_>,
+            ) {
+                self.0.to_jsval(cx, rval)
+            }
+        }
+
+        impl<'s> ::std::convert::From<#struct_name<'s>> for ::js::gc::handle::Heap<#inner_name> {
+            fn from(stack: #struct_name<'s>) -> Self {
+                ::js::gc::handle::Heap::from(stack.0)
+            }
+        }
+
+        impl<'s> ::std::convert::From<::js::gc::handle::Stack<'s, #inner_name>> for #struct_name<'s> {
+            fn from(stack: ::js::gc::handle::Stack<'s, #inner_name>) -> Self {
+                #struct_name(stack)
             }
         }
     };
 
-    // If extends is specified, append inheritance impls
+    // If extends is specified, append inheritance impls and set Deref target
+    // to the parent type. Otherwise, Deref targets Object.
     let output = if let Some(ref inner_parent_name) = inner_parent {
         let parent_name = opts_extends_ident.as_ref().unwrap();
-        let parent_ref = format_ident!("{}Ref", parent_name);
         quote! {
             #output
 
-            impl ::core_runtime::class::HasParent for #inner_name {
+            // Deref: Foo<'s> -> Parent<'s>
+            impl<'s> ::std::ops::Deref for #struct_name<'s> {
+                type Target = #parent_name<'s>;
+                fn deref(&self) -> &Self::Target {
+                    unsafe { ::std::mem::transmute(self) }
+                }
+            }
+
+            impl ::js::class::HasParent for #inner_name {
                 type Parent = #inner_parent_name;
                 fn as_parent(&self) -> &#inner_parent_name { &self.parent }
                 fn as_parent_mut(&mut self) -> &mut #inner_parent_name { &mut self.parent }
             }
 
-            impl ::core_runtime::class::DerivedFrom<#inner_parent_name> for #inner_name {}
+            impl ::js::class::DerivedFrom<#inner_parent_name> for #inner_name {}
 
-            // Upcast on the stack newtype: Child<'s> -> Parent<'s>
             impl<'s> #struct_name<'s> {
-                /// Upcast to the parent class stack newtype.
+                /// Upcast to the parent class type.
                 ///
                 /// The returned handle wraps the same JS object — only the
-                /// Rust view changes.  Always succeeds because the child
-                /// is guaranteed to derive from the parent.
+                /// Rust view changes.
                 #[inline]
                 pub fn upcast(self) -> #parent_name<'s> {
-                    // SAFETY: DerivedFrom guarantees the object IS the parent type.
-                    unsafe { #parent_name::from_handle(self.handle()) }
-                }
-            }
-
-            impl #ref_alias {
-                /// Upcast this ref to the parent class ref type.
-                #[js::allow_unrooted]
-                pub fn upcast(&self) -> #parent_ref {
-                    #parent_ref::from(self.0.upcast())
+                    unsafe { ::js::class::StackType::from_handle_unchecked(self.0.handle()) }
                 }
             }
         }
     } else {
-        output
+        quote! {
+            #output
+
+            // Deref: Foo<'s> -> Object<'s> (base case, no parent)
+            impl<'s> ::std::ops::Deref for #struct_name<'s> {
+                type Target = ::js::Object<'s>;
+                fn deref(&self) -> &Self::Target {
+                    unsafe { ::std::mem::transmute(self) }
+                }
+            }
+        }
     };
 
     output.into()
@@ -706,7 +554,7 @@ struct MethodInfo {
 /// Attribute macro for an `impl` block that generates JSNative wrappers.
 ///
 /// The impl block is written on the user-visible type name (e.g. `impl Foo`),
-/// but is rewritten to target the inner data struct (`impl __FooInner`).
+/// but is rewritten to target the inner data struct (`impl FooImpl`).
 /// Forwarding methods and constructors are generated on the stack newtype
 /// `Foo<'s>`.
 ///
@@ -745,7 +593,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // Compute the inner data struct name
-    let inner_name = format_ident!("__{}Inner", type_name);
+    let inner_name = format_ident!("{}Impl", type_name);
 
     let mut methods: Vec<MethodInfo> = Vec::new();
     let mut ctor_original_name: Option<Ident> = None;
@@ -858,7 +706,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     if let FnArg::Typed(pat_ty) = arg {
                         if is_rest_args_type(&pat_ty.ty) {
                             *pat_ty.ty = syn::parse_quote! {
-                                ::core_runtime::class::RestArgs<#inner_ty>
+                                ::js::class::RestArgs<#inner_ty>
                             };
                         }
                     }
@@ -869,7 +717,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Rewrite the impl block's self type to __FooInner
+    // Rewrite the impl block's self type to FooImpl
     *input.self_ty = syn::parse_quote! { #inner_name };
 
     // Suppress clippy warnings for generated impl (e.g. inherent to_string methods)
@@ -981,10 +829,10 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         });
     }
 
-    // Generate the ConstructorRegistrar impl (on __FooInner)
+    // Generate the ConstructorRegistrar impl (on FooImpl)
     let ctor_impl = if let Some(body) = constructor_body {
         quote! {
-            impl ::core_runtime::class::__ConstructorRegistrar<#inner_name> for ::core_runtime::class::__CtorReg<#inner_name> {
+            impl ::js::class::__ConstructorRegistrar<#inner_name> for ::js::class::__CtorReg<#inner_name> {
                 fn construct(
                     &self,
                     scope: &::js::gc::scope::Scope<'_>,
@@ -996,7 +844,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            impl ::core_runtime::class::__ConstructorRegistrar<#inner_name> for ::core_runtime::class::__CtorReg<#inner_name> {
+            impl ::js::class::__ConstructorRegistrar<#inner_name> for ::js::class::__CtorReg<#inner_name> {
                 fn construct(
                     &self,
                     _scope: &::js::gc::scope::Scope<'_>,
@@ -1008,13 +856,13 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    // Generate the MethodRegistrar impl (on __FooInner)
+    // Generate the MethodRegistrar impl (on FooImpl)
     let method_impl = quote! {
-        impl ::core_runtime::class::__MethodRegistrar<#inner_name> for ::core_runtime::class::__MethodReg<#inner_name> {
+        impl ::js::class::__MethodRegistrar<#inner_name> for ::js::class::__MethodReg<#inner_name> {
             fn register(
                 &self,
-                builder: ::core_runtime::class::ClassBuilder<#inner_name>,
-            ) -> ::core_runtime::class::ClassBuilder<#inner_name> {
+                builder: ::js::class::ClassBuilder<#inner_name>,
+            ) -> ::js::class::ClassBuilder<#inner_name> {
                 builder #(#builder_calls)*
             }
         }
@@ -1023,11 +871,11 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate the StaticMethodRegistrar impl (only if static methods exist)
     let static_method_impl = if !static_builder_calls.is_empty() {
         quote! {
-            impl ::core_runtime::class::__StaticMethodRegistrar<#inner_name> for ::core_runtime::class::__StaticMethodReg<#inner_name> {
+            impl ::js::class::__StaticMethodRegistrar<#inner_name> for ::js::class::__StaticMethodReg<#inner_name> {
                 fn register(
                     &self,
-                    builder: ::core_runtime::class::ClassBuilder<#inner_name>,
-                ) -> ::core_runtime::class::ClassBuilder<#inner_name> {
+                    builder: ::js::class::ClassBuilder<#inner_name>,
+                ) -> ::js::class::ClassBuilder<#inner_name> {
                     builder #(#static_builder_calls)*
                 }
             }
@@ -1039,11 +887,11 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate the ConstantRegistrar impl (only if constants exist)
     let constant_impl = if !constant_builder_calls.is_empty() {
         quote! {
-            impl ::core_runtime::class::__ConstantRegistrar<#inner_name> for ::core_runtime::class::__ConstantReg<#inner_name> {
+            impl ::js::class::__ConstantRegistrar<#inner_name> for ::js::class::__ConstantReg<#inner_name> {
                 fn register(
                     &self,
-                    builder: ::core_runtime::class::ClassBuilder<#inner_name>,
-                ) -> ::core_runtime::class::ClassBuilder<#inner_name> {
+                    builder: ::js::class::ClassBuilder<#inner_name>,
+                ) -> ::js::class::ClassBuilder<#inner_name> {
                     builder #(#constant_builder_calls)*
                 }
             }
@@ -1055,7 +903,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate the DestructorRegistrar impl
     let dtor_impl = if let Some(fn_name) = destructor_fn_name {
         quote! {
-            impl ::core_runtime::class::__DestructorRegistrar<#inner_name> for ::core_runtime::class::__DtorReg<#inner_name> {
+            impl ::js::class::__DestructorRegistrar<#inner_name> for ::js::class::__DtorReg<#inner_name> {
                 fn destruct(&self, this: &mut #inner_name) {
                     #inner_name::#fn_name(this);
                 }
@@ -1079,8 +927,8 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     impl<'s> #type_name<'s> {
                         /// Register this class on a global object, making it available
                         /// as a constructor in JavaScript.
-                        pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::object::Object<'s>) {
-                            unsafe { ::core_runtime::class::register_class::<#inner_name>(scope, global); }
+                        pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::Object<'s>) {
+                            unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
                         }
                     }
                 }
@@ -1102,6 +950,28 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     quote! { #inner_name::#ctor_fn_name(#(#param_names),*) }
                 };
 
+                let init_fn = if method.has_cx {
+                    quote! {
+                        /// Construct the inner data for this class without creating
+                        /// a JS object. Used by subclass constructors to initialize
+                        /// their `parent` field.
+                        #[doc(hidden)]
+                        pub fn init(scope: &::js::gc::scope::Scope<'_>, #(#param_decls),*) -> #inner_name {
+                            #call
+                        }
+                    }
+                } else {
+                    quote! {
+                        /// Construct the inner data for this class without creating
+                        /// a JS object. Used by subclass constructors to initialize
+                        /// their `parent` field.
+                        #[doc(hidden)]
+                        pub fn init(#(#param_decls),*) -> #inner_name {
+                            #call
+                        }
+                    }
+                };
+
                 quote! {
                     impl<'s> #type_name<'s> {
                         /// Construct a new instance and return the stack newtype.
@@ -1110,19 +980,19 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                         {
                             unsafe {
                                 let instance = #call;
-                                let obj = ::core_runtime::class::create_instance::<#inner_name>(scope, instance)
+                                let obj = ::js::class::create_instance::<#inner_name>(scope, instance)
                                     .expect(concat!("Class ", stringify!(#type_name), " not registered"));
-                                // Re-root through scope to get Handle<'s, _> with the scope lifetime,
-                                // since Object::handle() narrows the lifetime to the borrow.
-                                let nn = ::std::ptr::NonNull::new(obj.as_raw()).unwrap();
-                                #type_name(scope.root_object(nn))
+                                let nn = ::std::ptr::NonNull::new_unchecked(obj.as_raw());
+                                #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(nn)))
                             }
                         }
 
+                        #init_fn
+
                         /// Register this class on a global object, making it available
                         /// as a constructor in JavaScript.
-                        pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::object::Object<'s>) {
-                            unsafe { ::core_runtime::class::register_class::<#inner_name>(scope, global); }
+                        pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::Object<'s>) {
+                            unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
                         }
                     }
                 }
@@ -1159,9 +1029,20 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     continue;
                 }
                 let ret_ty = &method.fn_item.sig.output;
-                let get_inner = quote! { let inner = unsafe { self.data() }; };
+                let fn_generics = &method.fn_item.sig.generics;
+                let get_inner =
+                    quote! { let inner = self.0.data().expect("missing private data"); };
+                // When the method has lifetime generics (e.g. `<'a>`), bind
+                // the scope reference to the first lifetime so return types
+                // like `Item<'a>` are properly connected.
                 let cx_param = if method.has_cx {
-                    quote! { scope: &::js::gc::scope::Scope<'_>, }
+                    let first_lt = fn_generics.lifetimes().next();
+                    if let Some(lt) = first_lt {
+                        let lt = &lt.lifetime;
+                        quote! { scope: &#lt ::js::gc::scope::Scope<'_>, }
+                    } else {
+                        quote! { scope: &::js::gc::scope::Scope<'_>, }
+                    }
                 } else {
                     quote! {}
                 };
@@ -1171,7 +1052,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     quote! {}
                 };
                 newtype_methods.push(quote! {
-                    pub fn #fn_name(&self, #cx_param) #ret_ty {
+                    pub fn #fn_name #fn_generics (&self, #cx_param) #ret_ty {
                         #get_inner
                         #inner_name::#fn_name(inner, #cx_arg)
                     }
@@ -1195,6 +1076,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     continue;
                 }
                 let ret_ty = &method.fn_item.sig.output;
+                let fn_generics = &method.fn_item.sig.generics;
                 let param_decls: Vec<_> = method
                     .params
                     .iter()
@@ -1205,9 +1087,15 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     .iter()
                     .map(|(name, _)| quote! { #name })
                     .collect();
-                let get_inner = quote! { let inner = unsafe { self.data_mut() }; };
+                let get_inner = quote! { let inner = unsafe { self.0.data_mut() }.expect("missing private data"); };
                 let cx_param = if method.has_cx {
-                    quote! { scope: &::js::gc::scope::Scope<'_>, }
+                    let first_lt = fn_generics.lifetimes().next();
+                    if let Some(lt) = first_lt {
+                        let lt = &lt.lifetime;
+                        quote! { scope: &#lt ::js::gc::scope::Scope<'_>, }
+                    } else {
+                        quote! { scope: &::js::gc::scope::Scope<'_>, }
+                    }
                 } else {
                     quote! {}
                 };
@@ -1217,7 +1105,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     quote! {}
                 };
                 newtype_methods.push(quote! {
-                    pub fn #fn_name(&self, #cx_param #(#param_decls),*) #ret_ty {
+                    pub fn #fn_name #fn_generics (&self, #cx_param #(#param_decls),*) #ret_ty {
                         #get_inner
                         #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
                     }
@@ -1253,6 +1141,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     continue;
                 }
                 let ret_ty = &method.fn_item.sig.output;
+                let fn_generics = &method.fn_item.sig.generics;
                 let param_decls: Vec<_> = method
                     .params
                     .iter()
@@ -1265,9 +1154,9 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     .collect();
 
                 let get_inner = if method.has_mut_self {
-                    quote! { let inner = unsafe { self.data_mut() }; }
+                    quote! { let inner = unsafe { self.0.data_mut() }.expect("missing private data"); }
                 } else {
-                    quote! { let inner = unsafe { self.data() }; }
+                    quote! { let inner = self.0.data().expect("missing private data"); }
                 };
 
                 // InstanceValue methods return Self wrapped in a new JS object —
@@ -1286,10 +1175,10 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                             #get_inner
                             let __data = #inner_name::#fn_name(inner, #cx_arg #(#param_names),*);
                             unsafe {
-                                let __obj = ::core_runtime::class::create_instance::<#inner_name>(scope, __data)
+                                let __obj = ::js::class::create_instance::<#inner_name>(scope, __data)
                                     .expect(concat!("Class ", stringify!(#type_name), " not registered"));
                                 let __nn = ::std::ptr::NonNull::new(__obj.as_raw()).unwrap();
-                                #type_name(scope.root_object(__nn))
+                                #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn)))
                             }
                         }
                     });
@@ -1298,7 +1187,13 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 // If the method takes a Scope parameter, forward it
                 let cx_param = if method.has_cx {
-                    quote! { scope: &::js::gc::scope::Scope<'_>, }
+                    let first_lt = fn_generics.lifetimes().next();
+                    if let Some(lt) = first_lt {
+                        let lt = &lt.lifetime;
+                        quote! { scope: &#lt ::js::gc::scope::Scope<'_>, }
+                    } else {
+                        quote! { scope: &::js::gc::scope::Scope<'_>, }
+                    }
                 } else {
                     quote! {}
                 };
@@ -1309,7 +1204,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                 };
 
                 newtype_methods.push(quote! {
-                    pub fn #fn_name(&self, #cx_param #(#param_decls),*) #ret_ty {
+                    pub fn #fn_name #fn_generics (&self, #cx_param #(#param_decls),*) #ret_ty {
                         #get_inner
                         #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
                     }
@@ -1538,6 +1433,40 @@ fn is_integer_type(ty: &Type) -> bool {
     )
 }
 
+/// Detect stack newtype types like `Item<'_>` or `Item<'s>`.
+///
+/// Stack newtypes are generated by `#[jsclass]` and always carry a single
+/// lifetime parameter. This heuristic checks for `Ident<'lifetime>` patterns,
+/// excluding known non-newtype types.
+fn is_stack_newtype_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
+                // A single lifetime argument like Foo<'_> or Foo<'s>
+                return args.args.len() == 1
+                    && matches!(args.args.first(), Some(syn::GenericArgument::Lifetime(_)));
+            }
+        }
+    }
+    false
+}
+
+/// Strip the lifetime parameter from a stack newtype type.
+///
+/// Converts `Item<'_>` → `Item` for use in turbofish syntax like
+/// `get_stack_arg::<Item>(...)`.
+fn strip_lifetime(ty: &Type) -> Type {
+    if let Type::Path(tp) = ty {
+        let mut tp = tp.clone();
+        if let Some(seg) = tp.path.segments.last_mut() {
+            seg.arguments = syn::PathArguments::None;
+        }
+        Type::Path(tp)
+    } else {
+        ty.clone()
+    }
+}
+
 /// Check if a type string is exactly `Result < () , () >`
 fn is_result_unit_unit(ty_str: &str) -> bool {
     let normalized: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1626,13 +1555,20 @@ fn gen_arg_extractions(
         .enumerate()
         .map(|(i, (name, ty))| {
             let idx = i as u32;
-            let extract = if is_integer_type(ty) {
+            let extract = if is_stack_newtype_type(ty) {
+                // Strip the lifetime to get the bare type name for
+                // `get_stack_arg::<Foo>()`.
+                let bare = strip_lifetime(ty);
                 quote! {
-                    ::core_runtime::class::get_int_arg(#scope_expr, #args_expr, #idx,
+                    ::js::class::get_stack_arg::<#bare>(#scope_expr, #args_expr, #idx)
+                }
+            } else if is_integer_type(ty) {
+                quote! {
+                    ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
                         ::js::conversions::ConversionBehavior::Default)
                 }
             } else {
-                quote! { ::core_runtime::class::get_arg(#scope_expr, #args_expr, #idx) }
+                quote! { ::js::class::get_arg(#scope_expr, #args_expr, #idx) }
             };
             if use_question_mark {
                 quote! { let #name = #extract?; }
@@ -1688,14 +1624,14 @@ fn gen_method_native(
     // Use __args internally to avoid shadowing user's rest param names
     let this_extraction = if info.has_self {
         quote! {
-            let __self = match ::core_runtime::class::get_this::<#type_name>(&scope, &__args) {
+            let __self = match ::js::class::get_this::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
                 Err(()) => return false,
             };
         }
     } else if info.has_mut_self {
         quote! {
-            let __self = match ::core_runtime::class::get_this_mut::<#type_name>(&scope, &__args) {
+            let __self = match ::js::class::get_this_mut::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
                 Err(()) => return false,
             };
@@ -1724,7 +1660,7 @@ fn gen_method_native(
                     let __handle = unsafe {
                         ::js::native::Handle::from_raw(__args.get(__i))
                     };
-                    match <#inner_ty as ::core_runtime::class::FromJSValue>::from_js_value(
+                    match <#inner_ty as ::js::class::FromJSValue>::from_js_value(
                         &scope,
                         __handle.get(),
                     ) {
@@ -1732,7 +1668,7 @@ fn gen_method_native(
                         Err(()) => return false,
                     }
                 }
-                ::core_runtime::class::RestArgs::new(__rest_vec)
+                ::js::class::RestArgs::new(__rest_vec)
             };
         }
     } else {
@@ -1776,22 +1712,22 @@ fn gen_method_native(
         },
         ReturnStyle::Value => quote! {
             let __result = #call;
-            ::core_runtime::class::set_return(&scope, &__args, &__result);
+            ::js::class::set_return(&scope, &__args, &__result);
             true
         },
         ReturnStyle::Void => quote! {
             #call;
-            ::core_runtime::class::set_return(&scope, &__args, &::js::value::undefined());
+            ::js::class::set_return(&scope, &__args, &::js::value::undefined());
             true
         },
         ReturnStyle::ResultVoid => quote! {
             match #call {
                 Ok(()) => {
-                    ::core_runtime::class::set_return(&scope, &__args, &::js::value::undefined());
+                    ::js::class::set_return(&scope, &__args, &::js::value::undefined());
                     true
                 }
                 Err(__e) => {
-                    ::core_runtime::class::ThrowException::throw(__e, &scope);
+                    ::js::error::ThrowException::throw(__e, &scope);
                     false
                 }
             }
@@ -1799,11 +1735,11 @@ fn gen_method_native(
         ReturnStyle::ResultValue => quote! {
             match #call {
                 Ok(__v) => {
-                    ::core_runtime::class::set_return(&scope, &__args, &__v);
+                    ::js::class::set_return(&scope, &__args, &__v);
                     true
                 }
                 Err(__e) => {
-                    ::core_runtime::class::ThrowException::throw(__e, &scope);
+                    ::js::error::ThrowException::throw(__e, &scope);
                     false
                 }
             }
@@ -1819,12 +1755,12 @@ fn gen_method_native(
             // Call the user's method to get the JSPromise (containing the future)
             let __js_promise = #call;
             // Spawn the future, which will resolve/reject the promise later
-            ::core_runtime::class::__spawn_promise(__promise.as_raw(), __js_promise);
+            ::js::class::__spawn_promise(__promise.as_raw(), __js_promise);
             true
         },
         ReturnStyle::InstanceValue => quote! {
             let __instance = #call;
-            let __obj = match ::core_runtime::class::create_instance::<#type_name>(&scope, __instance) {
+            let __obj = match ::js::class::create_instance::<#type_name>(&scope, __instance) {
                 Ok(o) => o,
                 Err(_) => return false,
             };
@@ -1883,7 +1819,7 @@ fn gen_accessor_native(
     let this_extraction = if is_getter {
         // Getter: &self
         quote! {
-            let __self = match ::core_runtime::class::get_this::<#type_name>(&scope, &__args) {
+            let __self = match ::js::class::get_this::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
                 Err(()) => return false,
             };
@@ -1891,7 +1827,7 @@ fn gen_accessor_native(
     } else {
         // Setter: &mut self
         quote! {
-            let __self = match ::core_runtime::class::get_this_mut::<#type_name>(&scope, &__args) {
+            let __self = match ::js::class::get_this_mut::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
                 Err(()) => return false,
             };
@@ -1909,24 +1845,24 @@ fn gen_accessor_native(
         match &info.return_style {
             ReturnStyle::Value => quote! {
                 let __result = #call;
-                ::core_runtime::class::set_return(&scope, &__args, &__result);
+                ::js::class::set_return(&scope, &__args, &__result);
                 true
             },
             ReturnStyle::ResultValue => quote! {
                 match #call {
                     Ok(__v) => {
-                        ::core_runtime::class::set_return(&scope, &__args, &__v);
+                        ::js::class::set_return(&scope, &__args, &__v);
                         true
                     }
                     Err(__e) => {
-                        ::core_runtime::class::ThrowException::throw(__e, &scope);
+                        ::js::error::ThrowException::throw(__e, &scope);
                         false
                     }
                 }
             },
             _ => quote! {
                 let __result = #call;
-                ::core_runtime::class::set_return(&scope, &__args, &__result);
+                ::js::class::set_return(&scope, &__args, &__result);
                 true
             },
         }
@@ -1951,7 +1887,7 @@ fn gen_accessor_native(
                         true
                     }
                     Err(__e) => {
-                        ::core_runtime::class::ThrowException::throw(__e, &scope);
+                        ::js::error::ThrowException::throw(__e, &scope);
                         false
                     }
                 }
@@ -2201,7 +2137,7 @@ pub fn jsmodule(attr: TokenStream, item: TokenStream) -> TokenStream {
             },
             ReturnStyle::Value => quote! {
                 let result = #call;
-                ::core_runtime::class::set_return(&scope, &args, &result);
+                ::js::class::set_return(&scope, &args, &result);
                 true
             },
             ReturnStyle::ResultVoid => quote! {
@@ -2211,7 +2147,7 @@ pub fn jsmodule(attr: TokenStream, item: TokenStream) -> TokenStream {
                         true
                     }
                     Err(e) => {
-                        ::core_runtime::class::ThrowException::throw(e, &scope);
+                        ::js::error::ThrowException::throw(e, &scope);
                         false
                     }
                 }
@@ -2219,11 +2155,11 @@ pub fn jsmodule(attr: TokenStream, item: TokenStream) -> TokenStream {
             ReturnStyle::ResultValue => quote! {
                 match #call {
                     Ok(v) => {
-                        ::core_runtime::class::set_return(&scope, &args, &v);
+                        ::js::class::set_return(&scope, &args, &v);
                         true
                     }
                     Err(e) => {
-                        ::core_runtime::class::ThrowException::throw(e, &scope);
+                        ::js::error::ThrowException::throw(e, &scope);
                         false
                     }
                 }
@@ -2489,7 +2425,7 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
             },
             ReturnStyle::Value => quote! {
                 let result = #call;
-                ::core_runtime::class::set_return(&scope, &args, &result);
+                ::js::class::set_return(&scope, &args, &result);
                 true
             },
             ReturnStyle::ResultVoid => quote! {
@@ -2499,7 +2435,7 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
                         true
                     }
                     Err(e) => {
-                        ::core_runtime::class::ThrowException::throw(e, &scope);
+                        ::js::error::ThrowException::throw(e, &scope);
                         false
                     }
                 }
@@ -2507,11 +2443,11 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
             ReturnStyle::ResultValue => quote! {
                 match #call {
                     Ok(v) => {
-                        ::core_runtime::class::set_return(&scope, &args, &v);
+                        ::js::class::set_return(&scope, &args, &v);
                         true
                     }
                     Err(e) => {
-                        ::core_runtime::class::ThrowException::throw(e, &scope);
+                        ::js::error::ThrowException::throw(e, &scope);
                         false
                     }
                 }
@@ -2596,7 +2532,7 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
             /// Install all global functions, constants, and classes onto the given global object.
             pub unsafe fn add_to_global<'s>(
                 scope: &'s ::js::gc::scope::Scope<'_>,
-                global: ::js::object::Object<'s>,
+                global: ::js::Object<'s>,
             ) {
                 #(#class_install_calls)*
                 #(#install_calls)*
@@ -2774,7 +2710,7 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
             },
             ReturnStyle::Value => quote! {
                 let result = #call;
-                ::core_runtime::class::set_return(&scope, &args, &result);
+                ::js::class::set_return(&scope, &args, &result);
                 true
             },
             ReturnStyle::ResultVoid => quote! {
@@ -2784,7 +2720,7 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
                         true
                     }
                     Err(e) => {
-                        ::core_runtime::class::ThrowException::throw(e, &scope);
+                        ::js::error::ThrowException::throw(e, &scope);
                         false
                     }
                 }
@@ -2792,11 +2728,11 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
             ReturnStyle::ResultValue => quote! {
                 match #call {
                     Ok(v) => {
-                        ::core_runtime::class::set_return(&scope, &args, &v);
+                        ::js::class::set_return(&scope, &args, &v);
                         true
                     }
                     Err(e) => {
-                        ::core_runtime::class::ThrowException::throw(e, &scope);
+                        ::js::error::ThrowException::throw(e, &scope);
                         false
                     }
                 }
@@ -2837,7 +2773,7 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
     // Generate Symbol.toStringTag installation for webidl_namespace
     let to_string_tag_install = if config.auto_to_string_tag {
         quote! {
-            ::core_runtime::class::define_to_string_tag(scope, ns_handle, #js_ns_name);
+            ::js::class::define_to_string_tag(scope, ns_handle, #js_ns_name);
         }
     } else {
         quote! {}
@@ -2856,10 +2792,10 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
             /// Install this namespace onto the given global object.
             pub unsafe fn add_to_global<'s>(
                 scope: &'s ::js::gc::scope::Scope<'_>,
-                global: ::js::object::Object<'s>,
+                global: ::js::Object<'s>,
             ) {
                 // Create a plain object for the namespace.
-                let ns_obj = ::js::object::Object::new_plain(scope)
+                let ns_obj = ::js::Object::new_plain(scope)
                     .expect("failed to create namespace object");
                 let ns_handle = ns_obj.handle();
 

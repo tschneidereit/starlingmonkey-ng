@@ -14,8 +14,8 @@
 #   just check           Run fmt check + clippy + tests
 
 # Build in debug mode.
-build:
-    cargo build --features debugmozjs
+build *TARGET:
+    cargo build --features debugmozjs {{TARGET}}
 
 # Run all Rust tests.
 test *TARGET:
@@ -66,7 +66,7 @@ crown:
 
 # Run most checks: formatting, clippy, tests.
 check:
-    just fmt-check --all --exclude tools
+    just fmt-check --all
     just clippy --all
     just test --examples
 

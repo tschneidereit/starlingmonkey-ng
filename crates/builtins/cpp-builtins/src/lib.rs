@@ -14,7 +14,6 @@ pub unsafe fn install(cx: *mut JSContext, global: HandleObject) -> bool {
     unsafe { console_install(cx, global.get()) }
 }
 
-
 #[cfg(test)]
 mod tests {
     mod console_integration {

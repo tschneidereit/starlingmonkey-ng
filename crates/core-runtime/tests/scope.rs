@@ -23,7 +23,7 @@ fn test_scope_rooting() {
         assert_eq!(result, "scope test");
 
         // Root an object via the scope.
-        let obj = js::object::Object::new(&scope, None).unwrap();
+        let obj = js::Object::new(&scope, None).unwrap();
         assert!(!obj.as_raw().is_null());
 
         // Root a value via the scope.
@@ -32,7 +32,7 @@ fn test_scope_rooting() {
 
         // Global handle works.
         let g = scope.global();
-        assert!(!g.get().is_null());
+        assert!(!g.as_raw().is_null());
     }
 
     // --- Inner scope ---
@@ -64,7 +64,7 @@ fn test_scope_rooting() {
     {
         // Root some values.
         let s = js::string::from_str(&scope, "survives gc").unwrap();
-        let obj = js::object::Object::new(&scope, None).unwrap();
+        let obj = js::Object::new(&scope, None).unwrap();
         let val = scope.root_value(value::from_i32(99));
 
         // Trigger GC.

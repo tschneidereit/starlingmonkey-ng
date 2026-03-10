@@ -23,7 +23,7 @@ use std::fmt;
 use std::ptr;
 
 use crate::gc::scope::Scope;
-use crate::object::Object;
+use crate::Object;
 use mozjs::context::JSContext;
 use mozjs::jsapi::{
     JSErrorFormatString, JSExnType, JSString, JS_ClearPendingException, JS_GetPendingException,
@@ -91,7 +91,7 @@ impl JSError {
             let exc = exc_val.get();
             if exc.is_object() {
                 let exc_obj = Object::from_value(scope, exc).unwrap();
-                let report = mozjs::jsapi::JS_ErrorFromException(raw, exc_obj.raw_handle());
+                let report = mozjs::jsapi::JS_ErrorFromException(raw, exc_obj.handle().into());
 
                 // Try to extract the stack trace from the error object.
                 let maybe_stack =
@@ -455,3 +455,132 @@ impl fmt::Display for SyntaxError {
 }
 
 impl std::error::Error for SyntaxError {}
+
+// ---------------------------------------------------------------------------
+// ThrowException trait — typed error dispatch for proc macros
+// ---------------------------------------------------------------------------
+
+/// Trait for converting a Rust error value into a pending JavaScript exception.
+///
+/// The `#[jsmethods]`, `#[jsglobals]`, and `#[jsmodule]` proc macros use this
+/// trait to dispatch `Err` values to the correct SpiderMonkey error API. For
+/// example, returning `Err(TypeError("bad argument".into()))` throws a
+/// JavaScript `TypeError`, while returning `Err(String)` throws a `TypeError`.
+///
+/// # Implementing
+///
+/// Custom error types (like `DOMExceptionError`) can implement this trait to
+/// throw domain-specific exception objects.
+///
+/// # Safety
+///
+/// Implementations must set a pending exception on the context. The scope
+/// guarantees that a realm is entered.
+pub trait ThrowException {
+    /// Set a pending JavaScript exception from this error value.
+    ///
+    /// After this call, a JS exception must be pending on the context.
+    ///
+    /// # Safety
+    ///
+    /// A realm must be entered on the scope's context.
+    unsafe fn throw(self, scope: &Scope<'_>);
+}
+
+impl ThrowException for String {
+    /// Throw a `TypeError` with this string as the message.
+    unsafe fn throw(self, scope: &Scope<'_>) {
+        throw_error(scope, &self);
+    }
+}
+
+impl ThrowException for TypeError {
+    unsafe fn throw(self, scope: &Scope<'_>) {
+        TypeError::throw(&self, scope);
+    }
+}
+
+impl ThrowException for RangeError {
+    unsafe fn throw(self, scope: &Scope<'_>) {
+        RangeError::throw(&self, scope);
+    }
+}
+
+impl ThrowException for SyntaxError {
+    unsafe fn throw(self, scope: &Scope<'_>) {
+        SyntaxError::throw(&self, scope);
+    }
+}
+
+impl ThrowException for JSError {
+    /// No-op: `JSError` indicates an exception is already pending on the
+    /// context, so there is nothing additional to throw.
+    unsafe fn throw(self, _scope: &Scope<'_>) {}
+}
+
+// ---------------------------------------------------------------------------
+// throw_error — convenience helper for proc macro codegen
+// ---------------------------------------------------------------------------
+
+/// Throw a `TypeError` with the given message.
+///
+/// This is used by the `#[jsmethods]` macro to convert Rust `Err` values
+/// into JS exceptions. The error message is converted to a `CString`.
+///
+/// # Safety
+///
+/// A realm must be entered on the scope's context.
+pub unsafe fn throw_error(scope: &Scope<'_>, msg: &str) {
+    let c_msg = CString::new(msg).unwrap_or_else(|_| CString::new("unknown error").unwrap());
+    throw_type_error(scope.cx_mut(), &c_msg);
+}
+
+// ---------------------------------------------------------------------------
+// capture_stack_from_error
+// ---------------------------------------------------------------------------
+
+/// Capture the current call stack from a temporary `Error` object and set it
+/// as the `stack` property on `obj`.
+///
+/// This creates `new Error()` to let SpiderMonkey capture the stack trace,
+/// reads the resulting `stack` property, and copies it onto `obj`.
+///
+/// Used by error-like classes (e.g. DOMException, or any class with
+/// `js_proto = "Error"`) that need `[[ErrorData]]` behavior.
+///
+/// Silently returns without setting `stack` if any step fails.
+///
+/// # Safety
+///
+/// Must be called within a valid scope with an active realm.
+pub unsafe fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
+    use crate::class_spec::JSProtoKey;
+    use crate::native::HandleValueArray;
+
+    // Create `new Error()` to capture the current stack.
+    let error_ctor = match crate::class::get_class_object(scope, JSProtoKey::JSProto_Error) {
+        Ok(ctor) => ctor,
+        Err(_) => return,
+    };
+
+    let ctor_val = scope.root_value(unsafe { crate::value::from_object(error_ctor.get()) });
+    let empty_args = HandleValueArray {
+        length_: 0,
+        elements_: ptr::null(),
+    };
+
+    let error_obj = match crate::function::construct(scope, ctor_val, &empty_args) {
+        Ok(obj) => obj,
+        Err(_) => return,
+    };
+
+    // Read the `stack` property from the Error object.
+    let stack_val = match error_obj.get_property(scope, c"stack") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Set the stack as an own property on the target object.
+    let stack_handle = scope.root_value(stack_val);
+    let _ = obj.set_property(scope, c"stack", stack_handle);
+}

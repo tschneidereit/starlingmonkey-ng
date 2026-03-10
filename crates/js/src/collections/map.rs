@@ -4,9 +4,9 @@
 
 use std::ptr::NonNull;
 
+use crate::gc::handle::{JsType, Stack};
 use crate::gc::scope::Scope;
-use mozjs::gc::Handle;
-use mozjs::jsapi::{JSObject, Value};
+use mozjs::jsapi::Value;
 use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
@@ -14,53 +14,35 @@ use mozjs::rust::{HandleObject, HandleValue};
 
 use crate::builtins::{Is, To};
 use crate::error::JSError;
-use crate::object::Object;
+use crate::Object;
 
-/// A JavaScript `Map` object, rooted in a scope's pool.
+/// Marker type for JavaScript `Map` objects.
 ///
-/// `Map<'s>` wraps a `Handle<'s, *mut JSObject>` known to be a `Map`.
-/// Construction automatically roots in the scope:
+/// Use the `js::Map` alias for [`Stack<'s, Map>`](crate::gc::handle::Stack)
+/// as the scope-rooted handle type:
 ///
 /// ```ignore
-/// let map = Map::new(&scope)?;
+/// let map = js::Map::new(&scope)?;
 /// map.insert(&scope, key.handle(), val.handle())?;
 /// ```
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug)]
-pub struct Map<'s>(pub(crate) Handle<'s, *mut JSObject>);
+pub struct Map;
 
-impl<'s> Map<'s> {
+impl JsType for Map {
+    const JS_NAME: &'static str = "Map";
+}
+
+impl<'s> Stack<'s, Map> {
     /// Create a new empty `Map` object.
     pub fn new(scope: &'s Scope<'_>) -> Result<Self, JSError> {
         let obj = unsafe { wrappers2::NewMapObject(scope.cx_mut()) };
         NonNull::new(obj)
-            .map(|nn| Map(scope.root_object(nn)))
+            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
             .ok_or(JSError)
-    }
-
-    /// Get the rooted handle to the underlying `JSObject`.
-    pub fn handle(&self) -> HandleObject<'s> {
-        self.0
-    }
-
-    /// Get a raw `NonNull` pointer to the underlying `JSObject`.
-    pub fn as_non_null(self) -> Option<NonNull<JSObject>> {
-        NonNull::new(self.0.get())
-    }
-
-    /// Get the raw `*mut JSObject` pointer.
-    pub fn as_raw(self) -> *mut JSObject {
-        self.0.get()
-    }
-
-    /// Wrap an existing rooted handle in a `Map`.
-    pub fn from_handle(handle: Handle<'s, *mut JSObject>) -> Self {
-        Map(handle)
     }
 
     /// Get the number of entries.
     pub fn size(&self, scope: &Scope<'_>) -> u32 {
-        unsafe { wrappers2::MapSize(scope.cx(), self.0) }
+        unsafe { wrappers2::MapSize(scope.cx(), self.handle()) }
     }
 
     /// Look up a value by key.
@@ -69,7 +51,8 @@ impl<'s> Map<'s> {
     /// `Handle::get`.
     pub fn lookup(&self, scope: &Scope<'_>, key: HandleValue) -> Result<Value, JSError> {
         rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::MapGet(scope.cx_mut(), self.0, key, rval.handle_mut()) };
+        let ok =
+            unsafe { wrappers2::MapGet(scope.cx_mut(), self.handle(), key, rval.handle_mut()) };
         JSError::check(ok)?;
         Ok(rval.get())
     }
@@ -77,7 +60,7 @@ impl<'s> Map<'s> {
     /// Check whether the map contains a key.
     pub fn has(&self, scope: &Scope<'_>, key: HandleValue) -> Result<bool, JSError> {
         let mut result = false;
-        let ok = unsafe { wrappers2::MapHas(scope.cx_mut(), self.0, key, &mut result) };
+        let ok = unsafe { wrappers2::MapHas(scope.cx_mut(), self.handle(), key, &mut result) };
         JSError::check(ok)?;
         Ok(result)
     }
@@ -92,28 +75,28 @@ impl<'s> Map<'s> {
         key: HandleValue,
         val: HandleValue,
     ) -> Result<(), JSError> {
-        let ok = unsafe { wrappers2::MapSet(scope.cx_mut(), self.0, key, val) };
+        let ok = unsafe { wrappers2::MapSet(scope.cx_mut(), self.handle(), key, val) };
         JSError::check(ok)
     }
 
     /// Delete a key. Returns whether the key was present.
     pub fn delete(&self, scope: &Scope<'_>, key: HandleValue) -> Result<bool, JSError> {
         let mut deleted = false;
-        let ok = unsafe { wrappers2::MapDelete(scope.cx_mut(), self.0, key, &mut deleted) };
+        let ok = unsafe { wrappers2::MapDelete(scope.cx_mut(), self.handle(), key, &mut deleted) };
         JSError::check(ok)?;
         Ok(deleted)
     }
 
     /// Remove all entries from the map.
     pub fn clear(&self, scope: &Scope<'_>) -> Result<(), JSError> {
-        let ok = unsafe { wrappers2::MapClear(scope.cx(), self.0) };
+        let ok = unsafe { wrappers2::MapClear(scope.cx(), self.handle()) };
         JSError::check(ok)
     }
 
     /// Get an iterator over the map's keys.
     pub fn keys(&self, scope: &Scope<'_>) -> Result<Value, JSError> {
         rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::MapKeys(scope.cx_mut(), self.0, rval.handle_mut()) };
+        let ok = unsafe { wrappers2::MapKeys(scope.cx_mut(), self.handle(), rval.handle_mut()) };
         JSError::check(ok)?;
         Ok(rval.get())
     }
@@ -121,7 +104,7 @@ impl<'s> Map<'s> {
     /// Get an iterator over the map's values.
     pub fn values(&self, scope: &Scope<'_>) -> Result<Value, JSError> {
         rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::MapValues(scope.cx_mut(), self.0, rval.handle_mut()) };
+        let ok = unsafe { wrappers2::MapValues(scope.cx_mut(), self.handle(), rval.handle_mut()) };
         JSError::check(ok)?;
         Ok(rval.get())
     }
@@ -129,7 +112,7 @@ impl<'s> Map<'s> {
     /// Get an iterator over the map's entries (key-value pairs).
     pub fn entries(&self, scope: &Scope<'_>) -> Result<Value, JSError> {
         rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::MapEntries(scope.cx_mut(), self.0, rval.handle_mut()) };
+        let ok = unsafe { wrappers2::MapEntries(scope.cx_mut(), self.handle(), rval.handle_mut()) };
         JSError::check(ok)?;
         Ok(rval.get())
     }
@@ -141,7 +124,8 @@ impl<'s> Map<'s> {
         callback_fn: HandleValue,
         this_val: HandleValue,
     ) -> Result<(), JSError> {
-        let ok = unsafe { wrappers2::MapForEach(scope.cx_mut(), self.0, callback_fn, this_val) };
+        let ok =
+            unsafe { wrappers2::MapForEach(scope.cx_mut(), self.handle(), callback_fn, this_val) };
         JSError::check(ok)
     }
 
@@ -155,28 +139,29 @@ impl<'s> Map<'s> {
     }
 }
 
-impl Is for Map<'_> {
+impl Is for Map {
     fn is(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError> {
-        Map::is_map(scope, obj)
+        Stack::<Map>::is_map(scope, obj)
     }
 }
 
-impl<'s> To<Map<'s>> for Object<'s> {
-    fn to(&self, scope: &Scope<'_>) -> Result<Map<'s>, JSError> {
-        if Map::is(scope, self.0)? {
-            Ok(Map(self.0))
+impl<'s> To<Stack<'s, Map>> for Object<'s> {
+    fn to(&self, scope: &Scope<'_>) -> Result<Stack<'s, Map>, JSError> {
+        if Map::is(scope, self.handle())? {
+            // SAFETY: We just verified the object is a Map.
+            Ok(unsafe { Stack::from_handle_unchecked(self.handle()) })
         } else {
             Err(JSError)
         }
     }
 }
 
-impl<'s> std::ops::Deref for Map<'s> {
+impl<'s> std::ops::Deref for Stack<'s, Map> {
     type Target = Object<'s>;
 
     fn deref(&self) -> &Object<'s> {
-        // SAFETY: Map and Object are both repr(transparent) over
-        // Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Map<'s> as *const Object<'s>) }
+        // SAFETY: Stack<Map> and Stack<Object> are both repr(transparent)
+        // over Handle<'s, *mut JSObject>.
+        unsafe { &*(self as *const Stack<'s, Map> as *const Object<'s>) }
     }
 }
