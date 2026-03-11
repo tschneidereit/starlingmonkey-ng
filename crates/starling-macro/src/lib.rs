@@ -193,6 +193,11 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
     input.ident = inner_name.clone();
     input.vis = syn::Visibility::Public(syn::token::Pub::default());
     input.attrs.push(syn::parse_quote! { #[doc(hidden)] });
+    // The inner struct is stored in SpiderMonkey reserved slots and traced
+    // via `generic_class_trace`, so its fields don't need independent rooting.
+    input
+        .attrs
+        .push(syn::parse_quote! { #[::js::allow_unrooted_interior] });
 
     // Generate parent_prototype / register_inheritance / ensure_parent_registered
     // methods if extends or js_proto is set.
