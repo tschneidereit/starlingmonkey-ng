@@ -195,6 +195,9 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
     input.attrs.push(syn::parse_quote! { #[doc(hidden)] });
     // The inner struct is stored in SpiderMonkey reserved slots and traced
     // via `generic_class_trace`, so its fields don't need independent rooting.
+    // The temporal GC hazard (Heap<T> existing untraced on the stack during JS
+    // object allocation) is prevented by using `create_instance_with`, which
+    // runs the user constructor AFTER allocating the JS shell object.
     input
         .attrs
         .push(syn::parse_quote! { #[::js::allow_unrooted_interior] });
@@ -984,8 +987,9 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                             -> #type_name<'s>
                         {
                             unsafe {
-                                let instance = #call;
-                                let obj = ::js::class::create_instance::<#inner_name>(scope, instance)
+                                let obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                                    #call
+                                })
                                     .expect(concat!("Class ", stringify!(#type_name), " not registered"));
                                 let nn = ::std::ptr::NonNull::new_unchecked(obj.as_raw());
                                 #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(nn)))
@@ -1178,9 +1182,10 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     newtype_methods.push(quote! {
                         pub fn #fn_name(&self, #cx_param #(#param_decls),*) -> #type_name<'s> {
                             #get_inner
-                            let __data = #inner_name::#fn_name(inner, #cx_arg #(#param_names),*);
                             unsafe {
-                                let __obj = ::js::class::create_instance::<#inner_name>(scope, __data)
+                                let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                                    #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
+                                })
                                     .expect(concat!("Class ", stringify!(#type_name), " not registered"));
                                 let __nn = ::std::ptr::NonNull::new(__obj.as_raw()).unwrap();
                                 #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn)))
@@ -1764,8 +1769,9 @@ fn gen_method_native(
             true
         },
         ReturnStyle::InstanceValue => quote! {
-            let __instance = #call;
-            let __obj = match ::js::class::create_instance::<#type_name>(&scope, __instance) {
+            let __obj = match ::js::class::create_instance_with::<#type_name>(&scope, |_| {
+                #call
+            }) {
                 Ok(o) => o,
                 Err(_) => return false,
             };

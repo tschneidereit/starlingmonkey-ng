@@ -1551,6 +1551,7 @@ macro_rules! autoref_reg {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
         #[doc(hidden)]
+        #[crate::allow_unrooted_interior]
         pub struct $name<T: ClassDef>(PhantomData<T>);
 
         impl<T: ClassDef> Default for $name<T> {
@@ -1658,15 +1659,20 @@ impl<T: ClassDef> __ConstantRegistrar<T> for &__ConstantReg<T> {
     }
 }
 
-/// Convenience function to create a JS object backed by a Rust value,
-/// using the registered class for type T.
+/// Create a JS object backed by a Rust value constructed by `init`.
+///
+/// The closure receives the newly allocated (but empty) JS object and
+/// returns the Rust data to store in it. Because the JS object is
+/// allocated *before* `init` runs, any `Heap<U>` fields created inside
+/// the closure are safe from GC hazards — the allocation that could
+/// trigger GC has already happened.
 ///
 /// # Safety
 ///
 /// - The class for `T` must have been registered via [`register_class`] first.
-pub unsafe fn create_instance<'s, T: ClassDef>(
+pub unsafe fn create_instance_with<'s, T: ClassDef>(
     scope: &'s Scope<'_>,
-    data: T,
+    init: impl FnOnce(Object<'s>) -> T,
 ) -> Result<Object<'s>, JSError> {
     let global = scope.global();
     let proto = match get_prototype::<T>(global) {
@@ -1676,6 +1682,7 @@ pub unsafe fn create_instance<'s, T: ClassDef>(
 
     let class = T::class();
     Object::new_with_proto(scope, class, proto).inspect(|obj| {
+        let data = init(*obj);
         set_private(obj.as_raw(), data);
     })
 }
