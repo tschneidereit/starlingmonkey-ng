@@ -186,7 +186,7 @@ impl Runtime {
     /// in that context. The caller is responsible for keeping the `Rc<Runtime>`
     /// alive for as long as the runtime is needed.
     pub fn init(config: &RuntimeConfig) -> Rc<Self> {
-        let mut mozjs_rt = MozJSRuntime::new(engine_handle(), true);
+        let mut mozjs_rt = unsafe { MozJSRuntime::create_with_internal_job_queues(engine_handle(), None) };
         js::gc::init(mozjs_rt.cx());
 
         let rt = Rc::new(Self {

@@ -17,6 +17,6 @@ intl = ['mozjs/intl']
 workspace = true
 
 [dependencies]
-mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "starling", default-features = false, features = ["jit", "libz-sys"] }
-mozjs_sys = { git = "https://github.com/tschneidereit/mozjs.git", branch = "starling" }
+mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main", default-features = false, features = ["jit", "libz-sys"] }
+mozjs_sys = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" }
 starling-macro.workspace = true

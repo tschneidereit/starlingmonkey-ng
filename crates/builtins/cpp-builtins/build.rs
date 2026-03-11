@@ -74,9 +74,22 @@ fn main() {
         .warnings(false);
 
     if is_wasm {
+        // The `cc` crate auto-links the C++ stdlib, but the wasm linker can't
+        // find it without an explicit search path into the WASI sysroot.
+        // Suppress the automatic link and provide our own static link instead.
+        build.cpp_link_stdlib(None);
+
+        let wasi_sdk = env::var("WASI_SDK_PATH")
+            .expect("WASI_SDK_PATH must be set for wasm32-wasip2 builds");
+        let sysroot_lib = Path::new(&wasi_sdk)
+            .join("share/wasi-sysroot/lib/wasm32-wasip2");
+        println!("cargo:rustc-link-search=native={}", sysroot_lib.display());
+        println!("cargo:rustc-link-lib=static=c++");
+        println!("cargo:rustc-link-lib=static=c++abi");
+
         build
             .flag(format!(
-                "-include{mozjs_include}/../../js/src/js-confdefs.h"
+                "-include{mozjs_include}/js-confdefs.h"
             ))
             .flag("-Qunused-arguments")
             .flag("-mthread-model")
@@ -93,5 +106,5 @@ fn main() {
     // Re-run if any source or header changes.
     println!("cargo:rerun-if-changed={}", cpp_dir.display());
     println!("cargo:rerun-if-changed={}", include_dir.display());
-    println!("cargo:rerun-if-changed={mozjs_include}");
+    println!("cargo:rerun-if-changed={}", mozjs_include);
 }

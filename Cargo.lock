@@ -1248,9 +1248,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.24"
+version = "1.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4735e9cbde5aac84a5ce588f6b23a90b9b0b528f6c5a8db8a4aff300463a0839"
+checksum = "d52f4c29e2a68ac30c9087e1b772dc9f44a2b66ed44edf2266cf2be9b03dafc1"
 dependencies = [
  "cc",
  "libc",
@@ -1307,7 +1307,7 @@ dependencies = [
 [[package]]
 name = "mozjs"
 version = "0.15.4"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=starling#b868665fd3c88bd6b523f71038ddc05489c2a8b8"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#99c57e4e231609215e39f8cf15afa831536c98f1"
 dependencies = [
  "bindgen",
  "cc",
@@ -1321,7 +1321,7 @@ dependencies = [
 [[package]]
 name = "mozjs_sys"
 version = "0.140.7-2"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=starling#b868665fd3c88bd6b523f71038ddc05489c2a8b8"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#99c57e4e231609215e39f8cf15afa831536c98f1"
 dependencies = [
  "bindgen",
  "cc",
@@ -1820,9 +1820,9 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.26.0"
+version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82a72c767771b47409d2345987fda8628641887d5466101319899796367354a0"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
  "getrandom",

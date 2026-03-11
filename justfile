@@ -17,6 +17,10 @@
 build *TARGET:
     cargo build --features debugmozjs {{TARGET}}
 
+# Build in release mode.
+build-release *TARGET:
+    cargo build --release {{TARGET}}
+
 # Run all Rust tests.
 test *TARGET:
     cargo test --features debugmozjs --workspace {{TARGET}}
@@ -83,12 +87,12 @@ check-wasm:
     just test --examples --target=wasm32-wasip2
 
 # Build for wasm32-wasip2.
-build-wasm:
-    cargo build --target wasm32-wasip2 --features debugmozjs
+build-wasm *TARGET:
+    cargo build --target wasm32-wasip2 --features debugmozjs {{TARGET}}
 
 # Build for wasm32-wasip2 in release mode.
-build-wasm-release:
-    cargo build --target wasm32-wasip2 --release
+build-wasm-release *TARGET:
+    cargo build --target wasm32-wasip2 --release {{TARGET}}
 
 # Run all Rust tests.
 test-wasm *TARGET:
