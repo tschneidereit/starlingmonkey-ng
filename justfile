@@ -26,12 +26,8 @@ test *TARGET:
     cargo test --features debugmozjs --workspace {{TARGET}}
 
 # Clone the WPT test suite (shallow clone, ~200MB).
-wpt-setup:
-    ./scripts/clone-wpt.sh
-
-# Force re-clone of WPT suite.
-wpt-setup-force:
-    ./scripts/clone-wpt.sh --force
+wpt-setup *ARGS:
+    ./scripts/clone-wpt.sh {{ARGS}}
 
 # Run WPT tests, optionally filtering by pattern.
 wpt-test *PATTERN:

@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-WPT_TAG="epochs/daily/2024-10-02_01H"
+WPT_TAG="epochs/twelve_hourly/2026-03-11_13H"
 WPT_REPO="https://github.com/web-platform-tests/wpt.git"
 WPT_DIR="deps/wpt"
 
