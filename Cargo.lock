@@ -1307,7 +1307,7 @@ dependencies = [
 [[package]]
 name = "mozjs"
 version = "0.15.4"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#99c57e4e231609215e39f8cf15afa831536c98f1"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#72dd5ab8d7e71eb67e4802b932ebfac9079095c2"
 dependencies = [
  "bindgen",
  "cc",
@@ -1321,7 +1321,7 @@ dependencies = [
 [[package]]
 name = "mozjs_sys"
 version = "0.140.7-2"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#99c57e4e231609215e39f8cf15afa831536c98f1"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#72dd5ab8d7e71eb67e4802b932ebfac9079095c2"
 dependencies = [
  "bindgen",
  "cc",
