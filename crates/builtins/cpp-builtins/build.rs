@@ -3,12 +3,18 @@
 //! Build script for cpp-support: compiles the C++ shim library that provides
 //! SpiderMonkey glue code (builtins, event loop, host API, etc.).
 //!
+//! Uses a **unity build**: all `.cpp` files are `#include`d into a single
+//! translation unit so that the massive SpiderMonkey header tree is parsed
+//! only once instead of once per file.
+//!
 //! The SpiderMonkey headers live in the mozjs-sys build output.  mozjs-sys must
 //! expose them via `cargo:include=<path>` metadata so that this crate receives
 //! the path through the `DEP_MOZJS_INCLUDE` environment variable.
 
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
+
 fn visit_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut results = Vec::new();
     if dir.is_dir() {
@@ -27,13 +33,27 @@ fn visit_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
     }
     Ok(results)
 }
+
 fn main() {
     let crate_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let cpp_dir = crate_dir.join("cpp");
     let include_dir = crate_dir.join("include");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
 
     // Collect all .cpp files in the cpp/ directory.
-    let sources = visit_dirs(&cpp_dir).expect("failed to read cpp/ directory");
+    let mut sources = visit_dirs(&cpp_dir).expect("failed to read cpp/ directory");
+    sources.sort(); // deterministic build order
+
+    // Generate a unity source file that #includes every .cpp file. This way
+    // the SpiderMonkey header tree is parsed only once, which cuts compile
+    // time dramatically.
+    let unity_path = out_dir.join("unity.cpp");
+    let mut unity_src = String::new();
+    for source in &sources {
+        // Use absolute paths so includes resolve correctly.
+        writeln!(unity_src, "#include \"{}\"", source.display()).unwrap();
+    }
+    fs::write(&unity_path, &unity_src).expect("failed to write unity.cpp");
 
     // mozjs-sys exposes its include directory via cargo metadata.
     // Since mozjs-sys declares `links = "mozjs"`, cargo sets DEP_MOZJS_INCLUDE
@@ -71,6 +91,10 @@ fn main() {
         .flags(flags)
         .include(&include_dir)
         .include(&mozjs_include)
+        // The cpp/ directory is on the include path so that #include directives
+        // within individual .cpp files (e.g. #include "console.h" from a
+        // subdirectory) resolve correctly in the unity build.
+        .include(&cpp_dir)
         .warnings(false);
 
     if is_wasm {
@@ -97,9 +121,8 @@ fn main() {
             .flag("-m32");
     }
 
-    for source in &sources {
-        build.file(source);
-    }
+    // Single unity file instead of individual sources.
+    build.file(&unity_path);
 
     build.compile("cpp_support");
 
