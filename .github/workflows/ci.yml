@@ -18,7 +18,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   WASI_SDK_VERSION: "25"
+  RUSTC_WRAPPER: sccache
+  CCACHE: sccache
+  # Bump to purge the sccache GHA cache.
+  SCCACHE_GHA_VERSION: 1
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -38,7 +43,6 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           target: ${{ matrix.target }}
-          cache-key-prefix: ${{ matrix.target }}-${{ matrix.profile }}
 
       - name: Run tests
         run: |
@@ -74,7 +78,6 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           target: ${{ matrix.target }}
-          cache-key-prefix: wpt-${{ matrix.target }}
 
       - uses: actions/setup-node@v4
         with:
@@ -110,7 +113,6 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           target: native
-          cache-key-prefix: gc-rooting-native
 
       - uses: actions/setup-node@v4
         with:

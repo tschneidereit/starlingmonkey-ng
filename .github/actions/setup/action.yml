@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 name: Setup build environment
-description: Install system deps, Rust toolchain, WASI SDK, wasmtime, and configure cargo cache.
+description: Install system deps, Rust toolchain, WASI SDK, wasmtime, and configure sccache.
 
 inputs:
   target:
     description: Build target — "native" or "wasm32-wasip2"
-    required: true
-  cache-key-prefix:
-    description: Prefix for the cargo cache key
     required: true
 
 runs:
@@ -44,13 +41,5 @@ runs:
         curl -sSf https://wasmtime.dev/install.sh | bash
         echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
 
-    - name: Cache Cargo registry & target
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ inputs.cache-key-prefix }}-${{ hashFiles('Cargo.lock') }}
-        restore-keys: |
-          ${{ inputs.cache-key-prefix }}-
+    - name: Run sccache-cache
+      uses: mozilla-actions/sccache-action@v0.0.9
