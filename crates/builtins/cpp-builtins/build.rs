@@ -98,18 +98,10 @@ fn main() {
         .warnings(false);
 
     if is_wasm {
-        // The `cc` crate auto-links the C++ stdlib, but the wasm linker can't
-        // find it without an explicit search path into the WASI sysroot.
-        // Suppress the automatic link and provide our own static link instead.
+        // mozjs-sys already provides the C++ stdlib search path and link
+        // directives for WASI targets, so suppress the automatic link that
+        // the `cc` crate would emit.
         build.cpp_link_stdlib(None);
-
-        let wasi_sdk = env::var("WASI_SDK_PATH")
-            .expect("WASI_SDK_PATH must be set for wasm32-wasip2 builds");
-        let sysroot_lib = Path::new(&wasi_sdk)
-            .join("share/wasi-sysroot/lib/wasm32-wasip2");
-        println!("cargo:rustc-link-search=native={}", sysroot_lib.display());
-        println!("cargo:rustc-link-lib=static=c++");
-        println!("cargo:rustc-link-lib=static=c++abi");
 
         build
             .flag(format!(
