@@ -14,13 +14,10 @@
 //!    which returns the stack newtype directly (e.g. `Item<'s>`)
 //! 4. Operating on both objects from JavaScript
 
-use std::ptr;
-
 use js::compile::evaluate_with_filename;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
-use js::native::Value;
-use js::string as jsstring;
+use js::prelude::{FromJSVal, HandleValue};
 use libstarling::config::RuntimeConfig;
 use libstarling::runtime::Runtime;
 use libstarling::{jsclass, jsmethods};
@@ -72,9 +69,6 @@ struct Container {
 #[jsmethods]
 impl Container {
     /// Construct a Container from JS: `new Container("myContainer", someItem)`.
-    ///
-    /// The second argument is automatically extracted as an `Item<'_>` stack
-    /// newtype from the JS value, then converted into a `Heap<ItemImpl>` via `.into()`.
     #[constructor]
     fn new(name: String, item: Item<'_>) -> Self {
         Self {
@@ -187,8 +181,6 @@ item.describe()
     println!("Test 4: Create objects from Rust side");
     let item = Item::new(&scope, "gadget".to_string(), 99);
 
-    // The `item` is currently a stack-rooted `Item<'s>`, but `Container::new()`
-    // converts it into a `Heap<ItemImpl>` and stores it in the `Container`.
     let container = Container::new(&scope, "crate".to_string(), item);
 
     // Read back through the stack newtype's forwarded methods
@@ -248,10 +240,8 @@ c1.itemValue() + c2.itemValue()
 }
 
 /// Helper: extract a Rust `String` from a JS string value.
-fn val_to_string(scope: &Scope<'_>, val: &Value) -> String {
-    assert!(val.is_string(), "Expected string value");
-    let str_handle = scope.root_string(ptr::NonNull::new(val.to_string()).expect("null string"));
-    jsstring::to_utf8(scope, str_handle).expect("utf8 conversion failed")
+fn val_to_string(scope: &Scope<'_>, val: &HandleValue) -> String {
+    String::from_jsval(scope, *val, ()).expect("null string")
 }
 
 #[test]

@@ -24,13 +24,14 @@ fn format_args(scope: &Scope<'_>, args: &CallArgs) -> String {
         let val = *args.get(i);
         // Fast path for strings; slow path calls JS ToString.
         let js_str = if val.is_string() {
-            NonNull::new(val.to_string()).map(|p| scope.root_string(p))
+            NonNull::new(val.to_string())
+                .map(|p| js::JSString::from_handle(scope.root_string(p)))
         } else {
             let handle = scope.root_value(val);
-            js::string::to_string_slow(scope, handle).ok()
+            js::JSString::from_value(scope, handle).ok()
         };
         match js_str {
-            Some(s) => match js::string::to_utf8(scope, s) {
+            Some(s) => match s.to_utf8(scope) {
                 Ok(utf8) => parts.push(utf8),
                 Err(_) => parts.push(String::from("[error converting to UTF-8]")),
             },

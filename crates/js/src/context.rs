@@ -11,7 +11,7 @@ use crate::gc::scope::Scope;
 use mozjs::jsapi::{ContextOptions, JSInterruptCallback, JSRuntime, NativeStackSize};
 use mozjs::rust::wrappers2;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Get a reference to the context's [`ContextOptions`].
 ///
@@ -84,9 +84,9 @@ pub unsafe fn add_interrupt_callback(scope: &Scope<'_>, callback: JSInterruptCal
 }
 
 /// Check for a pending interrupt and invoke any registered callbacks.
-pub fn check_for_interrupt(scope: &Scope<'_>) -> Result<(), JSError> {
+pub fn check_for_interrupt(scope: &Scope<'_>) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::JS_CheckForInterrupt(scope.cx_mut()) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Request an interrupt callback (thread-safe).

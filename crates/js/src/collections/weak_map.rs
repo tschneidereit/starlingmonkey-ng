@@ -4,16 +4,16 @@
 
 use std::ptr::NonNull;
 
-use crate::gc::handle::{JsType, Stack};
+use crate::builtins::JSType;
+use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
 use mozjs::jsapi::Value;
 use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
-use mozjs::rust::{HandleObject, HandleValue};
+use mozjs::rust::HandleValue;
 
-use crate::builtins::{Is, IsValue, To};
-use crate::error::JSError;
+use crate::error::ExnThrown;
 use crate::Object;
 
 /// Marker type for JavaScript `WeakMap` objects.
@@ -27,29 +27,33 @@ use crate::Object;
 /// ```
 pub struct WeakMap;
 
-impl JsType for WeakMap {
+impl JSType for WeakMap {
     const JS_NAME: &'static str = "WeakMap";
+
+    fn js_class() -> *const mozjs::jsapi::JSClass {
+        crate::class::proto_key_to_class(mozjs::jsapi::JSProtoKey::JSProto_WeakMap)
+    }
 }
 
 impl<'s> Stack<'s, WeakMap> {
     /// Create a new empty `WeakMap` object.
-    pub fn new(scope: &'s Scope<'_>) -> Result<Self, JSError> {
+    pub fn new(scope: &'s Scope<'_>) -> Result<Self, ExnThrown> {
         let obj = unsafe { wrappers2::NewWeakMapObject(scope.cx_mut()) };
         NonNull::new(obj)
             .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(JSError)
+            .ok_or(ExnThrown)
     }
 
     /// Look up a value by key.
     ///
     /// This is named `lookup` rather than `get` to avoid confusion with
     /// `Handle::get`.
-    pub fn lookup(&self, scope: &Scope<'_>, key: HandleValue) -> Result<Value, JSError> {
+    pub fn lookup(&self, scope: &Scope<'_>, key: HandleValue) -> Result<Value, ExnThrown> {
         rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
         let ok = unsafe {
             wrappers2::GetWeakMapEntry(scope.cx(), self.handle(), key, rval.handle_mut())
         };
-        JSError::check(ok)?;
+        ExnThrown::check(ok)?;
         Ok(rval.get())
     }
 
@@ -62,43 +66,17 @@ impl<'s> Stack<'s, WeakMap> {
         scope: &Scope<'_>,
         key: HandleValue,
         val: HandleValue,
-    ) -> Result<(), JSError> {
+    ) -> Result<(), ExnThrown> {
         let ok = unsafe { wrappers2::SetWeakMapEntry(scope.cx_mut(), self.handle(), key, val) };
-        JSError::check(ok)
+        ExnThrown::check(ok)
     }
 
     /// Check whether an object is a `WeakMap`.
-    pub fn is_weak_map(_scope: &Scope<'_>, obj: Object) -> Result<bool, JSError> {
+    pub fn is_weak_map(_scope: &Scope<'_>, obj: Object) -> Result<bool, ExnThrown> {
         // SAFETY: IsWeakMapObject only inspects the object's class pointer.
         // It does not allocate, trigger GC, or use cx.
         let result = unsafe { mozjs::jsapi::JS::IsWeakMapObject(obj.as_raw()) };
         Ok(result)
-    }
-}
-
-impl Is for WeakMap {
-    fn is(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError> {
-        Stack::<WeakMap>::is_weak_map(scope, Object::from_handle(obj))
-    }
-}
-
-impl IsValue for WeakMap {
-    fn is_value(scope: &Scope<'_>, val: HandleValue) -> Result<bool, JSError> {
-        match Object::from_value(scope, val.get()) {
-            Ok(obj) => Stack::<WeakMap>::is_weak_map(scope, obj),
-            _ => Ok(false),
-        }
-    }
-}
-
-impl<'s> To<Stack<'s, WeakMap>> for Object<'s> {
-    fn to(&self, scope: &Scope<'_>) -> Result<Stack<'s, WeakMap>, JSError> {
-        if WeakMap::is(scope, self.handle())? {
-            // SAFETY: We just verified the object is a WeakMap.
-            Ok(unsafe { Stack::from_handle_unchecked(self.handle()) })
-        } else {
-            Err(JSError)
-        }
     }
 }
 

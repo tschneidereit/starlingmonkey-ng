@@ -4,7 +4,7 @@
 //!
 //! This module provides direct access to the pending exception on a
 //! `JSContext`. For the higher-level error type that wraps these operations,
-//! see [`super::error::JSError`].
+//! see [`super::error::ExnThrown`].
 
 use crate::gc::scope::Scope;
 use mozjs::jsapi::{ExceptionStackBehavior, Value};
@@ -13,7 +13,7 @@ use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::HandleValue;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Check whether an exception is pending on the context.
 pub fn is_pending(scope: &Scope<'_>) -> bool {
@@ -28,10 +28,10 @@ pub fn is_throwing_oom(scope: &Scope<'_>) -> bool {
 /// Get the pending exception value.
 ///
 /// Returns `Err` if no exception is pending or retrieval fails.
-pub fn get_pending(scope: &Scope<'_>) -> Result<Value, JSError> {
+pub fn get_pending(scope: &Scope<'_>) -> Result<Value, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut vp = UndefinedValue());
     let ok = unsafe { wrappers2::JS_GetPendingException(scope.cx_mut(), vp.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(vp.get())
 }
 

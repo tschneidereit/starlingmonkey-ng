@@ -19,16 +19,16 @@
 use crate::gc::scope::Scope;
 use mozjs::rust::wrappers2;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Enable SpiderMonkey's built-in internal job queue.
 ///
 /// This is the simplest way to get Promise resolution working. Must be called
 /// before any promises are created. Call [`run_jobs`] after evaluation to
 /// drain the queue.
-pub fn use_internal_job_queues(scope: &Scope<'_>) -> Result<(), JSError> {
+pub fn use_internal_job_queues(scope: &Scope<'_>) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::UseInternalJobQueues(scope.cx()) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Drain the job queue, executing all pending microtasks.

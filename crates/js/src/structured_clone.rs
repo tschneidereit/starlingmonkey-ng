@@ -15,7 +15,7 @@ use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::HandleValue;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Perform a structured clone of a value (serialize + deserialize in one step).
 ///
@@ -27,11 +27,11 @@ pub unsafe fn clone(
     value: HandleValue,
     callbacks: *const JSStructuredCloneCallbacks,
     closure: *mut std::os::raw::c_void,
-) -> Result<Value, JSError> {
+) -> Result<Value, ExnThrown> {
     rooted!(in(scope.raw_cx_no_gc()) let mut rval = UndefinedValue());
     let ok =
         wrappers2::JS_StructuredClone(scope.cx_mut(), value, rval.handle_mut(), callbacks, closure);
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(rval.get())
 }
 
@@ -50,7 +50,7 @@ pub unsafe fn write(
     callbacks: *const JSStructuredCloneCallbacks,
     closure: *mut std::os::raw::c_void,
     transferable: HandleValue,
-) -> Result<(), JSError> {
+) -> Result<(), ExnThrown> {
     let ok = wrappers2::JS_WriteStructuredClone(
         scope.cx_mut(),
         value,
@@ -61,7 +61,7 @@ pub unsafe fn write(
         closure,
         transferable,
     );
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Read a value from structured clone data.
@@ -78,7 +78,7 @@ pub unsafe fn read(
     policy: *const CloneDataPolicy,
     callbacks: *const JSStructuredCloneCallbacks,
     closure: *mut std::os::raw::c_void,
-) -> Result<Value, JSError> {
+) -> Result<Value, ExnThrown> {
     rooted!(in(scope.raw_cx_no_gc()) let mut rval = UndefinedValue());
     let ok = wrappers2::JS_ReadStructuredClone(
         scope.cx_mut(),
@@ -90,6 +90,6 @@ pub unsafe fn read(
         callbacks,
         closure,
     );
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(rval.get())
 }

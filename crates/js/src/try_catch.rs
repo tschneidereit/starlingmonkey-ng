@@ -31,7 +31,7 @@ use mozjs::jsapi::{
 use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
 
-use super::error::{CapturedError, JSError};
+use super::error::{CapturedError, ExnThrown};
 
 /// A scoped exception handler.
 ///
@@ -100,7 +100,7 @@ impl<'a> TryCatch<'a> {
     /// stack trace from the pending exception. If no exception is pending,
     /// returns a default (empty) `CapturedError`.
     pub fn capture(&self) -> CapturedError {
-        JSError::capture(&self.inner)
+        ExnThrown::capture(&self.inner)
     }
 
     /// Clear the pending exception without inspecting it.

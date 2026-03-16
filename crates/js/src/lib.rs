@@ -97,7 +97,7 @@ pub mod comparison;
 pub mod compartment;
 pub mod compile;
 pub mod context;
-// pub mod conversion;
+pub mod conversion;
 pub mod date;
 pub mod debug;
 pub mod error;
@@ -195,17 +195,6 @@ pub mod heap {
     pub use mozjs::rust::Trace;
 }
 
-/// Value conversion traits from `mozjs::conversions`.
-///
-/// These traits enable automatic conversion between Rust types and
-/// JS values in generated `JSNative` callback code.
-pub mod conversions {
-    pub use mozjs::conversions::{
-        jsstr_to_string, ConversionBehavior, ConversionResult, FromJSValConvertible,
-        ToJSValConvertible,
-    };
-}
-
 /// Module compilation and source text utilities.
 ///
 /// Re-exports of low-level module compilation functions that are not
@@ -259,3 +248,13 @@ pub type Set<'s> = Stack<'s, collections::set::Set>;
 
 /// A scope-rooted handle to a JavaScript `WeakMap` object.
 pub type WeakMap<'s> = Stack<'s, collections::weak_map::WeakMap>;
+
+/// A scope-rooted handle to a JavaScript `Function` object.
+pub type Function<'s> = Stack<'s, function::Function>;
+
+/// A scope-rooted handle to a JavaScript string.
+///
+/// Unlike `Object`, `Array`, and `Function`, JS strings are not JS objects —
+/// they are a separate GC-managed type. `JSString<'s>` wraps a rooted
+/// `Handle<'s, *mut JSString>` and exposes all string operations as methods.
+pub type JSString<'s> = string::Str<'s>;

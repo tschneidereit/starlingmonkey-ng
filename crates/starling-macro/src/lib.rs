@@ -5,7 +5,7 @@
 //! Provides `#[jsclass]` and `#[jsmethods]` attribute macros that
 //! generate the boilerplate needed to expose Rust types as SpiderMonkey JS classes.
 
-use heck::{ToLowerCamelCase, ToUpperCamelCase};
+use heck::ToLowerCamelCase;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
@@ -161,9 +161,7 @@ impl ClassConfig {
 fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig) -> TokenStream {
     let struct_name = input.ident.clone();
     let inner_name = format_ident!("{}Impl", struct_name);
-    let js_name = opts
-        .name
-        .unwrap_or_else(|| struct_name.to_string().to_upper_camel_case());
+    let js_name = opts.name.unwrap_or_else(|| struct_name.to_string());
 
     // Generate identifiers for the static JSClass and JSClassOps
     let class_ops_static = format_ident!("__{}_CLASS_OPS", struct_name.to_string().to_uppercase());
@@ -280,9 +278,46 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         quote! {}
     };
 
+    // Generate debug_assert_fully_initialized override if the struct has
+    // bare Heap<T> fields (not Option<Heap<T>>, which is legitimately nullable).
+    let heap_field_assertions: Vec<_> = if let Fields::Named(ref fields) = input.fields {
+        fields
+            .named
+            .iter()
+            .filter_map(|f| {
+                let ident = f.ident.as_ref()?;
+                if is_bare_heap_type(&f.ty) {
+                    let name = ident.to_string();
+                    Some(quote! {
+                        debug_assert!(
+                            self.#ident.is_initialized(),
+                            "Heap field `{}::{}` not initialized after construction",
+                            stringify!(#inner_name),
+                            #name,
+                        );
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let debug_assert_method = if heap_field_assertions.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn debug_assert_fully_initialized(&self) {
+                #(#heap_field_assertions)*
+            }
+        }
+    };
+
     let output = quote! {
         #[doc(hidden)]
-        #[derive(::core_runtime::Traceable)]
+        #[derive(Default, ::core_runtime::Traceable)]
         #input
 
         // Static JSClassOps for this type — unique per ClassDef.
@@ -328,6 +363,7 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         // Generated ClassDef impl using autoref specialization.
         // The constructor and method registration delegate to companion types
         // that are populated by #[jsmethods].
+        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl ::js::class::ClassDef for #inner_name {
             const NAME: &'static str = #js_name;
 
@@ -338,7 +374,7 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
             fn constructor(
                 scope: &::js::gc::scope::Scope<'_>,
                 args: &::js::native::CallArgs,
-            ) -> Result<Self, ()> {
+            ) -> Result<Self, ::js::error::ExnThrown> {
                 use ::js::class::__ConstructorRegistrar;
                 let reg = ::js::class::__CtorReg::<Self>::new();
                 (&reg).construct(scope, args)
@@ -374,10 +410,21 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
                 (&reg).register(builder)
             }
 
+            fn post_init(
+                scope: &::js::gc::scope::Scope<'_>,
+                obj: *mut ::js::native::JSObject,
+                args: &::js::native::CallArgs,
+            ) -> Result<(), ::js::error::ExnThrown> {
+                use ::js::class::__PostInitRegistrar;
+                let reg = ::js::class::__PostInitReg::<Self>::new();
+                (&reg).post_init(scope, obj, args)
+            }
+
             #parent_classdef_methods
             #to_string_tag_const
             #has_error_data_const
             #constants_on_prototype_const
+            #debug_assert_method
         }
 
         // Reflexive DerivedFrom: every class derives from itself
@@ -390,6 +437,7 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         #[derive(Copy, Clone)]
         pub struct #struct_name<'s>(::js::gc::handle::Stack<'s, #inner_name>);
 
+        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s> ::js::class::StackType<'s> for #struct_name<'s> {
             type Inner = #inner_name;
 
@@ -404,33 +452,62 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
             }
         }
 
+        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+        impl<'s> ::js::builtins::CastTarget<'s> for #struct_name<'s> {
+            type Output = #struct_name<'s>;
+
+            const TARGET_NAME: &'static str = <#inner_name as ::js::class::ClassDef>::NAME;
+
+            fn target_class_tag() -> usize {
+                <#inner_name as ::js::builtins::JSType>::js_class() as usize
+            }
+
+            unsafe fn construct_unchecked(
+                h: ::js::native::GCHandle<'s, *mut ::js::native::JSObject>,
+            ) -> #struct_name<'s> {
+                #struct_name(unsafe { ::js::gc::handle::Stack::from_handle_unchecked(h) })
+            }
+        }
+
+        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s> #struct_name<'s> {
-            /// Type-checked construction from an untyped `Object`.
-            pub fn from_object(obj: ::js::Object<'s>) -> ::std::result::Result<Self, ::js::class::CastError> {
-                ::js::gc::handle::Stack::<#inner_name>::from_object(obj).map(#struct_name)
+            // /// Type-checked construction from an untyped `Object`.
+            // pub fn from_object(obj: ::js::Object<'s>) -> ::std::result::Result<Self, ::js::class::CastError> {
+            //     ::js::gc::handle::Stack::<#inner_name>::from_object(obj).map(#struct_name)
+            // }
+
+            /// Get the raw `*mut JSObject` pointer.
+            pub fn as_raw(self) -> *mut ::js::native::JSObject {
+                self.0.as_raw()
+            }
+
+            /// Get a mutable reference to the private Rust data.
+            ///
+            /// # Safety
+            ///
+            /// No other references to the data may exist simultaneously.
+            #[allow(clippy::mut_from_ref)]
+            pub unsafe fn data_mut(&self) -> ::std::option::Option<&mut #inner_name> {
+                unsafe { self.0.data_mut() }
             }
         }
 
-        impl<'s> ::js::conversions::ToJSValConvertible for #struct_name<'s> {
+        impl<'s> ::js::conversion::ToJSVal<'s> for #struct_name<'s> {
             #[inline]
-            unsafe fn to_jsval(
-                &self,
-                cx: *mut ::js::native::RawJSContext,
-                rval: ::js::native::MutableHandleValue<'_>,
-            ) {
-                self.0.to_jsval(cx, rval)
-            }
-        }
-
-        impl<'s> ::std::convert::From<#struct_name<'s>> for ::js::gc::handle::Heap<#inner_name> {
-            fn from(stack: #struct_name<'s>) -> Self {
-                ::js::gc::handle::Heap::from(stack.0)
+            fn to_jsval(&self, scope: &'s ::js::prelude::Scope<'s>) -> Result<::js::prelude::HandleValue<'s>, ::js::conversion::ConversionError> {
+                self.0.to_jsval(scope)
             }
         }
 
         impl<'s> ::std::convert::From<::js::gc::handle::Stack<'s, #inner_name>> for #struct_name<'s> {
             fn from(stack: ::js::gc::handle::Stack<'s, #inner_name>) -> Self {
                 #struct_name(stack)
+            }
+        }
+
+        impl<'s> ::std::convert::From<#struct_name<'s>> for ::js::gc::handle::Heap<#inner_name> {
+            fn from(val: #struct_name<'s>) -> Self {
+                ::js::gc::handle::Heap::from(val.0)
             }
         }
     };
@@ -457,17 +534,6 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
             }
 
             impl ::js::class::DerivedFrom<#inner_parent_name> for #inner_name {}
-
-            impl<'s> #struct_name<'s> {
-                /// Upcast to the parent class type.
-                ///
-                /// The returned handle wraps the same JS object — only the
-                /// Rust view changes.
-                #[inline]
-                pub fn upcast(self) -> #parent_name<'s> {
-                    unsafe { ::js::class::StackType::from_handle_unchecked(self.0.handle()) }
-                }
-            }
         }
     } else {
         quote! {
@@ -510,6 +576,8 @@ enum MethodKind {
     Setter {
         js_name: String,
     },
+    /// Post-construction initialization hook.
+    PostInit,
     /// Combined property (getter + setter via a single annotation).
     Property {
         js_name: String,
@@ -526,7 +594,7 @@ enum ReturnStyle {
     ResultVoid,
     /// Returns `Result<T, impl Display>` — Ok value set as return, Err becomes exception
     ResultValue,
-    /// Raw method returning `Result<(), ()>` with manual exception handling
+    /// Raw method returning `Result<(), ExnThrown>` with manual exception handling
     Raw,
     /// Returns `JSPromise` — creates a JS Promise and spawns the async future
     Promise,
@@ -687,6 +755,9 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                 } else if attr.path().is_ident("destructor") {
                     kind = Some(MethodKind::Destructor);
                     false
+                } else if attr.path().is_ident("post_init") {
+                    kind = Some(MethodKind::PostInit);
+                    false
                 } else {
                     true // keep other attrs
                 }
@@ -739,6 +810,11 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut static_builder_calls = Vec::new();
     let mut constructor_body = None;
     let mut destructor_fn_name = None;
+    // Setup-style constructor: detected when #[constructor] has &self/&mut self.
+    // The constructor body runs on the stack newtype after allocation + boxing.
+    let mut setup_ctor_info: Option<usize> = None; // index into `methods`
+                                                   // New-style post_init: runs on the stack newtype with auto-extracted params.
+    let mut new_post_init_info: Option<usize> = None; // index into `methods`
 
     // Collect property accessors indexed by JS name for pairing
     struct PropertyEntry {
@@ -764,13 +840,25 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    for method in &methods {
+    for (i, method) in methods.iter().enumerate() {
         match &method.kind {
             MethodKind::Constructor => {
-                constructor_body = Some(gen_constructor_body(method, &inner_name));
+                if method.has_self || method.has_mut_self {
+                    // Setup-style: constructor runs on the stack newtype after
+                    // allocation. ConstructorRegistrar returns FooImpl::default(),
+                    // and PostInitRegistrar handles arg extraction + calling
+                    // the user's constructor body.
+                    setup_ctor_info = Some(i);
+                } else {
+                    // Old-style: constructor returns Self directly.
+                    constructor_body = Some(gen_constructor_body(method, &inner_name));
+                }
             }
             MethodKind::Destructor => {
                 destructor_fn_name = Some(method.fn_item.sig.ident.clone());
+            }
+            MethodKind::PostInit => {
+                new_post_init_info = Some(i);
             }
             MethodKind::Method { js_name, nargs } => {
                 let (native_fn, builder_call) =
@@ -837,15 +925,51 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         });
     }
 
+    // ================================================================
+    // Remove setup-style ctor and new-style post_init from impl FooImpl.
+    // These methods operate on the stack newtype, not on FooImpl directly.
+    // ================================================================
+    let setup_ctor_fn_name = setup_ctor_info.map(|i| methods[i].fn_item.sig.ident.clone());
+    let new_post_init_fn_name = new_post_init_info.map(|i| methods[i].fn_item.sig.ident.clone());
+    {
+        let remove_names: Vec<_> = [&setup_ctor_fn_name, &new_post_init_fn_name]
+            .iter()
+            .filter_map(|n| n.as_ref())
+            .collect();
+        if !remove_names.is_empty() {
+            input.items.retain(|item| {
+                if let ImplItem::Fn(fn_item) = item {
+                    !remove_names.iter().any(|n| fn_item.sig.ident == **n)
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
     // Generate the ConstructorRegistrar impl (on FooImpl)
-    let ctor_impl = if let Some(body) = constructor_body {
+    let ctor_impl = if setup_ctor_info.is_some() {
+        // Setup-style: return FooImpl::default(). The real constructor logic
+        // runs in the PostInitRegistrar after the object is boxed and rooted.
+        quote! {
+            impl ::js::class::__ConstructorRegistrar<#inner_name> for ::js::class::__CtorReg<#inner_name> {
+                fn construct(
+                    &self,
+                    _scope: &::js::gc::scope::Scope<'_>,
+                    _args: &::js::native::CallArgs,
+                ) -> Result<#inner_name, ::js::error::ExnThrown> {
+                    Ok(#inner_name::default())
+                }
+            }
+        }
+    } else if let Some(body) = constructor_body {
         quote! {
             impl ::js::class::__ConstructorRegistrar<#inner_name> for ::js::class::__CtorReg<#inner_name> {
                 fn construct(
                     &self,
                     scope: &::js::gc::scope::Scope<'_>,
                     args: &::js::native::CallArgs,
-                ) -> Result<#inner_name, ()> {
+                ) -> Result<#inner_name, ::js::error::ExnThrown> {
                     unsafe { #body }
                 }
             }
@@ -857,7 +981,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     &self,
                     _scope: &::js::gc::scope::Scope<'_>,
                     _args: &::js::native::CallArgs,
-                ) -> Result<#inner_name, ()> {
+                ) -> Result<#inner_name, ::js::error::ExnThrown> {
                     panic!("{} builtin can't be instantiated directly", stringify!(#type_name));
                 }
             }
@@ -921,8 +1045,214 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    // Generate `impl<'s> Foo<'s>` containing new() and add_to_global()
-    let ctor_new_impl = if let Some(ref ctor_fn_name) = ctor_original_name {
+    // Generate the PostInitRegistrar impl.
+    //
+    // Three cases:
+    //   1. Setup-style ctor (with or without explicit post_init)
+    //   2. Old-style ctor with new-style post_init (&self on newtype)
+    //   3. No post_init at all (no-op, handled by autoref fallback)
+    let post_init_impl = if setup_ctor_info.is_some() || new_post_init_info.is_some() {
+        // Root the object and create the stack newtype for both ctor setup and post_init.
+        let root_and_cast = quote! {
+            let __nn = unsafe {
+                ::std::ptr::NonNull::new(obj).expect("null object in post_init")
+            };
+            let __typed = unsafe {
+                #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn)))
+            };
+        };
+
+        // Generate the setup-style constructor call (if present).
+        let setup_call = if let Some(idx) = setup_ctor_info {
+            let info = &methods[idx];
+            let setup_fn_name = format_ident!("__ctor_setup");
+            let arg_extractions =
+                gen_arg_extractions(&info.params, quote!(args), true, quote!(scope));
+            let arg_names: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
+            let call = if info.has_cx {
+                quote! { #type_name::#setup_fn_name(&__typed, scope, #(#arg_names),*) }
+            } else {
+                quote! { #type_name::#setup_fn_name(&__typed, #(#arg_names),*) }
+            };
+            quote! {
+                #(#arg_extractions)*
+                match #call {
+                    Ok(()) => {},
+                    Err(__e) => {
+                        unsafe { ::js::error::ThrowException::throw(__e, scope); }
+                        return Err(::js::error::ExnThrown);
+                    }
+                }
+            }
+        } else {
+            quote! {}
+        };
+
+        // Generate the post_init call (if present).
+        let post_init_call = if let Some(idx) = new_post_init_info {
+            let info = &methods[idx];
+            let pi_fn_name = format_ident!("__post_init");
+            let call = if info.has_cx {
+                quote! { #type_name::#pi_fn_name(&__typed, scope) }
+            } else {
+                quote! { #type_name::#pi_fn_name(&__typed) }
+            };
+            quote! {
+                match #call {
+                    Ok(()) => {},
+                    Err(__e) => {
+                        unsafe { ::js::error::ThrowException::throw(__e, scope); }
+                        return Err(::js::error::ExnThrown);
+                    }
+                }
+            }
+        } else {
+            quote! {}
+        };
+
+        quote! {
+            #[allow(clippy::not_unsafe_ptr_arg_deref)]
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+            impl ::js::class::__PostInitRegistrar<#inner_name> for ::js::class::__PostInitReg<#inner_name> {
+                fn post_init(
+                    &self,
+                    scope: &::js::gc::scope::Scope<'_>,
+                    obj: *mut ::js::native::JSObject,
+                    args: &::js::native::CallArgs,
+                ) -> Result<(), ::js::error::ExnThrown> {
+                    #root_and_cast
+                    #setup_call
+                    #post_init_call
+                    Ok(())
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Generate `impl<'s> Foo<'s>` containing new(), add_to_global(), and
+    // setup-style constructor / post_init methods.
+    let ctor_new_impl = if let Some(idx) = setup_ctor_info {
+        // ================================================================
+        // Setup-style constructor: Foo::new(scope, args) -> Result<Foo<'s>, E>
+        // The method body runs on &self (the stack newtype), not &FooImpl.
+        // ================================================================
+        let method = &methods[idx];
+        let setup_fn_ident = format_ident!("__ctor_setup");
+        let param_decls: Vec<_> = method
+            .params
+            .iter()
+            .map(|(name, ty)| quote! { #name: #ty })
+            .collect();
+        let param_names: Vec<_> = method
+            .params
+            .iter()
+            .map(|(name, _)| quote! { #name })
+            .collect();
+
+        // Determine the return type for new(). If the constructor returns
+        // Result<(), E>, new() returns Result<Foo<'s>, E>. Otherwise it
+        // returns the newtype directly.
+        let err_ty = extract_result_error_type(&method.fn_item.sig.output);
+        let (new_ret_ty, new_ok_wrap) = if let Some(ref e) = err_ty {
+            (
+                quote! { -> ::std::result::Result<#type_name<'s>, #e> },
+                quote! { Ok(__typed) },
+            )
+        } else {
+            (quote! { -> #type_name<'s> }, quote! { __typed })
+        };
+
+        let setup_call_in_new = if err_ty.is_some() {
+            if method.has_cx {
+                quote! { #type_name::#setup_fn_ident(&__typed, scope, #(#param_names),*)?; }
+            } else {
+                quote! { #type_name::#setup_fn_ident(&__typed, #(#param_names),*)?; }
+            }
+        } else if method.has_cx {
+            quote! { #type_name::#setup_fn_ident(&__typed, scope, #(#param_names),*); }
+        } else {
+            quote! { #type_name::#setup_fn_ident(&__typed, #(#param_names),*); }
+        };
+
+        // Generate the post_init call in new() if present.
+        let pi_fn_ident = format_ident!("__post_init");
+        let new_post_init_call = if let Some(pi_idx) = new_post_init_info {
+            let pi_info = &methods[pi_idx];
+            let pi_err_propagate = if err_ty.is_some() {
+                quote! { ? }
+            } else {
+                quote! {}
+            };
+            if pi_info.has_cx {
+                quote! { #type_name::#pi_fn_ident(&__typed, scope)#pi_err_propagate; }
+            } else {
+                quote! { #type_name::#pi_fn_ident(&__typed)#pi_err_propagate; }
+            }
+        } else {
+            quote! {}
+        };
+
+        // Extract the setup-style constructor body and rename it.
+        let mut setup_fn = method.fn_item.clone();
+        setup_fn.sig.ident = setup_fn_ident.clone();
+        setup_fn.vis = syn::Visibility::Inherited; // private
+        setup_fn
+            .attrs
+            .retain(|a| !a.path().is_ident("constructor") && !a.path().is_ident("post_init"));
+
+        // Extract the post_init body and rename it (if any).
+        let post_init_fn_tokens = if let Some(pi_idx) = new_post_init_info {
+            let pi = &methods[pi_idx];
+            let mut pi_fn = pi.fn_item.clone();
+            pi_fn.sig.ident = pi_fn_ident.clone();
+            pi_fn.vis = syn::Visibility::Inherited; // private
+            pi_fn
+                .attrs
+                .retain(|a| !a.path().is_ident("post_init") && !a.path().is_ident("constructor"));
+            quote! { #pi_fn }
+        } else {
+            quote! {}
+        };
+
+        quote! {
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+            impl<'s> #type_name<'s> {
+                /// Construct a new instance and return the stack newtype.
+                pub fn new(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
+                    #new_ret_ty
+                {
+                    unsafe {
+                        let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                            #inner_name::default()
+                        })
+                            .expect(concat!("Class ", stringify!(#type_name), " not registered"));
+                        let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
+                        let __typed = #type_name(::js::gc::handle::Stack::from_handle_unchecked(
+                            scope.root_object(__nn),
+                        ));
+                        #setup_call_in_new
+                        #new_post_init_call
+                        #[cfg(debug_assertions)]
+                        if let Some(__data) = ::js::class::get_private::<#inner_name>(__obj.as_raw()) {
+                            ::js::class::ClassDef::debug_assert_fully_initialized(__data);
+                        }
+                        #new_ok_wrap
+                    }
+                }
+
+                /// Register this class on a global object, making it available
+                /// as a constructor in JavaScript.
+                pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::Object<'s>) {
+                    unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
+                }
+
+                #setup_fn
+                #post_init_fn_tokens
+            }
+        }
+    } else if let Some(ref ctor_fn_name) = ctor_original_name {
         let ctor_method = methods
             .iter()
             .find(|m| matches!(m.kind, MethodKind::Constructor));
@@ -931,13 +1261,28 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
             // uses the raw `&CallArgs` pattern (only available inside JSNative
             // wrappers). Such constructors are only callable from JS via `new`.
             if method.is_raw {
+                // For old-style with post_init but no setup ctor, still generate
+                // the post_init method on the newtype.
+                let pi_fn_tokens = new_post_init_info
+                    .map(|pi_idx| {
+                        let pi = &methods[pi_idx];
+                        let mut pi_fn = pi.fn_item.clone();
+                        pi_fn.sig.ident = format_ident!("__post_init");
+                        pi_fn.vis = syn::Visibility::Inherited;
+                        pi_fn.attrs.retain(|a| !a.path().is_ident("post_init"));
+                        quote! { #pi_fn }
+                    })
+                    .unwrap_or_else(|| quote! {});
+
                 quote! {
+                    #[cfg_attr(crown, allow(crown::unrooted_must_root))]
                     impl<'s> #type_name<'s> {
                         /// Register this class on a global object, making it available
                         /// as a constructor in JavaScript.
                         pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::Object<'s>) {
                             unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
                         }
+                        #pi_fn_tokens
                     }
                 }
             } else {
@@ -980,7 +1325,21 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 };
 
+                // For old-style with post_init but no setup ctor, generate
+                // the post_init method on the newtype.
+                let pi_fn_tokens = new_post_init_info
+                    .map(|pi_idx| {
+                        let pi = &methods[pi_idx];
+                        let mut pi_fn = pi.fn_item.clone();
+                        pi_fn.sig.ident = format_ident!("__post_init");
+                        pi_fn.vis = syn::Visibility::Inherited;
+                        pi_fn.attrs.retain(|a| !a.path().is_ident("post_init"));
+                        quote! { #pi_fn }
+                    })
+                    .unwrap_or_else(|| quote! {});
+
                 quote! {
+                    #[cfg_attr(crown, allow(crown::unrooted_must_root))]
                     impl<'s> #type_name<'s> {
                         /// Construct a new instance and return the stack newtype.
                         pub fn new(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
@@ -991,6 +1350,10 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                                     #call
                                 })
                                     .expect(concat!("Class ", stringify!(#type_name), " not registered"));
+                                #[cfg(debug_assertions)]
+                                if let Some(__data) = ::js::class::get_private::<#inner_name>(obj.as_raw()) {
+                                    ::js::class::ClassDef::debug_assert_fully_initialized(__data);
+                                }
                                 let nn = ::std::ptr::NonNull::new_unchecked(obj.as_raw());
                                 #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(nn)))
                             }
@@ -1003,6 +1366,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                         pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::Object<'s>) {
                             unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
                         }
+                        #pi_fn_tokens
                     }
                 }
             }
@@ -1018,11 +1382,19 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     for method in &methods {
         match &method.kind {
-            MethodKind::Constructor | MethodKind::Destructor | MethodKind::StaticMethod { .. } => {
+            MethodKind::Constructor
+            | MethodKind::Destructor
+            | MethodKind::PostInit
+            | MethodKind::StaticMethod { .. } => {
                 continue;
             }
             MethodKind::Getter { .. } | MethodKind::Property { .. } => {
                 // Getters are forwarded as simple methods. They always have &self.
+                // Skip raw getters — they access CallArgs directly and can't
+                // be forwarded through the stack newtype.
+                if method.is_raw {
+                    continue;
+                }
                 let fn_name = &method.fn_item.sig.ident;
                 let name_str = fn_name.to_string();
                 if matches!(
@@ -1070,6 +1442,10 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
             MethodKind::Setter { .. } => {
                 // Setters are forwarded with &mut self + the value parameter.
+                // Skip raw setters — they access CallArgs directly.
+                if method.is_raw {
+                    continue;
+                }
                 let fn_name = &method.fn_item.sig.ident;
                 let name_str = fn_name.to_string();
                 if matches!(
@@ -1254,6 +1630,9 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Generated destructor registrar
         #dtor_impl
 
+        // Generated post-init registrar
+        #post_init_impl
+
         // Generated inherent new() constructor + add_to_global on stack newtype
         #ctor_new_impl
 
@@ -1432,7 +1811,13 @@ fn extract_use_leaf_ident(tree: &syn::UseTree) -> Option<&Ident> {
 
 fn is_promise_type(ty: &Type) -> bool {
     let s = quote!(#ty).to_string();
-    s == "JSPromise" || s.ends_with(":: JSPromise") || s.ends_with("::JSPromise")
+    // TODO: Remove `JSPromise` variants once all code is migrated to `Promise`.
+    s == "JSPromise"
+        || s.ends_with(":: JSPromise")
+        || s.ends_with("::JSPromise")
+        || s == "Promise"
+        || s.ends_with(":: Promise")
+        || s.ends_with("::Promise")
 }
 
 fn is_integer_type(ty: &Type) -> bool {
@@ -1441,6 +1826,61 @@ fn is_integer_type(ty: &Type) -> bool {
         s.as_str(),
         "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize"
     )
+}
+
+/// Detect `Option<T>` types for optional parameter handling.
+fn is_option_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return seg.ident == "Option"
+                && matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+        }
+    }
+    false
+}
+
+/// Check whether a type is a none-optional `Heap<T>`.
+fn is_bare_heap_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return seg.ident == "Heap"
+                && matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+        }
+    }
+    false
+}
+
+/// Extract the inner type from `Option<T>`.
+fn extract_option_inner_type(ty: &Type) -> Option<Type> {
+    if let Type::Path(type_path) = ty {
+        let last_seg = type_path.path.segments.last()?;
+        if last_seg.ident == "Option" {
+            if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                    return Some(inner.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the error type `E` from a `Result<T, E>` return type.
+fn extract_result_error_type(output: &ReturnType) -> Option<Type> {
+    if let ReturnType::Type(_, ty) = output {
+        if let Type::Path(tp) = ty.as_ref() {
+            if let Some(seg) = tp.path.segments.last() {
+                if seg.ident == "Result" {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(syn::GenericArgument::Type(err_ty)) = args.args.iter().nth(1) {
+                            return Some(err_ty.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Detect stack newtype types like `Item<'_>` or `Item<'s>`.
@@ -1477,10 +1917,10 @@ fn strip_lifetime(ty: &Type) -> Type {
     }
 }
 
-/// Check if a type string is exactly `Result < () , () >`
-fn is_result_unit_unit(ty_str: &str) -> bool {
+/// Check if a type string is exactly `Result < () , ::js::error::ExnThrown >`
+fn is_result_unit_jserror(ty_str: &str) -> bool {
     let normalized: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
-    normalized == "Result<(),()>"
+    normalized.starts_with("Result<()") && normalized.ends_with("ExnThrown>")
 }
 
 /// Check if a type string is a `Result<T, E>` type.
@@ -1532,7 +1972,7 @@ fn classify_return_style(
             }
             if is_promise_type(ty) {
                 ReturnStyle::Promise
-            } else if is_result_unit_unit(&ty_str) {
+            } else if is_result_unit_jserror(&ty_str) {
                 ReturnStyle::Raw
             } else if let Some(has_inner_value) = is_result_type(&ty_str) {
                 if has_inner_value {
@@ -1565,20 +2005,53 @@ fn gen_arg_extractions(
         .enumerate()
         .map(|(i, (name, ty))| {
             let idx = i as u32;
+
+            // Handle Option<T> — extract the inner type and make it conditional.
+            if is_option_type(ty) {
+                let inner = extract_option_inner_type(ty).expect("Option<T> must have inner type");
+                let inner_extract = if is_stack_newtype_type(&inner) {
+                    let bare = strip_lifetime(&inner);
+                    quote! { unsafe { ::js::class::get_stack_arg::<#bare>(#scope_expr, #args_expr, #idx) } }
+                } else if is_integer_type(&inner) {
+                    quote! {
+                        unsafe { ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
+                            ::js::conversion::ConversionBehavior::Default) }
+                    }
+                } else {
+                    quote! { unsafe { ::js::class::get_arg(#scope_expr, #args_expr, #idx) } }
+                };
+                let fail = if use_question_mark {
+                    quote! { return Err(::js::error::ExnThrown); }
+                } else {
+                    quote! { return false; }
+                };
+                return quote! {
+                    let __val = unsafe { *#args_expr.get(#idx) };
+                    let #name = if __val.is_undefined() {
+                        None
+                    } else {
+                        match #inner_extract {
+                            Ok(__v) => Some(__v),
+                            Err(::js::error::ExnThrown) => { #fail }
+                        }
+                    };
+                };
+            }
+
             let extract = if is_stack_newtype_type(ty) {
                 // Strip the lifetime to get the bare type name for
                 // `get_stack_arg::<Foo>()`.
                 let bare = strip_lifetime(ty);
                 quote! {
-                    ::js::class::get_stack_arg::<#bare>(#scope_expr, #args_expr, #idx)
+                    unsafe { ::js::class::get_stack_arg::<#bare>(#scope_expr, #args_expr, #idx) }
                 }
             } else if is_integer_type(ty) {
                 quote! {
-                    ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
-                        ::js::conversions::ConversionBehavior::Default)
+                    unsafe { ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
+                        ::js::conversion::ConversionBehavior::Default) }
                 }
             } else {
-                quote! { ::js::class::get_arg(#scope_expr, #args_expr, #idx) }
+                quote! { unsafe { ::js::class::get_arg(#scope_expr, #args_expr, #idx) } }
             };
             if use_question_mark {
                 quote! { let #name = #extract?; }
@@ -1586,7 +2059,7 @@ fn gen_arg_extractions(
                 quote! {
                     let #name = match #extract {
                         Ok(v) => v,
-                        Err(()) => return false,
+                        Err(::js::error::ExnThrown) => return false,
                     };
                 }
             }
@@ -1610,9 +2083,29 @@ fn gen_constructor_body(info: &MethodInfo, type_name: &Ident) -> proc_macro2::To
         quote! { #type_name::#ctor_fn(#(#arg_names),*) }
     };
 
+    // Constructors returning `Result<Self, E>` need error conversion:
+    // the error is thrown as a JS exception via `ThrowException`.
+    // In the construct function, `scope` is `&Scope<'_>` (not owned),
+    // so we pass it directly to throw (unlike native functions which
+    // own the scope and pass `&scope`).
+    let wrapped = match &info.return_style {
+        ReturnStyle::ResultVoid | ReturnStyle::ResultValue => {
+            quote! {
+                match #call {
+                    Ok(data) => Ok(data),
+                    Err(e) => {
+                        ::js::error::ThrowException::throw(e, scope);
+                        Err(::js::error::ExnThrown)
+                    }
+                }
+            }
+        }
+        _ => quote! { Ok(#call) },
+    };
+
     quote! {
         #(#arg_extractions)*
-        Ok(#call)
+        #wrapped
     }
 }
 
@@ -1636,14 +2129,14 @@ fn gen_method_native(
         quote! {
             let __self = match ::js::class::get_this::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(()) => return false,
+                Err(::js::error::ExnThrown) => return false,
             };
         }
     } else if info.has_mut_self {
         quote! {
             let __self = match ::js::class::get_this_mut::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(()) => return false,
+                Err(::js::error::ExnThrown) => return false,
             };
         }
     } else {
@@ -1653,7 +2146,7 @@ fn gen_method_native(
     let arg_extractions = gen_arg_extractions(&info.params, quote!(&__args), false, quote!(&scope));
     let call_args: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
 
-    // Generate rest args collection using FromJSValue conversion
+    // Generate rest args collection using FromJSVal conversion
     let rest_setup = if info.has_rest_args {
         let rest_name = info.rest_arg_name.as_ref().unwrap();
         let start_idx = info.params.len() as u32;
@@ -1670,12 +2163,18 @@ fn gen_method_native(
                     let __handle = unsafe {
                         ::js::native::Handle::from_raw(__args.get(__i))
                     };
-                    match <#inner_ty as ::js::class::FromJSValue>::from_js_value(
+                    match <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
                         &scope,
-                        __handle.get(),
+                        __handle,
+                        ()
                     ) {
                         Ok(__v) => __rest_vec.push(__v),
-                        Err(()) => return false,
+                        Err(e) => {
+                            if let ::js::conversion::ConversionError::Failure(reason) = e {
+                                ::js::error::throw_type_error(scope.cx_mut(), &*reason);
+                            }
+                            return false;
+                        },
                     }
                 }
                 ::js::class::RestArgs::new(__rest_vec)
@@ -1717,7 +2216,7 @@ fn gen_method_native(
         ReturnStyle::Raw => quote! {
             match #call {
                 Ok(()) => true,
-                Err(()) => false,
+                Err(::js::error::ExnThrown) => false,
             }
         },
         ReturnStyle::Value => quote! {
@@ -1832,7 +2331,7 @@ fn gen_accessor_native(
         quote! {
             let __self = match ::js::class::get_this::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(()) => return false,
+                Err(::js::error::ExnThrown) => return false,
             };
         }
     } else {
@@ -1840,20 +2339,28 @@ fn gen_accessor_native(
         quote! {
             let __self = match ::js::class::get_this_mut::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(()) => return false,
+                Err(::js::error::ExnThrown) => return false,
             };
         }
     };
 
     let body = if is_getter {
         // Getter: call method, set return value
-        let call = if info.has_cx {
+        let call = if info.is_raw {
+            quote! { #type_name::#fn_name(__self, &scope, &__args) }
+        } else if info.has_cx {
             quote! { #type_name::#fn_name(__self, &scope) }
         } else {
             quote! { #type_name::#fn_name(__self) }
         };
 
         match &info.return_style {
+            ReturnStyle::Raw => quote! {
+                match #call {
+                    Ok(()) => true,
+                    Err(::js::error::ExnThrown) => false,
+                }
+            },
             ReturnStyle::Value => quote! {
                 let __result = #call;
                 ::js::class::set_return(&scope, &__args, &__result);
@@ -1883,13 +2390,21 @@ fn gen_accessor_native(
             gen_arg_extractions(&info.params, quote!(&__args), false, quote!(&scope));
 
         let call_args: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
-        let call = if info.has_cx {
+        let call = if info.is_raw {
+            quote! { #type_name::#fn_name(__self, &scope, &__args) }
+        } else if info.has_cx {
             quote! { #type_name::#fn_name(__self, &scope, #(#call_args),*) }
         } else {
             quote! { #type_name::#fn_name(__self, #(#call_args),*) }
         };
 
         match &info.return_style {
+            ReturnStyle::Raw => quote! {
+                match #call {
+                    Ok(()) => true,
+                    Err(::js::error::ExnThrown) => false,
+                }
+            },
             ReturnStyle::ResultVoid => quote! {
                 #(#arg_extractions)*
                 match #call {
@@ -2485,7 +3000,7 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
         let js_name_cstr = proc_macro2::Literal::byte_string(js_name_bytes.as_bytes());
 
         install_calls.push(quote! {
-            ::js::function::define_function(
+            ::js::Function::define(
                 scope,
                 global.handle(),
                 unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_name_cstr) },
@@ -2512,9 +3027,8 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
 
         install_calls.push(quote! {
-            ::js::object::define_property(
+            global.define_property(
                 scope,
-                global.handle(),
                 unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_name_cstr) },
                 #value_expr,
                 ::js::class_spec::JSPROP_ENUMERATE as u32
@@ -2770,7 +3284,7 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
         let js_name_cstr = proc_macro2::Literal::byte_string(js_name_bytes.as_bytes());
 
         install_calls.push(quote! {
-            ::js::function::define_function(
+            ::js::Function::define(
                 scope,
                 ns_handle,
                 unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_name_cstr) },

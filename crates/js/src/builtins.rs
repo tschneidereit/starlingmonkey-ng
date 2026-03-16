@@ -4,88 +4,131 @@
 //! type markers.
 //!
 //! Object newtypes (Array, Map, Set, Promise, Date, RegExp, WeakMap) live in
-//! their own modules. This module provides the shared [`Is`],
-//! [`IsValue`], [`To`], and [`IsPrimitive`] traits, plus
+//! their own modules. This module provides the shared [`IsPrimitive`] trait, plus
 //! primitive marker types for value-level type tests.
-//!
-//! # Type Checking and Conversion
-//!
-//! Use [`Is::is`] to test whether a JS object matches a type, and
-//! [`To::to`] for a checked conversion:
-//!
-//! ```ignore
-//! use crate::array::Array;
-//! use crate::builtins::{Is, To};
-//!
-//! if Array::is(scope, obj.handle())? {
-//!     let arr: &Array = obj.to(&scope)?;
-//!     let len = arr.length(&scope)?;
-//! }
-//! ```
 
-use crate::gc::handle::{JsType, Stack};
-use crate::gc::scope::Scope;
-use mozjs::gc::{HandleObject, HandleValue};
-use mozjs::jsapi::Value;
+use mozjs::{
+    gc::Handle,
+    jsapi::{JSObject, Value},
+};
 
-use super::error::JSError;
+use crate::gc::handle::Stack;
 
-// ---------------------------------------------------------------------------
-// Type-checking trait
-// ---------------------------------------------------------------------------
+/// Marker trait for types representable as JavaScript objects.
+///
+/// Implemented by:
+/// - Builtin marker types (`object::Object`, `array::Array`, `promise::Promise`, etc.)
+/// - `ClassDef` types (user-defined classes with Rust data in private slots)
+///
+/// `JSType` is the bound for [`Stack`] and [`Heap`], the universal wrappers
+/// for scope-rooted and heap-traced JS object handles.
+///
+/// Every `JSType` carries a stable `JSClass` pointer that serves as the
+/// type's identity tag. For builtin types this comes from SpiderMonkey's
+/// `ProtoKeyToClass`; for user-defined classes from the generated
+/// `static JSClass`.
+pub trait JSType: 'static {
+    /// The JavaScript-visible name of this type (e.g. `"Object"`, `"Array"`, `"Counter"`).
+    const JS_NAME: &'static str;
 
-/// Trait for checking whether a JS object is an instance of a specific
-/// built-in type.
-pub trait Is {
-    /// Check whether `obj` is an instance of this built-in type.
+    /// The `JSClass` pointer that identifies objects of this type.
     ///
-    /// Some checks (like `IsPromiseObject`) don't need `cx`; for uniformity,
-    /// the trait always takes `scope`.
-    fn is(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError>;
+    /// Used by [`Stack::is`](Stack::is) and
+    /// [`Stack::from_object`](Stack::from_object) for type-checked
+    /// conversions.
+    fn js_class() -> *const crate::class_spec::JSClass;
 }
 
-/// Blanket impl: `Stack<'s, T>` inherits `Is` from the inner marker `T`.
-impl<T: JsType + Is> Is for Stack<'_, T> {
-    fn is(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError> {
-        T::is(scope, obj)
+/// Target type for [`Stack::cast`] and [`StackType::cast`].
+///
+/// Implemented for:
+/// - All [`JSType`] markers (builtins like `Date`, `Array`, `Promise`, etc.)
+///   — cast returns `Stack<'s, T>`.
+/// - Proc-macro newtypes (e.g. `Dog<'s>`) — cast returns the newtype itself.
+pub trait CastTarget<'s> {
+    /// The result type of a successful cast.
+    type Output;
+
+    /// JS-visible name of the target type (for error messages).
+    const TARGET_NAME: &'static str;
+
+    /// The `JSClass` pointer tag identifying this type.
+    fn target_class_tag() -> usize;
+
+    /// Construct the output from a rooted handle without type checking.
+    ///
+    /// # Safety
+    ///
+    /// The handle must point to a JS object of the target type (or subclass).
+    unsafe fn construct_unchecked(h: Handle<'s, *mut JSObject>) -> Self::Output;
+}
+
+/// Blanket impl: `Stack<'s, T>` is a valid cast target for any `T: JSType`,
+/// including the public type aliases (`Date<'s>`, `Promise<'s>`, etc.).
+impl<'s, T: JSType> CastTarget<'s> for Stack<'s, T> {
+    type Output = Stack<'s, T>;
+
+    const TARGET_NAME: &'static str = T::JS_NAME;
+
+    fn target_class_tag() -> usize {
+        class_tag::<T>()
+    }
+
+    unsafe fn construct_unchecked(h: Handle<'s, *mut JSObject>) -> Stack<'s, T> {
+        unsafe { Stack::from_handle_unchecked(h) }
     }
 }
 
-/// Trait for checking whether a [`Value`] is an instance of a specific
-/// built-in type.
-pub trait IsValue {
-    /// Check whether a value wraps an instance of this built-in type.
-    fn is_value(scope: &Scope<'_>, val: HandleValue) -> Result<bool, JSError>;
+/// Get the `JSClass` pointer for any `JSType`, cast to `usize`.
+///
+/// Works for both user-defined classes (via `ClassDef`) and builtin types
+/// (Object, Array, Date, Promise, etc.).
+#[inline]
+pub(crate) fn class_tag<T: JSType>() -> usize {
+    T::js_class() as usize
 }
 
-// ---------------------------------------------------------------------------
-// Checked conversion trait
-// ---------------------------------------------------------------------------
-
-/// Checked conversion from one built-in type to another.
+/// Read the type tag from a JS object by inspecting its `JSClass` pointer.
 ///
-/// Returns `T` (by value) if the underlying JS object passes [`Is::is`],
-/// or [`JSError`] otherwise. Since newtypes like `Object<'s>` and `Array<'s>`
-/// are `Copy` (they wrap a `Handle`), returning by value is zero-cost.
+/// # Safety
 ///
-/// # Example
-///
-/// ```ignore
-/// use crate::builtins::To;
-/// use crate::array::Array;
-///
-/// let arr: Array<'_> = obj.to(&scope)?;
-/// let len = arr.length(&scope)?;
-/// ```
-pub trait To<T> {
-    /// Perform a checked conversion, returning `T` if the object is of the
-    /// expected type, or [`JSError`] if not.
-    fn to(&self, scope: &Scope<'_>) -> Result<T, JSError>;
+/// - `obj` must be a valid, non-null JS object pointer.
+pub unsafe fn get_class_tag(obj: *mut JSObject) -> usize {
+    crate::object::get_object_class(obj) as usize
 }
 
-// ---------------------------------------------------------------------------
-// Primitive type markers for JSVal
-// ---------------------------------------------------------------------------
+/// Check if a concrete type (by tag) derives from a target type (by tag).
+///
+/// Returns `true` if `concrete_tag == target_tag`, or if the concrete type
+/// has the target in its ancestor set. Also returns `true` if `target_tag`
+/// is Object's JSClass tag, since every JS object is-an Object.
+pub(crate) fn is_derived_from_type(concrete_tag: usize, target_tag: usize) -> bool {
+    if concrete_tag == target_tag {
+        return true;
+    }
+    if target_tag == class_tag::<crate::object::Object>() {
+        return true;
+    }
+
+    crate::class::inherits_from(concrete_tag, target_tag)
+}
+
+/// Error returned when a type-checked [`cast`](StackType::cast) fails.
+#[derive(Debug)]
+pub struct CastError {
+    /// Name of the source class.
+    pub from: &'static str,
+    /// Name of the target class.
+    pub to: &'static str,
+}
+
+impl std::fmt::Display for CastError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot cast {} to {}", self.from, self.to)
+    }
+}
+
+impl std::error::Error for CastError {}
 
 /// Marker type for checking whether a `JSVal` is `undefined`.
 pub struct Undefined;

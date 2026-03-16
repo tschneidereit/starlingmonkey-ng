@@ -13,12 +13,12 @@ use mozjs::gc::HandleObject;
 use mozjs::jsapi::{JSObject, ProfilingStack};
 use mozjs::rust::wrappers2;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Define the `Debugger` constructor on a global object.
-pub fn define_debugger_object(scope: &Scope<'_>, obj: HandleObject) -> Result<(), JSError> {
+pub fn define_debugger_object(scope: &Scope<'_>, obj: HandleObject) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::JS_DefineDebuggerObject(scope.cx_mut(), obj) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Get the testing functions object.
@@ -44,7 +44,7 @@ pub fn enable_context_profiling_stack(scope: &Scope<'_>, enabled: bool) {
 }
 
 /// Define the profiling functions on a global object.
-pub fn define_profiling_functions(scope: &Scope<'_>, obj: HandleObject) -> Result<(), JSError> {
+pub fn define_profiling_functions(scope: &Scope<'_>, obj: HandleObject) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::JS_DefineProfilingFunctions(scope.cx(), obj) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }

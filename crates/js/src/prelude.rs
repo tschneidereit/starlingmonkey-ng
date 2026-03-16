@@ -6,14 +6,16 @@
 //! use crate::prelude::*;
 //! ```
 
-pub use super::error::{CapturedError, ConversionError, JSError};
-pub use super::value::{IntoJSVal, TryFromJSVal};
+pub use super::error::{CapturedError, ConversionError, ExnThrown};
+
+// Re-export the conversion traits.
+pub use super::conversion::{FromJSVal, ToJSVal};
 
 // Re-export the scope-based rooting types.
 pub use crate::gc::scope::{InnerScope, RootScope, Scope};
 
 // Re-export builtin type-checking and conversion traits.
-pub use super::builtins::{Is, IsPrimitive, IsValue, To};
+pub use super::builtins::IsPrimitive;
 
 // Re-export the rooting types since they are essential.
 pub use mozjs::gc::{

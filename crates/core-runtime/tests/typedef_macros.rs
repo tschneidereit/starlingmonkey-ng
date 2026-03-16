@@ -392,3 +392,119 @@ mod webidl_namespace_tests {
         assert_eq!(eval("CSS[Symbol.toStringTag]"), "CSS");
     }
 }
+
+/// Tests for setup-style constructors (using `&self`) with `extends` inheritance.
+mod setup_style_inheritance {
+    use core_runtime::jsclass;
+    use core_runtime::jsmethods;
+    use core_runtime::test_util::eval_with_setup;
+
+    #[jsclass]
+    struct Pet {
+        kind: String,
+    }
+
+    #[jsmethods]
+    impl Pet {
+        #[constructor]
+        fn new(&self, kind: String) -> Result<(), String> {
+            let data = unsafe { self.data_mut().unwrap() };
+            data.kind = kind;
+            Ok(())
+        }
+
+        #[getter]
+        fn kind(&self) -> String {
+            self.kind.clone()
+        }
+
+        #[method]
+        fn sound(&self) -> String {
+            "<generic pet sound>".to_string()
+        }
+    }
+
+    #[jsclass(extends = Pet)]
+    struct Lily {
+        parent: Pet,
+        cuteness: f64,
+    }
+
+    #[jsmethods]
+    impl Lily {
+        #[constructor]
+        fn new(&self, cuteness: f64) -> Result<(), String> {
+            let data = unsafe { self.data_mut().unwrap() };
+            data.parent = PetImpl {
+                kind: "The very cutest".to_string(),
+            };
+            data.cuteness = cuteness;
+            Ok(())
+        }
+
+        #[getter]
+        fn cuteness(&self) -> f64 {
+            self.cuteness
+        }
+
+        #[method]
+        fn sound(&self) -> String {
+            "The cutest sound!".to_string()
+        }
+
+        #[method]
+        fn describe(&self) -> String {
+            format!("{} Lily, cuteness: {}/5", self.parent.kind, self.cuteness)
+        }
+    }
+
+    fn eval(code: &str) -> String {
+        eval_with_setup(
+            || {
+                core_runtime::runtime::register_global_initializer(|scope, global| {
+                    Pet::add_to_global(scope, global);
+                    Lily::add_to_global(scope, global);
+                });
+            },
+            code,
+        )
+    }
+
+    #[test]
+    fn pet_constructor() {
+        assert_eq!(eval("new Pet('Cat').kind"), "Cat");
+    }
+
+    #[test]
+    fn pet_method() {
+        assert_eq!(eval("new Pet('Some dog').sound()"), "<generic pet sound>");
+    }
+
+    #[test]
+    fn lily_constructor() {
+        assert_eq!(eval("new Lily(5).kind"), "The very cutest");
+    }
+
+    #[test]
+    fn lily_payload() {
+        assert_eq!(eval("new Lily(5).cuteness"), "5");
+    }
+
+    #[test]
+    fn lily_overrides_method() {
+        assert_eq!(eval("new Lily(5).sound()"), "The cutest sound!");
+    }
+
+    #[test]
+    fn lily_instanceof() {
+        assert_eq!(eval("new Lily(5) instanceof Pet"), "true");
+    }
+
+    #[test]
+    fn lily_describe() {
+        assert_eq!(
+            eval("new Lily(5).describe()"),
+            "The very cutest Lily, cuteness: 5/5"
+        );
+    }
+}

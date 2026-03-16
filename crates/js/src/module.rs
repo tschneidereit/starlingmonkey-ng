@@ -9,6 +9,7 @@
 use std::ptr::NonNull;
 
 use crate::gc::scope::Scope;
+use crate::{Object, Promise};
 use mozjs::gc::{Handle, HandleObject, HandleString};
 use mozjs::jsapi::mozilla::Utf8Unit;
 use mozjs::jsapi::{
@@ -18,7 +19,7 @@ use mozjs::jsapi::{
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Compile an ES module from UTF-16 source.
 ///
@@ -29,11 +30,11 @@ pub unsafe fn compile_module_utf16<'s>(
     scope: &'s Scope<'_>,
     options: *const ReadOnlyCompileOptions,
     src_buf: *mut SourceText<u16>,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = wrappers2::CompileModule(scope.cx_mut(), options, src_buf);
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Compile an ES module from UTF-8 source.
@@ -45,11 +46,9 @@ pub unsafe fn compile_module<'s>(
     scope: &'s Scope<'_>,
     options: *const ReadOnlyCompileOptions,
     src_buf: *mut SourceText<Utf8Unit>,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Object<'s>, ExnThrown> {
     let obj = wrappers2::CompileModule1(scope.cx_mut(), options, src_buf);
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+    Object::from_raw(scope, obj).ok_or(ExnThrown)
 }
 
 /// Compile a JSON module from UTF-8 source.
@@ -61,19 +60,17 @@ pub unsafe fn compile_json_module<'s>(
     scope: &'s Scope<'_>,
     options: *const ReadOnlyCompileOptions,
     src_buf: *mut SourceText<Utf8Unit>,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Object<'s>, ExnThrown> {
     let obj = wrappers2::CompileJsonModule1(scope.cx_mut(), options, src_buf);
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+    Object::from_raw(scope, obj).ok_or(ExnThrown)
 }
 
 /// Link a compiled module, resolving its imports.
 ///
 /// This must be called after compilation and before evaluation.
-pub fn link(scope: &Scope<'_>, module_record: HandleObject) -> Result<(), JSError> {
-    let ok = unsafe { wrappers2::ModuleLink(scope.cx_mut(), module_record) };
-    JSError::check(ok)
+pub fn link(scope: &Scope<'_>, module_record: Object) -> Result<(), ExnThrown> {
+    let ok = unsafe { wrappers2::ModuleLink(scope.cx_mut(), module_record.handle()) };
+    ExnThrown::check(ok)
 }
 
 /// Evaluate a linked module.
@@ -81,58 +78,60 @@ pub fn link(scope: &Scope<'_>, module_record: HandleObject) -> Result<(), JSErro
 /// Returns the evaluation result (typically a promise for top-level await).
 pub fn evaluate(
     scope: &Scope<'_>,
-    module_record: HandleObject,
-) -> Result<mozjs::jsapi::Value, JSError> {
+    module_record: Object,
+) -> Result<mozjs::jsapi::Value, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = mozjs::jsval::UndefinedValue());
-    let ok = unsafe { wrappers2::ModuleEvaluate(scope.cx_mut(), module_record, rval.handle_mut()) };
-    JSError::check(ok)?;
+    let ok = unsafe {
+        wrappers2::ModuleEvaluate(scope.cx_mut(), module_record.handle(), rval.handle_mut())
+    };
+    ExnThrown::check(ok)?;
     Ok(rval.get())
 }
 
 /// Throw if module evaluation failed.
 pub fn throw_on_evaluation_failure(
     scope: &Scope<'_>,
-    evaluation_promise: HandleObject,
+    evaluation_promise: Promise,
     error_behaviour: ModuleErrorBehaviour,
-) -> Result<(), JSError> {
+) -> Result<(), ExnThrown> {
     let ok = unsafe {
         wrappers2::ThrowOnModuleEvaluationFailure(
             scope.cx_mut(),
-            evaluation_promise,
+            evaluation_promise.handle(),
             error_behaviour,
         )
     };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Get the number of requested module imports.
-pub fn get_requested_modules_count(scope: &Scope<'_>, module_record: HandleObject) -> u32 {
-    unsafe { wrappers2::GetRequestedModulesCount(scope.cx(), module_record) }
+pub fn get_requested_modules_count(scope: &Scope<'_>, module_record: Object) -> u32 {
+    unsafe { wrappers2::GetRequestedModulesCount(scope.cx(), module_record.handle()) }
 }
 
 /// Get the module specifier string for a requested import at `index`.
 pub fn get_requested_module_specifier(
     scope: &Scope<'_>,
-    module_record: HandleObject,
+    module_record: Object,
     index: u32,
 ) -> Option<NonNull<JSString>> {
     NonNull::new(unsafe {
-        wrappers2::GetRequestedModuleSpecifier(scope.cx_mut(), module_record, index)
+        wrappers2::GetRequestedModuleSpecifier(scope.cx_mut(), module_record.handle(), index)
     })
 }
 
 /// Get the module type for a requested import at `index`.
 pub fn get_requested_module_type(
     scope: &Scope<'_>,
-    module_record: HandleObject,
+    module_record: Object,
     index: u32,
 ) -> ModuleType {
-    unsafe { wrappers2::GetRequestedModuleType(scope.cx(), module_record, index) }
+    unsafe { wrappers2::GetRequestedModuleType(scope.cx(), module_record.handle(), index) }
 }
 
 /// Get the `JSScript` associated with a module record.
-pub fn get_module_script(module_record: HandleObject) -> Option<NonNull<JSScript>> {
-    NonNull::new(unsafe { wrappers2::GetModuleScript(module_record) })
+pub fn get_module_script(module_record: Object) -> Option<NonNull<JSScript>> {
+    NonNull::new(unsafe { wrappers2::GetModuleScript(module_record.handle()) })
 }
 
 /// Create a module request object with a specifier and type.
@@ -140,11 +139,11 @@ pub fn create_module_request<'s>(
     scope: &'s Scope<'_>,
     specifier: HandleString,
     module_type: ModuleType,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = unsafe { wrappers2::CreateModuleRequest(scope.cx_mut(), specifier, module_type) };
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Get the specifier string of a module request.
@@ -164,11 +163,11 @@ pub fn get_module_request_type(scope: &Scope<'_>, module_request: HandleObject) 
 pub fn get_namespace<'s>(
     scope: &'s Scope<'_>,
     module_record: HandleObject,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = unsafe { wrappers2::GetModuleNamespace(scope.cx_mut(), module_record) };
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Get the module for a given namespace object.

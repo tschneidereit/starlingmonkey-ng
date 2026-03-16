@@ -2,7 +2,7 @@
 
 //! Regular expression creation, execution, and inspection.
 //!
-//! The [`RegExp`] marker type implements [`JsType`](crate::gc::handle::JsType),
+//! The [`RegExp`] marker type implements [`JSType`](crate::gc::handle::JSType),
 //! enabling [`RegExp<'s>`](crate::RegExp) as the scope-rooted
 //! handle type. It provides methods for creating and testing regular
 //! expressions.
@@ -10,7 +10,8 @@
 use std::ffi::CStr;
 use std::ptr::NonNull;
 
-use crate::gc::handle::{JsType, Stack};
+use crate::builtins::JSType;
+use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
 use mozjs::jsapi::{JSString, RegExpFlags, Value};
 use mozjs::jsval::UndefinedValue;
@@ -18,8 +19,7 @@ use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::HandleObject;
 
-use super::builtins::{Is, To};
-use super::error::JSError;
+use super::error::ExnThrown;
 use crate::Object;
 
 /// Marker type for JavaScript `RegExp` objects.
@@ -32,19 +32,27 @@ use crate::Object;
 /// ```
 pub struct RegExp;
 
-impl JsType for RegExp {
+impl JSType for RegExp {
     const JS_NAME: &'static str = "RegExp";
+
+    fn js_class() -> *const mozjs::jsapi::JSClass {
+        crate::class::proto_key_to_class(mozjs::jsapi::JSProtoKey::JSProto_RegExp)
+    }
 }
 
 impl<'s> Stack<'s, RegExp> {
     /// Create a new `RegExp` object from a Latin-1 (byte) pattern and flags.
-    pub fn new(scope: &'s Scope<'_>, pattern: &CStr, flags: RegExpFlags) -> Result<Self, JSError> {
+    pub fn new(
+        scope: &'s Scope<'_>,
+        pattern: &CStr,
+        flags: RegExpFlags,
+    ) -> Result<Self, ExnThrown> {
         let bytes = pattern.as_ptr();
         let len = pattern.to_bytes().len();
         let obj = unsafe { wrappers2::NewRegExpObject(scope.cx_mut(), bytes, len, flags) };
         NonNull::new(obj)
             .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(JSError)
+            .ok_or(ExnThrown)
     }
 
     /// Create a new `RegExp` object from a UTF-16 pattern and flags.
@@ -52,21 +60,21 @@ impl<'s> Stack<'s, RegExp> {
         scope: &'s Scope<'_>,
         chars: &[u16],
         flags: RegExpFlags,
-    ) -> Result<Self, JSError> {
+    ) -> Result<Self, ExnThrown> {
         let obj = unsafe {
             wrappers2::NewUCRegExpObject(scope.cx_mut(), chars.as_ptr(), chars.len(), flags)
         };
         NonNull::new(obj)
             .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(JSError)
+            .ok_or(ExnThrown)
     }
 
     /// Check whether an object is a `RegExp`.
-    pub fn is_regexp(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError> {
+    pub fn is_regexp(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, ExnThrown> {
         let mut result = false;
         // SAFETY: cx and obj are valid; ObjectIsRegExp writes to result.
         let ok = unsafe { wrappers2::ObjectIsRegExp(scope.cx_mut(), obj, &mut result) };
-        JSError::check(ok)?;
+        ExnThrown::check(ok)?;
         Ok(result)
     }
 
@@ -74,9 +82,11 @@ impl<'s> Stack<'s, RegExp> {
     pub fn source<'a>(
         &self,
         scope: &'a Scope<'_>,
-    ) -> Result<mozjs::gc::Handle<'a, *mut JSString>, JSError> {
+    ) -> Result<mozjs::gc::Handle<'a, *mut JSString>, ExnThrown> {
         let s = unsafe { wrappers2::GetRegExpSource(scope.cx_mut(), self.handle()) };
-        NonNull::new(s).map(|p| scope.root_string(p)).ok_or(JSError)
+        NonNull::new(s)
+            .map(|p| scope.root_string(p))
+            .ok_or(ExnThrown)
     }
 
     /// Execute this `RegExp` against a UTF-16 string without modifying statics.
@@ -96,7 +106,7 @@ impl<'s> Stack<'s, RegExp> {
         chars: &[u16],
         indexp: &mut usize,
         test: bool,
-    ) -> Result<Value, JSError> {
+    ) -> Result<Value, ExnThrown> {
         rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
         let ok = wrappers2::ExecuteRegExpNoStatics(
             scope.cx_mut(),
@@ -107,7 +117,7 @@ impl<'s> Stack<'s, RegExp> {
             test,
             rval.handle_mut(),
         );
-        JSError::check(ok)?;
+        ExnThrown::check(ok)?;
         Ok(rval.get())
     }
 
@@ -119,7 +129,7 @@ impl<'s> Stack<'s, RegExp> {
         scope: &Scope<'_>,
         chars: &[u16],
         flags: RegExpFlags,
-    ) -> Result<Value, JSError> {
+    ) -> Result<Value, ExnThrown> {
         rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut error = UndefinedValue());
         let ok = unsafe {
             wrappers2::CheckRegExpSyntax(
@@ -130,25 +140,8 @@ impl<'s> Stack<'s, RegExp> {
                 error.handle_mut(),
             )
         };
-        JSError::check(ok)?;
+        ExnThrown::check(ok)?;
         Ok(error.get())
-    }
-}
-
-impl Is for RegExp {
-    fn is(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, JSError> {
-        Stack::<RegExp>::is_regexp(scope, obj)
-    }
-}
-
-impl<'s> To<Stack<'s, RegExp>> for Object<'s> {
-    fn to(&self, scope: &Scope<'_>) -> Result<Stack<'s, RegExp>, JSError> {
-        if RegExp::is(scope, self.handle())? {
-            // SAFETY: We just verified the object is a RegExp.
-            Ok(unsafe { Stack::from_handle_unchecked(self.handle()) })
-        } else {
-            Err(JSError)
-        }
     }
 }
 

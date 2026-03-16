@@ -7,9 +7,11 @@
 //! shared across calls. This emulates the behavior of HTML `<script>` tags
 //! and is required by the WPT test harness.
 
+use js::conversion::ConversionError;
 use js::error::throw_error;
 use js::gc::scope::Scope;
-use js::native::RawJSContext;
+use js::native::{Handle, RawJSContext};
+use js::prelude::FromJSVal;
 use js::Object;
 
 /// Install WPT-specific globals on the given global object.
@@ -21,7 +23,7 @@ use js::Object;
 ///
 /// Must be called with a valid scope and global object.
 pub unsafe fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
-    js::function::define_function(
+    js::Function::define(
         scope,
         global.handle(),
         c"evalScript",
@@ -47,35 +49,20 @@ unsafe extern "C" fn eval_script_native(
     let mut cx = js::native::JSContext::from_ptr(std::ptr::NonNull::new_unchecked(raw_cx));
     let scope = RootScope::from_current_realm(&mut cx);
     let args = js::native::CallArgs::from_vp(vp, argc);
-
-    // Get the source string argument.
-    if args.argc_ < 1 || !args.get(0).is_string() {
-        throw_error(&scope, "evalScript: argument must be a string");
-        return false;
-    }
-    let source_val = args.get(0);
-
-    let source_str = std::ptr::NonNull::new(source_val.to_string());
-    let source_str = match source_str {
-        Some(s) => s,
-        None => {
-            throw_error(&scope, "evalScript: null string argument");
-            return false;
-        }
-    };
-    let source_str = scope.root_string(source_str);
-    let source = match js::string::to_utf8(&scope, source_str) {
-        Ok(s) => s,
-        Err(_) => {
-            throw_error(&scope, "evalScript: failed to convert string to UTF-8");
-            return false;
-        }
-    };
+    let source =
+        match String::from_jsval(&scope, Handle::from_raw(args.get(0)), ()).inspect_err(|e| {
+            if let ConversionError::Failure(_) = e {
+                throw_error(&scope, "evalScript: argument must be a string");
+            }
+        }) {
+            Ok(source) => source,
+            Err(_) => return false,
+        };
 
     // Evaluate in non-syntactic scope.
     match js::compile::evaluate_non_syntactic(&scope, &source, "evalScript", 1) {
         Ok(rval) => {
-            args.rval().set(rval);
+            args.rval().set(rval.get());
             true
         }
         Err(_) => {

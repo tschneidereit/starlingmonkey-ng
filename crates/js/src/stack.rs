@@ -21,7 +21,7 @@ use mozjs::jsapi::{JSObject, JSPrincipals, SavedFrameSelfHosted, StackCapture, S
 use mozjs::rust::wrappers2;
 use mozjs::rust::{MutableHandleObject, MutableHandleString};
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Capture the current JavaScript call stack.
 ///
@@ -35,9 +35,9 @@ pub unsafe fn capture_current_stack(
     stackp: MutableHandleObject,
     capture: *mut StackCapture,
     start_after: HandleObject,
-) -> Result<(), JSError> {
+) -> Result<(), ExnThrown> {
     let ok = wrappers2::CaptureCurrentStack(scope.cx_mut(), stackp, capture, start_after);
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Build a string representation of a stack trace.
@@ -56,7 +56,7 @@ pub unsafe fn build_stack_string(
     stringp: MutableHandleString,
     indent: usize,
     stack_format: StackFormat,
-) -> Result<(), JSError> {
+) -> Result<(), ExnThrown> {
     let ok = wrappers2::BuildStackString(
         scope.cx_mut(),
         principals,
@@ -65,7 +65,7 @@ pub unsafe fn build_stack_string(
         indent,
         stack_format,
     );
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Get the source URL from a `SavedFrame`.

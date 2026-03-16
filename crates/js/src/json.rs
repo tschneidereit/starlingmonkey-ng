@@ -12,12 +12,12 @@ use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Parse a JSON string into a JS value.
 ///
 /// Accepts a Rust `&str` and parses it using SpiderMonkey's JSON parser.
-pub fn parse(scope: &Scope<'_>, json: &str) -> Result<Value, JSError> {
+pub fn parse(scope: &Scope<'_>, json: &str) -> Result<Value, ExnThrown> {
     let utf16: Vec<u16> = json.encode_utf16().collect();
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
     // SAFETY: utf16 is a valid buffer that lives for the duration of this call.
@@ -29,15 +29,15 @@ pub fn parse(scope: &Scope<'_>, json: &str) -> Result<Value, JSError> {
             rval.handle_mut(),
         )
     };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(rval.get())
 }
 
 /// Parse a JSON string (represented as a `JSString`) into a JS value.
-pub fn parse_js_string(scope: &Scope<'_>, json_str: HandleString) -> Result<Value, JSError> {
+pub fn parse_js_string(scope: &Scope<'_>, json_str: HandleString) -> Result<Value, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
     let ok = unsafe { wrappers2::JS_ParseJSON1(scope.cx_mut(), json_str, rval.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(rval.get())
 }
 
@@ -50,10 +50,10 @@ pub unsafe fn parse_utf16(
     scope: &Scope<'_>,
     chars: *const u16,
     len: u32,
-) -> Result<Value, JSError> {
+) -> Result<Value, ExnThrown> {
     rooted!(in(scope.raw_cx_no_gc()) let mut rval = UndefinedValue());
     let ok = wrappers2::JS_ParseJSON(scope.cx_mut(), chars, len, rval.handle_mut());
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(rval.get())
 }
 
@@ -64,7 +64,7 @@ pub fn parse_with_reviver(
     scope: &Scope<'_>,
     json: &str,
     reviver: HandleValue,
-) -> Result<Value, JSError> {
+) -> Result<Value, ExnThrown> {
     let utf16: Vec<u16> = json.encode_utf16().collect();
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
     // SAFETY: utf16 is a valid buffer that lives for the duration of this call.
@@ -77,7 +77,7 @@ pub fn parse_with_reviver(
             rval.handle_mut(),
         )
     };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(rval.get())
 }
 
@@ -86,12 +86,12 @@ pub fn parse_js_string_with_reviver(
     scope: &Scope<'_>,
     json_str: HandleString,
     reviver: HandleValue,
-) -> Result<Value, JSError> {
+) -> Result<Value, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
     let ok = unsafe {
         wrappers2::JS_ParseJSONWithReviver1(scope.cx_mut(), json_str, reviver, rval.handle_mut())
     };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(rval.get())
 }
 
@@ -111,7 +111,7 @@ pub unsafe fn stringify(
     space: HandleValue,
     callback: JSONWriteCallback,
     data: *mut std::os::raw::c_void,
-) -> Result<(), JSError> {
+) -> Result<(), ExnThrown> {
     let ok = wrappers2::JS_Stringify(scope.cx_mut(), value, replacer, space, callback, data);
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }

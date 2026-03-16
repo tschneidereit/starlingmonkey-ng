@@ -13,17 +13,17 @@ use mozjs::gc::{Handle, HandleString, HandleSymbol};
 use mozjs::jsapi::{JSString, PropertyKey, Symbol, SymbolCode};
 use mozjs::rust::wrappers2;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Create a new unique symbol with the given description string.
 pub fn new_symbol<'s>(
     scope: &'s Scope<'_>,
     description: HandleString,
-) -> Result<Handle<'s, *mut Symbol>, JSError> {
+) -> Result<Handle<'s, *mut Symbol>, ExnThrown> {
     let sym = unsafe { wrappers2::NewSymbol(scope.cx_mut(), description) };
     NonNull::new(sym)
         .map(|p| scope.root_symbol(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Look up a symbol in the global symbol registry (`Symbol.for(key)`).
@@ -33,11 +33,11 @@ pub fn new_symbol<'s>(
 pub fn get_symbol_for<'s>(
     scope: &'s Scope<'_>,
     key: HandleString,
-) -> Result<Handle<'s, *mut Symbol>, JSError> {
+) -> Result<Handle<'s, *mut Symbol>, ExnThrown> {
     let sym = unsafe { wrappers2::GetSymbolFor(scope.cx_mut(), key) };
     NonNull::new(sym)
         .map(|p| scope.root_symbol(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Get the description string of a symbol, if it has one.
