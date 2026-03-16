@@ -18,11 +18,8 @@
 //! - Calling methods from Rust via forwarded stack newtype methods
 //! - Loading an external `.js` ES module file that exercises everything
 
-use std::ptr;
-
 use js::compile::evaluate_with_filename;
-use js::native::Value;
-use js::string as jsstring;
+use js::prelude::FromJSVal;
 use libstarling::config::RuntimeConfig;
 use libstarling::module::evaluate_module;
 use libstarling::runtime::Runtime;
@@ -290,23 +287,6 @@ mod app_globals {
 }
 
 // ============================================================================
-// Helpers
-// ============================================================================
-
-/// Extract a Rust String from a JS string value.
-fn val_to_string(scope: &js::gc::scope::Scope<'_>, val: &Value) -> String {
-    assert!(val.is_string(), "Expected string value");
-    let str_handle = scope.root_string(ptr::NonNull::new(val.to_string()).expect("null string"));
-    jsstring::to_utf8(scope, str_handle).expect("utf8 conversion failed")
-}
-
-/// Check a JS boolean value stored on the global.
-fn read_global_bool(scope: &js::gc::scope::Scope<'_>, name: &str) -> bool {
-    let rval = evaluate_with_filename(scope, name, "check.js", 1).expect("Failed to read global");
-    rval.to_boolean()
-}
-
-// ============================================================================
 // Main — Rust-side API usage, then load the external JS file
 // ============================================================================
 
@@ -388,9 +368,9 @@ fn main() {
     println!("  Circle::new(\"blue\", 5) => radius={}", circle.radius());
 
     // Upcast Circle -> Shape
-    let as_shape: Shape = circle.upcast();
+    let as_shape: Shape = *circle;
     assert_eq!(as_shape.color(), "blue");
-    println!("  circle.upcast::<Shape>().color() = {}", as_shape.color());
+    println!("  (*circle).color() = {}", as_shape.color());
 
     // Setter: mutate color through the forwarded setter
     as_shape.set_color("green".to_string());
@@ -432,7 +412,7 @@ checks.join(", ")
         1,
     )
     .expect("instanceof script failed");
-    let s = val_to_string(&scope, &rval);
+    let s = String::from_jsval(&scope, rval, ()).unwrap();
     println!("  {}", s);
     assert!(s.contains("Circle instanceof Shape: true"));
     assert!(s.contains("Circle instanceof Circle: true"));
@@ -461,8 +441,11 @@ checks.join(", ")
     assert!(result.is_ok(), "showcase.js module evaluation failed");
 
     // Verify the JS module set `__showcaseOk` on the global.
+    let val = global
+        .get_property(&scope, c"__showcaseOk")
+        .expect("Failed to read property");
     assert!(
-        read_global_bool(&scope, "globalThis.__showcaseOk"),
+        val.to_boolean() == true,
         "JS showcase did not set __showcaseOk = true"
     );
     println!("  showcase.js completed successfully");
@@ -475,7 +458,7 @@ checks.join(", ")
         1,
     )
     .expect("Failed to read showcase results");
-    let results_str = val_to_string(&scope, &rval);
+    let results_str = String::from_jsval(&scope, rval, ()).unwrap();
     for line in results_str.lines() {
         println!("  JS: {}", line);
     }

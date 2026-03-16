@@ -2,11 +2,9 @@
 
 //! Demonstrates defining a JS class with methods using `#[jsclass]` and `#[jsmethods]`.
 
-use std::ptr;
-
 use js::compile::evaluate_with_filename;
-use js::error::JSError;
-use js::string as jsstring;
+use js::error::ExnThrown;
+use js::prelude::FromJSVal;
 use libstarling::config::RuntimeConfig;
 use libstarling::runtime::Runtime;
 use libstarling::{jsclass, jsmethods};
@@ -42,7 +40,7 @@ impl MyClass {
     }
 
     #[method(name = "toJSON")]
-    fn to_json(&self) -> Result<String, JSError> {
+    fn to_json(&self) -> Result<String, ExnThrown> {
         Ok(self.data.clone())
     }
 }
@@ -67,9 +65,7 @@ a.toString()
         1,
     )
     .expect("toString script failed");
-    assert!(rval.is_string());
-    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
-    let result_str = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    let result_str = String::from_jsval(&scope, rval, ()).expect("null string");
     assert_eq!(result_str, "MyClass(Hello, world!)");
     println!("  Result: {}", result_str);
 
@@ -85,9 +81,7 @@ JSON.stringify(b)
         1,
     )
     .expect("toJSON script failed");
-    assert!(rval.is_string());
-    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
-    let result_str = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    let result_str = String::from_jsval(&scope, rval, ()).expect("null string");
     assert_eq!(result_str, r#""Hello, world!""#);
     println!("  Result: {}", result_str);
 
@@ -103,9 +97,7 @@ c.data
         1,
     )
     .expect("data getter script failed");
-    assert!(rval.is_string());
-    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
-    let result_str = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    let result_str = String::from_jsval(&scope, rval, ()).expect("null string");
     assert_eq!(result_str, "Hello, world!");
     println!("  Result: {}", result_str);
 

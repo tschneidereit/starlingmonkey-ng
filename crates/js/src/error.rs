@@ -4,11 +4,11 @@
 //!
 //! This module provides:
 //!
-//! - [`JSError`] — a lightweight unit struct indicating that a JavaScript
+//! - [`ExnThrown`] — a lightweight unit struct indicating that a JavaScript
 //!   exception is pending on the context. Used as the error type in
-//!   `Result<T, JSError>` throughout the safe API.
+//!   `Result<T, ExnThrown>` throughout the safe API.
 //! - [`CapturedError`] — rich error details captured from a pending exception
-//!   via [`JSError::capture`]. Includes the message, source location, stack
+//!   via [`ExnThrown::capture`]. Includes the message, source location, stack
 //!   trace, and (when available) source line and column range.
 //! - [`ConversionError`] — error type for pure Rust type-extraction failures
 //!   (e.g., extracting an `i32` from a non-integer `JSVal`).
@@ -16,7 +16,7 @@
 //! # Throwing errors
 //!
 //! Use [`throw_type_error`], [`throw_range_error`], or [`throw_internal_error`]
-//! to set a pending exception on the context and return `Err(JSError)`.
+//! to set a pending exception on the context and return `Err(ExnThrown)`.
 
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -37,7 +37,7 @@ use mozjs::rust::wrappers2;
 /// the context.
 ///
 /// This error type carries no data — it simply signals that a SpiderMonkey
-/// operation failed and an exception is pending. Use [`JSError::capture`] to
+/// operation failed and an exception is pending. Use [`ExnThrown::capture`] to
 /// extract details into a [`CapturedError`].
 ///
 /// # Why a unit struct?
@@ -45,24 +45,24 @@ use mozjs::rust::wrappers2;
 /// Most code only needs to propagate errors with `?`. The heavy lifting of
 /// extracting error messages, filenames, and stack traces is deferred to the
 /// few call sites that actually need it (e.g., error reporters, REPL shells).
-/// This keeps `Result<T, JSError>` zero-cost in the common case.
+/// This keeps `Result<T, ExnThrown>` zero-cost in the common case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JSError;
+pub struct ExnThrown;
 
-impl JSError {
+impl ExnThrown {
     /// Check whether a SpiderMonkey call succeeded and convert its boolean
-    /// result into `Result<(), JSError>`.
+    /// result into `Result<(), ExnThrown>`.
     ///
-    /// If `ok` is `true`, returns `Ok(())`. Otherwise returns `Err(JSError)`.
+    /// If `ok` is `true`, returns `Ok(())`. Otherwise returns `Err(ExnThrown)`.
     ///
     /// This is the primary bridge between SpiderMonkey's `bool`-returning C++
     /// API and Rust's `Result` type.
     #[inline]
-    pub fn check(ok: bool) -> Result<(), JSError> {
+    pub fn check(ok: bool) -> Result<(), ExnThrown> {
         if ok {
             Ok(())
         } else {
-            Err(JSError)
+            Err(ExnThrown)
         }
     }
 
@@ -171,24 +171,17 @@ impl JSError {
     }
 }
 
-impl fmt::Display for JSError {
+impl fmt::Display for ExnThrown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "JavaScript exception pending")
     }
 }
 
-impl std::error::Error for JSError {}
-
-impl From<()> for JSError {
-    /// Convert the unit error from the existing `Result<T, ()>` API.
-    fn from((): ()) -> Self {
-        JSError
-    }
-}
+impl std::error::Error for ExnThrown {}
 
 /// Captured details from a JavaScript exception.
 ///
-/// Created by [`JSError::capture`]. Contains the message, source location,
+/// Created by [`ExnThrown::capture`]. Contains the message, source location,
 /// and stack trace extracted from the pending exception.
 #[derive(Debug, Clone, Default)]
 pub struct CapturedError {
@@ -292,46 +285,46 @@ unsafe extern "C" fn get_error_message(
     }
 }
 
-/// Throw a `TypeError` with the given message and return `JSError`.
+/// Throw a `TypeError` with the given message and return `ExnThrown`.
 ///
 /// The message must be a valid C string (no interior NUL bytes).
 ///
 /// # Safety
 ///
 /// A realm must be entered on `cx`.
-pub unsafe fn throw_type_error(cx: &mut JSContext, error: &CStr) -> JSError {
+pub unsafe fn throw_type_error(cx: &mut JSContext, error: &CStr) -> ExnThrown {
     throw_js_error(cx, error, JSExnType::JSEXN_TYPEERR as u32);
-    JSError
+    ExnThrown
 }
 
-/// Throw a `RangeError` with the given message and return `JSError`.
+/// Throw a `RangeError` with the given message and return `ExnThrown`.
 ///
 /// # Safety
 ///
 /// A realm must be entered on `cx`.
-pub unsafe fn throw_range_error(cx: &mut JSContext, error: &CStr) -> JSError {
+pub unsafe fn throw_range_error(cx: &mut JSContext, error: &CStr) -> ExnThrown {
     throw_js_error(cx, error, JSExnType::JSEXN_RANGEERR as u32);
-    JSError
+    ExnThrown
 }
 
-/// Throw an `InternalError` with the given message and return `JSError`.
+/// Throw an `InternalError` with the given message and return `ExnThrown`.
 ///
 /// # Safety
 ///
 /// A realm must be entered on `cx`.
-pub unsafe fn throw_internal_error(cx: &mut JSContext, error: &CStr) -> JSError {
+pub unsafe fn throw_internal_error(cx: &mut JSContext, error: &CStr) -> ExnThrown {
     throw_js_error(cx, error, JSExnType::JSEXN_INTERNALERR as u32);
-    JSError
+    ExnThrown
 }
 
-/// Throw a `SyntaxError` with the given message and return `JSError`.
+/// Throw a `SyntaxError` with the given message and return `ExnThrown`.
 ///
 /// # Safety
 ///
 /// A realm must be entered on `cx`.
-pub unsafe fn throw_syntax_error(cx: &mut JSContext, error: &CStr) -> JSError {
+pub unsafe fn throw_syntax_error(cx: &mut JSContext, error: &CStr) -> ExnThrown {
     throw_js_error(cx, error, JSExnType::JSEXN_SYNTAXERR as u32);
-    JSError
+    ExnThrown
 }
 
 unsafe fn throw_js_error(cx: &mut JSContext, error: &CStr, error_number: u32) {
@@ -512,8 +505,8 @@ impl ThrowException for SyntaxError {
     }
 }
 
-impl ThrowException for JSError {
-    /// No-op: `JSError` indicates an exception is already pending on the
+impl ThrowException for ExnThrown {
+    /// No-op: `ExnThrown` indicates an exception is already pending on the
     /// context, so there is nothing additional to throw.
     unsafe fn throw(self, _scope: &Scope<'_>) {}
 }
@@ -569,7 +562,7 @@ pub unsafe fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
         elements_: ptr::null(),
     };
 
-    let error_obj = match crate::function::construct(scope, ctor_val, &empty_args) {
+    let error_obj = match crate::Function::construct(scope, ctor_val, &empty_args) {
         Ok(obj) => obj,
         Err(_) => return,
     };
@@ -581,6 +574,5 @@ pub unsafe fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
     };
 
     // Set the stack as an own property on the target object.
-    let stack_handle = scope.root_value(stack_val);
-    let _ = obj.set_property(scope, c"stack", stack_handle);
+    let _ = obj.set_property(scope, c"stack", stack_val);
 }

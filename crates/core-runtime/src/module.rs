@@ -44,11 +44,12 @@ use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
-use js::conversions::ToJSValConvertible;
+use js::conversion::ToJSVal;
 use js::heap::{Heap, Trace};
 use js::module_raw::{transform_str_to_source_text, CompileOptionsWrapper, SetModulePrivate};
-use js::native::{HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
-use js::value;
+use js::native::{HandleObject, JSContext, JSNative, JSObject, JSString, JSTracer, Value};
+use js::prelude::RootScope;
+use js::{value, Object};
 use oxc_resolver::{ResolveOptions, Resolver};
 
 // ============================================================================
@@ -167,6 +168,7 @@ pub fn remove_module_gc_tracer(cx: &js::native::JSContext) {
 /// Resolution strategy:
 /// 1. Check the native module registry for an exact specifier match
 /// 2. Fall back to filesystem resolution using `oxc_resolver`
+#[js::allow_unrooted]
 unsafe extern "C" fn module_resolve_hook(
     cx: *mut js::native::RawJSContext,
     _referencing_private: js::native::RawHandle<Value>,
@@ -218,6 +220,7 @@ unsafe extern "C" fn module_resolve_hook(
 /// # Safety
 ///
 /// `cx` must be a valid JSContext pointer. Called from the resolve hook.
+#[js::allow_unrooted]
 unsafe fn resolve_file_module(
     cx: *mut js::native::RawJSContext,
     specifier: &str,
@@ -298,9 +301,11 @@ unsafe fn jsstring_to_string(
     cx: *mut js::native::RawJSContext,
     s: *mut JSString,
 ) -> Option<String> {
-    use js::conversions::jsstr_to_string;
+    use js::conversion::jsstr_to_string;
     use std::ptr::NonNull;
-    NonNull::new(s).map(|nn| jsstr_to_string(cx as _, nn))
+    let mut js_cx = JSContext::from_ptr(NonNull::new_unchecked(cx));
+    let scope = RootScope::from_current_realm(&mut js_cx);
+    NonNull::new(s).map(|nn| jsstr_to_string(&scope, nn))
 }
 
 // ============================================================================
@@ -376,19 +381,18 @@ pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>)
         Ok(m) => m,
         Err(_) => return false,
     };
-    let module_obj = module.get();
 
     // Set the module private so the resolve hook receives a valid
     // referencing module when this module's imports are resolved.
-    let private = unsafe { value::from_object(module_obj) };
-    unsafe { SetModulePrivate(module_obj, &private) };
+    let private = unsafe { value::from_object(module.as_raw()) };
+    unsafe { SetModulePrivate(module.as_raw(), &private) };
 
     // 3. Store in registry before linking (resolve hook must find it)
     MODULE_REGISTRY.with(|reg| {
         reg.borrow_mut().insert(
             T::NAME.to_string(),
             ModuleEntry {
-                module_obj: Heap::boxed(module_obj),
+                module_obj: Heap::boxed(module.as_raw()),
             },
         );
     });
@@ -410,12 +414,16 @@ pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>)
     }
 
     // 6. Get the module environment and populate it
-    let env = unsafe { js::module_raw::GetModuleEnvironment(scope.cx_mut(), module) };
-    if env.is_null() {
-        return false;
-    }
-
-    js::rooted!(in(unsafe { scope.raw_cx_no_gc() }) let env_obj = env);
+    let env = unsafe {
+        Object::from_raw(
+            scope,
+            js::module_raw::GetModuleEnvironment(scope.cx_mut(), module.handle()),
+        )
+    };
+    let env = match env {
+        Some(e) => e,
+        None => return false,
+    };
 
     // Set up function exports by creating functions and setting them as properties
     for decl in &declarations {
@@ -426,19 +434,19 @@ pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>)
         } = decl
         {
             let c_name = CString::new(*js_name).unwrap();
-            let func = match js::function::new_function(scope, *native, *nargs, 0, &c_name) {
+            let func = match js::Function::new(scope, *native, *nargs, 0, &c_name) {
                 Ok(f) => f,
                 Err(_) => return false,
             };
-            let func_val = scope.root_value(value::from_function(func));
-            if js::object::set_property(scope, env_obj.handle(), &c_name, func_val).is_err() {
+            let func_val = scope.root_value(func.as_value());
+            if env.set_property(scope, &c_name, func_val).is_err() {
                 return false;
             }
         }
     }
 
     // Let the module implementation set value exports
-    if !T::evaluate(scope, env_obj.handle()) {
+    if !T::evaluate(scope, env.handle()) {
         return false;
     }
 
@@ -469,12 +477,11 @@ pub unsafe fn evaluate_module(
     let mut src = transform_str_to_source_text(source);
     let module =
         unsafe { js::module::compile_module(scope, options.ptr, &mut src) }.map_err(|_| ())?;
-    let module_obj = module.get();
 
     // Set the module private so the resolve hook receives a valid
     // referencing module when this module's imports are resolved.
-    let private = unsafe { value::from_object(module_obj) };
-    unsafe { SetModulePrivate(module_obj, &private) };
+    let private = unsafe { value::from_object(module.as_raw()) };
+    unsafe { SetModulePrivate(module.as_raw(), &private) };
 
     // If the filename is a real path, update the base path for relative
     // imports. The empty-path guard prevents WASI from treating
@@ -505,18 +512,19 @@ pub unsafe fn evaluate_module(
 ///
 /// - `cx` must be valid.
 /// - `env` must be a valid module environment object.
-pub unsafe fn set_module_export<V: ToJSValConvertible + ?Sized>(
-    scope: &js::gc::scope::Scope<'_>,
+pub unsafe fn set_module_export<'s, V: ToJSVal<'s> + ?Sized>(
+    scope: &'s js::gc::scope::Scope<'_>,
     env: HandleObject,
     name: &str,
     value: &V,
 ) -> bool {
     let c_name = CString::new(name).unwrap();
-    js::rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut val = value::undefined());
-    unsafe {
-        value.to_jsval(scope.cx_mut().raw_cx(), val.handle_mut());
-        js::object::set_property(scope, env, &c_name, val.handle()).is_ok()
-    }
+    let val = match value.to_jsval(scope) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let env_obj = js::Object::from_handle(env).expect("module environment object is null");
+    env_obj.set_property(scope, &c_name, val).is_ok()
 }
 
 #[cfg(test)]
@@ -526,7 +534,7 @@ mod tests {
     use crate::runtime::Runtime;
     use crate::test_util::test_tempdir;
     use js::compile::evaluate_with_filename;
-    use js::string as jsstring;
+    use js::prelude::FromJSVal;
 
     /// Create a `Runtime` for testing with module support.
     ///
@@ -558,9 +566,7 @@ mod tests {
         let rval = evaluate_with_filename(scope, expr, "test_read.js", 1)
             .expect("evaluate_with_filename failed");
         assert!(rval.is_string());
-        let str_handle =
-            scope.root_string(std::ptr::NonNull::new(rval.to_string()).expect("null string"));
-        jsstring::to_utf8(scope, str_handle).expect("utf8 conversion failed")
+        String::from_jsval(scope, rval, ()).expect("string conversion failed")
     }
 
     #[test]

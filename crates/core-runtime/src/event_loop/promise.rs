@@ -47,9 +47,9 @@ impl PromiseTask {
     ///
     /// `promise_obj` must be a valid JS Promise object.
     // TODO: make this safe by taking a rooted handle instead of a raw pointer.
-    pub unsafe fn new(promise_obj: *mut JSObject, outcome: PromiseOutcome) -> Self {
+    pub unsafe fn new(promise_obj: Promise, outcome: PromiseOutcome) -> Self {
         let promise = RootedTraceableBox::new(Heap::default());
-        promise.set(promise_obj);
+        promise.set(promise_obj.as_raw());
         Self { promise, outcome }
     }
 }
@@ -80,8 +80,8 @@ impl Task for PromiseTask {
                 PromiseOutcome::Reject(msg) => {
                     let c_msg =
                         CString::new(msg).unwrap_or_else(|_| CString::new("async error").unwrap());
-                    if let Ok(js_str) = js::string::from_cstr(scope, &c_msg) {
-                        let err_val = scope.root_value(value::from_string_raw(js_str.get()));
+                    if let Ok(js_str) = js::JSString::from_cstr(scope, &c_msg) {
+                        let err_val = scope.root_value(js_str.as_value());
                         let _ = promise.reject(scope, err_val);
                     }
                 }

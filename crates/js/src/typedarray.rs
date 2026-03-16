@@ -29,7 +29,7 @@ use mozjs::jsapi::JSObject;
 use mozjs::rust::wrappers2;
 use mozjs::typedarray::TypedArrayElementCreator;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 // Re-export the core typed array types so users can `use crate::typedarray::*`.
 pub use mozjs::typedarray::{
@@ -47,21 +47,21 @@ pub use mozjs::typedarray::{
 pub fn new_typed_array<'s, T: TypedArrayElementCreator>(
     scope: &'s Scope<'_>,
     length: usize,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = unsafe { T::create_new(scope.cx_mut().raw_cx(), length) };
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Create a new typed array of the given element type pre-populated with data.
 pub fn new_typed_array_with_data<'s, T: TypedArrayElementCreator>(
     scope: &'s Scope<'_>,
     data: &[T::Element],
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     use std::ptr;
     let obj = unsafe { T::create_new(scope.cx_mut().raw_cx(), data.len()) };
-    let nn = NonNull::new(obj).ok_or(JSError)?;
+    let nn = NonNull::new(obj).ok_or(ExnThrown)?;
     // Copy data into the newly created typed array buffer.
     unsafe {
         let (buf, _len) = T::length_and_data(obj);
@@ -74,42 +74,42 @@ pub fn new_typed_array_with_data<'s, T: TypedArrayElementCreator>(
 pub fn new_array_buffer<'s>(
     scope: &'s Scope<'_>,
     nbytes: usize,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = unsafe { wrappers2::NewArrayBuffer(scope.cx_mut(), nbytes) };
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Copy an `ArrayBuffer`.
 pub fn copy_array_buffer<'s>(
     scope: &'s Scope<'_>,
     buffer: mozjs::gc::HandleObject,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = unsafe { wrappers2::CopyArrayBuffer(scope.cx_mut(), buffer) };
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Detach an `ArrayBuffer`, making it zero-length.
 pub fn detach_array_buffer(
     scope: &Scope<'_>,
     buffer: mozjs::gc::HandleObject,
-) -> Result<(), JSError> {
+) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::DetachArrayBuffer(scope.cx_mut(), buffer) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Create a new `SharedArrayBuffer` with the given byte length.
 pub fn new_shared_array_buffer<'s>(
     scope: &'s Scope<'_>,
     nbytes: usize,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = unsafe { wrappers2::NewSharedArrayBuffer(scope.cx_mut(), nbytes) };
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Create a new `ArrayBuffer` whose contents are borrowed from the caller.
@@ -128,7 +128,7 @@ pub fn new_shared_array_buffer<'s>(
 pub unsafe fn new_array_buffer_with_user_owned_contents<'s>(
     scope: &'s Scope<'_>,
     data: &[u8],
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = wrappers2::NewArrayBufferWithUserOwnedContents(
         scope.cx_mut(),
         data.len(),
@@ -136,7 +136,7 @@ pub unsafe fn new_array_buffer_with_user_owned_contents<'s>(
     );
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 // TODO: add the full typed array API, potentially as a generic builtin, taking the element type as a type parameter. This would include functions for getting/setting elements, getting the length, etc. Use JS_IsTypedArrayObject, JS_IsArrayBufferViewObject, and various other functions available on mozjs_sys::jsapi. DO NOT REMOVE THIS TODO WITHOUT ADDRESSING OR BY JUST CHANGING THIS COMMENT.

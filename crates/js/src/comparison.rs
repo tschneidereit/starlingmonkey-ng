@@ -12,7 +12,7 @@ use crate::gc::scope::Scope;
 use mozjs::gc::HandleValue;
 use mozjs::rust::wrappers2;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Strict equality comparison (`===`).
 ///
@@ -22,10 +22,10 @@ pub fn strictly_equal(
     scope: &Scope<'_>,
     v1: HandleValue,
     v2: HandleValue,
-) -> Result<bool, JSError> {
+) -> Result<bool, ExnThrown> {
     let mut equal = false;
     let ok = unsafe { wrappers2::StrictlyEqual(scope.cx(), v1, v2, &mut equal) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(equal)
 }
 
@@ -33,10 +33,14 @@ pub fn strictly_equal(
 ///
 /// Returns `true` if the two values are loosely equal according to the
 /// ECMAScript `==` operator. This may trigger type coercion.
-pub fn loosely_equal(scope: &Scope<'_>, v1: HandleValue, v2: HandleValue) -> Result<bool, JSError> {
+pub fn loosely_equal(
+    scope: &Scope<'_>,
+    v1: HandleValue,
+    v2: HandleValue,
+) -> Result<bool, ExnThrown> {
     let mut equal = false;
     let ok = unsafe { wrappers2::LooselyEqual(scope.cx_mut(), v1, v2, &mut equal) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(equal)
 }
 
@@ -44,9 +48,9 @@ pub fn loosely_equal(scope: &Scope<'_>, v1: HandleValue, v2: HandleValue) -> Res
 ///
 /// Differs from strict equality in that `NaN === NaN` is `true` and
 /// `+0` is not the same as `-0`.
-pub fn same_value(scope: &Scope<'_>, v1: HandleValue, v2: HandleValue) -> Result<bool, JSError> {
+pub fn same_value(scope: &Scope<'_>, v1: HandleValue, v2: HandleValue) -> Result<bool, ExnThrown> {
     let mut same = false;
     let ok = unsafe { wrappers2::SameValue(scope.cx(), v1, v2, &mut same) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(same)
 }

@@ -144,6 +144,16 @@ fn is_unrooted_ty<'tcx>(
                     match_def_path(
                         cx,
                         did.did(),
+                        &[sym.mozjs, sym.gc, sym.root, sym.Handle],
+                    ) ||
+                    match_def_path(
+                        cx,
+                        did.did(),
+                        &[sym.mozjs_sys, sym.generated, sym.root, sym.JS, sym.Handle],
+                    ) ||
+                    match_def_path(
+                        cx,
+                        did.did(),
                         &[sym::std, sym.collections, sym.hash, sym.map, sym.Entry],
                     ) ||
                     match_def_path(
@@ -189,7 +199,22 @@ fn is_unrooted_ty<'tcx>(
                 }
             },
             ty::Ref(..) => false,    // don't recurse down &ptrs
-            ty::RawPtr(..) => false, // don't recurse down *ptrs
+            ty::RawPtr(inner_ty, _) => {
+                // Flag *mut JSObject / *const JSObject as unrooted GC
+                // pointers in downstream crates. The `js` crate and
+                // `mozjs` crates legitimately handle raw pointers as
+                // the interface to SpiderMonkey's C++ API.
+                if let ty::Adt(did, _) = inner_ty.kind() {
+                    if cx.tcx.item_name(did.did()) == sym.JSObject {
+                        let krate = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
+                        let name = krate.as_str();
+                        if name != "js" && !name.starts_with("mozjs") {
+                            ret = true;
+                        }
+                    }
+                }
+                false
+            },
             ty::FnDef(..) | ty::FnPtr(..) => false,
             ty::Alias(
                 kind @ ty::AliasTyKind::Projection |
@@ -540,4 +565,12 @@ symbols! {
     Entry
     OccupiedEntry
     VacantEntry
+    JSObject
+    mozjs
+    mozjs_sys
+    gc
+    root
+    Handle
+    JS
+    generated
 }

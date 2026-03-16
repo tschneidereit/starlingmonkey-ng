@@ -11,11 +11,10 @@
 //!
 //! [`DOMException`]: https://webidl.spec.whatwg.org/#idl-DOMException
 
-use std::ptr::NonNull;
-
 use js::error::ThrowException;
 use js::gc::scope::Scope;
 use js::native::{ExceptionStackBehavior, HandleValueArray};
+use js::prelude::ToJSVal;
 
 // ---------------------------------------------------------------------------
 // DOMException names table
@@ -72,34 +71,10 @@ fn legacy_code_for_name(name: &str) -> u16 {
 ///
 /// Stores the exception name and message as Rust `String`s. The legacy
 /// error code is computed from the name on demand via `legacy_code_for_name`.
-#[core_runtime::webidl_interface(name = "DOMException", js_proto = "Error")]
+#[core_runtime::webidl_interface(js_proto = "Error")]
 pub struct DOMException {
     name: String,
     message: String,
-}
-
-/// Coerce a JS argument to a Rust `String` via the JS `ToString` operation.
-///
-/// If the argument is already a string, extracts it directly. Otherwise
-/// calls SpiderMonkey's `ToStringSlow` for proper type coercion.
-///
-/// Returns `None` if an exception is pending (e.g., `ToString` on a Symbol).
-unsafe fn coerce_arg_to_string(
-    scope: &Scope<'_>,
-    args: &js::native::CallArgs,
-    index: u32,
-) -> Option<String> {
-    let val = *args.get(index);
-
-    if val.is_string() {
-        let s = val.to_string();
-        let rooted = scope.root_string(NonNull::new_unchecked(s));
-        return js::string::to_utf8(scope, rooted).ok();
-    }
-
-    let rooted_val = scope.root_value(val);
-    let rooted_str = js::string::to_string_slow(scope, rooted_val).ok()?;
-    js::string::to_utf8(scope, rooted_str).ok()
 }
 
 #[core_runtime::jsmethods]
@@ -140,26 +115,12 @@ impl DOMException {
     /// https://webidl.spec.whatwg.org/#dom-domexception-domexception
     ///
     /// `constructor(optional DOMString message = "", optional DOMString name = "Error")`
-    ///
-    /// Both parameters are optional with defaults. Uses the raw `&CallArgs`
-    /// pattern to handle optional parameter extraction with defaults.
     #[constructor]
-    fn new(scope: &Scope<'_>, args: &js::native::CallArgs) -> Self {
-        // Parse the `message` argument (default: "").
-        let message = if args.argc_ >= 1 && !(*args.get(0)).is_undefined() {
-            unsafe { coerce_arg_to_string(scope, args, 0) }.unwrap_or_default()
-        } else {
-            String::new()
-        };
-
-        // Parse the `name` argument (default: "Error").
-        let name = if args.argc_ >= 2 && !(*args.get(1)).is_undefined() {
-            unsafe { coerce_arg_to_string(scope, args, 1) }.unwrap_or_else(|| "Error".to_string())
-        } else {
-            "Error".to_string()
-        };
-
-        Self { name, message }
+    fn new(message: Option<String>, name: Option<String>) -> Self {
+        Self {
+            message: message.unwrap_or_default(),
+            name: name.unwrap_or_else(|| "Error".to_string()),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -197,25 +158,18 @@ impl DOMException {
 /// This creates a new DOMException object via the JS constructor and sets it
 /// as the pending exception. Returns `false` to indicate an exception has
 /// been thrown (for use in JSNative return values).
-///
-/// # Safety
-///
-/// Must be called with a valid scope.
-pub unsafe fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) -> bool {
+pub fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) {
     // Build the constructor arguments: [message, name].
-    let msg_str = match js::string::from_str(scope, message) {
+    let name_val = match name.to_jsval(scope) {
         Ok(s) => s,
-        Err(_) => return false,
+        Err(_) => return,
     };
-    let name_str = match js::string::from_str(scope, name) {
+    let msg_val = match message.to_jsval(scope) {
         Ok(s) => s,
-        Err(_) => return false,
+        Err(_) => return,
     };
 
-    let msg_val = js::value::from_string_raw(msg_str.get());
-    let name_val = js::value::from_string_raw(name_str.get());
-
-    let argv = [msg_val, name_val];
+    let argv = [msg_val.get(), name_val.get()];
     let hva = HandleValueArray {
         length_: 2,
         elements_: argv.as_ptr(),
@@ -225,25 +179,26 @@ pub unsafe fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) 
     let global = scope.global();
     let ctor_val = match global.get_property(scope, c"DOMException") {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(_) => return,
     };
 
     if !ctor_val.is_object() {
-        js::error::throw_type_error(scope.cx_mut(), c"DOMException constructor not found");
-        return false;
+        unsafe {
+            js::error::throw_type_error(scope.cx_mut(), c"DOMException constructor not found")
+        };
+        return;
     }
 
-    let ctor_handle = scope.root_value(ctor_val);
-    let exception = match js::function::construct(scope, ctor_handle, &hva) {
+    let exception = match js::Function::construct(scope, ctor_val, &hva) {
         Ok(obj) => obj,
-        Err(_) => return false,
+        Err(_) => return,
     };
 
     // Set the created DOMException as the pending exception.
-    let exc_val = js::value::from_object(exception.as_raw());
-    let exc_handle = scope.root_value(exc_val);
-    js::exception::set_pending(scope, exc_handle, ExceptionStackBehavior::DoNotCapture);
-    false
+    let exc_val = exception
+        .to_jsval(scope)
+        .expect("Value conversion doesn't fail");
+    js::exception::set_pending(scope, exc_val, ExceptionStackBehavior::Capture);
 }
 
 // ---------------------------------------------------------------------------

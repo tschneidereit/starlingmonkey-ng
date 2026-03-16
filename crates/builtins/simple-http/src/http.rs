@@ -45,8 +45,10 @@ thread_local! {
 // ============================================================================
 
 /// Internal response state built up by the JS callback.
+#[derive(Default)]
 enum ResponseState {
     /// No response set yet.
+    #[default]
     Pending,
     /// Full response with body (from `respond(status, body)`).
     Immediate { status: u16, body: Vec<u8> },
@@ -275,7 +277,7 @@ fn call_js_listener(
         };
 
         let result =
-            js::function::call_value(&scope, global, callback_val, &args);
+            js::Function::call_value(&scope, global, callback_val, &args);
 
         if result.is_err() {
             if js::exception::is_pending(&scope) {

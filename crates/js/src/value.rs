@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
-//! JS value creation, inspection, and conversion.
+//! JS value creation and inspection.
 //!
-//! This module provides ergonomic constructors and [`FromJSVal`] / [`TryFromJSVal`]
-//! implementations for SpiderMonkey's [`JSVal`] type. It does **not** define a
-//! new wrapper type — it works directly with the existing [`JSVal`] and
-//! [`HandleValue`] / [`MutableHandleValue`] types.
+//! This module provides ergonomic constructors for SpiderMonkey's [`JSVal`]
+//! type. It does **not** define a new wrapper type — it works directly with the
+//! existing [`JSVal`] and [`HandleValue`] / [`MutableHandleValue`] types.
+//!
+//! For type conversions between Rust and JS values, see [`crate::conversion`].
 //!
 //! # Creating values
 //!
@@ -22,8 +23,7 @@
 //! # Inspecting values
 //!
 //! The type-checking methods live directly on [`JSVal`] (e.g., `val.is_int32()`,
-//! `val.to_int32()`). This module re-exports them for discoverability and adds
-//! higher-level conversions via [`TryFromJSVal`].
+//! `val.to_int32()`).
 
 use mozjs::gc::HandleFunction;
 use mozjs::jsapi::{JSObject, JSString};
@@ -31,8 +31,6 @@ use mozjs::jsval::{
     BooleanValue, DoubleValue, Int32Value, JSVal, NullValue, ObjectOrNullValue, ObjectValue,
     PrivateValue, StringValue, UInt32Value, UndefinedValue,
 };
-
-use super::error::ConversionError;
 
 /// Create an `undefined` value.
 #[inline]
@@ -125,198 +123,4 @@ pub unsafe fn from_private(ptr: *const std::ffi::c_void) -> JSVal {
 #[inline]
 pub unsafe fn from_string_raw(s: *mut JSString) -> JSVal {
     StringValue(&*s)
-}
-
-// ---------------------------------------------------------------------------
-// Conversion traits for JSVal
-// ---------------------------------------------------------------------------
-
-/// Extension trait for converting Rust types into [`JSVal`].
-///
-/// This mirrors `From<T>` but avoids orphan rules since `JSVal` is defined in
-/// another crate.
-///
-/// # Examples
-///
-/// ```ignore
-/// use crate::value::IntoJSVal;
-/// let v: JSVal = true.into_jsval();
-/// let v: JSVal = 42i32.into_jsval();
-/// ```
-pub trait IntoJSVal {
-    /// Convert `self` into a [`JSVal`].
-    fn into_jsval(self) -> JSVal;
-}
-
-impl IntoJSVal for bool {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_bool(self)
-    }
-}
-
-impl IntoJSVal for i32 {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_i32(self)
-    }
-}
-
-impl IntoJSVal for u32 {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_u32(self)
-    }
-}
-
-impl IntoJSVal for f64 {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_f64(self)
-    }
-}
-
-impl IntoJSVal for () {
-    /// `()` maps to `undefined`.
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        undefined()
-    }
-}
-
-impl<T: IntoJSVal> IntoJSVal for Option<T> {
-    /// `None` maps to `null`, `Some(v)` delegates to `v.into_jsval()`.
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        match self {
-            Some(v) => v.into_jsval(),
-            None => null(),
-        }
-    }
-}
-
-impl IntoJSVal for i8 {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_i32(self as i32)
-    }
-}
-
-impl IntoJSVal for i16 {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_i32(self as i32)
-    }
-}
-
-impl IntoJSVal for u8 {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_i32(self as i32)
-    }
-}
-
-impl IntoJSVal for u16 {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_i32(self as i32)
-    }
-}
-
-impl IntoJSVal for f32 {
-    #[inline]
-    fn into_jsval(self) -> JSVal {
-        from_f64(self as f64)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TryFromJSVal — extract typed data from a JSVal
-// ---------------------------------------------------------------------------
-
-/// Extension trait for extracting Rust types from a [`JSVal`].
-///
-/// This mirrors `TryFrom<JSVal>` but avoids orphan rules.
-pub trait TryFromJSVal: Sized {
-    /// Try to extract a value of type `Self` from a [`JSVal`].
-    fn try_from_jsval(val: JSVal) -> Result<Self, ConversionError>;
-}
-
-impl TryFromJSVal for bool {
-    /// Extract a `bool` from a JS value.
-    ///
-    /// Fails if the value is not a boolean.
-    #[inline]
-    fn try_from_jsval(val: JSVal) -> Result<Self, ConversionError> {
-        if val.is_boolean() {
-            Ok(val.to_boolean())
-        } else {
-            Err(ConversionError("expected a boolean value"))
-        }
-    }
-}
-
-impl TryFromJSVal for i32 {
-    /// Extract an `i32` from a JS value.
-    ///
-    /// Fails if the value is not an `int32`.
-    #[inline]
-    fn try_from_jsval(val: JSVal) -> Result<Self, ConversionError> {
-        if val.is_int32() {
-            Ok(val.to_int32())
-        } else {
-            Err(ConversionError("expected an int32 value"))
-        }
-    }
-}
-
-impl TryFromJSVal for u32 {
-    /// Extract a `u32` from a JS value.
-    ///
-    /// Succeeds for `int32` values >= 0.
-    #[inline]
-    fn try_from_jsval(val: JSVal) -> Result<Self, ConversionError> {
-        if val.is_int32() {
-            let i = val.to_int32();
-            if i >= 0 {
-                Ok(i as u32)
-            } else {
-                Err(ConversionError("expected a non-negative int32 value"))
-            }
-        } else {
-            Err(ConversionError("expected an int32 value"))
-        }
-    }
-}
-
-impl TryFromJSVal for f64 {
-    /// Extract an `f64` from a JS value.
-    ///
-    /// Succeeds for both `int32` and `double` values.
-    #[inline]
-    fn try_from_jsval(val: JSVal) -> Result<Self, ConversionError> {
-        if val.is_double() {
-            Ok(val.to_double())
-        } else if val.is_int32() {
-            Ok(val.to_int32() as f64)
-        } else {
-            Err(ConversionError("expected a numeric value"))
-        }
-    }
-}
-
-impl TryFromJSVal for *mut JSObject {
-    /// Extract a `*mut JSObject` from a JS value.
-    ///
-    /// Succeeds if the value is an object (including null-object).
-    #[inline]
-    fn try_from_jsval(val: JSVal) -> Result<Self, ConversionError> {
-        if val.is_object() {
-            Ok(val.to_object())
-        } else if val.is_null() {
-            Ok(std::ptr::null_mut())
-        } else {
-            Err(ConversionError("expected an object value"))
-        }
-    }
 }

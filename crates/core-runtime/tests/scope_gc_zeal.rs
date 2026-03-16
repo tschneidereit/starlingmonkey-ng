@@ -16,10 +16,10 @@ use core_runtime::runtime::Runtime;
 use js::gc::{GCOptions, GCReason, SetGCZeal};
 use js::value;
 
+use js::gc;
 use js::Array;
 use js::Map;
 use js::Object;
-use js::{gc, string};
 
 /// Helper: set GC zeal mode on the scope's context.
 ///
@@ -49,12 +49,12 @@ fn test_scope_gc_zeal() {
         {
             for i in 0..1000 {
                 let inner = scope.inner_scope();
-                let s = string::from_str(&inner, &format!("scope_{i}")).unwrap();
+                let s = js::JSString::from_str(&inner, &format!("scope_{i}")).unwrap();
                 let obj = Object::new(&inner, None).unwrap();
                 let val = inner.root_value(value::from_i32(i));
 
                 // Verify roots are valid.
-                let result = string::to_utf8(&inner, s).unwrap();
+                let result = s.to_utf8(&inner).unwrap();
                 assert_eq!(result, format!("scope_{i}"));
                 assert!(!obj.as_raw().is_null());
                 assert_eq!(val.get().to_int32(), i);
@@ -69,7 +69,7 @@ fn test_scope_gc_zeal() {
             // Root 100 strings in the outer scope.
             let mut outer_handles = Vec::new();
             for i in 0..100 {
-                let s = string::from_str(&scope, &format!("root_{i}")).unwrap();
+                let s = js::JSString::from_str(&scope, &format!("root_{i}")).unwrap();
                 outer_handles.push((i, s));
             }
 
@@ -78,7 +78,7 @@ fn test_scope_gc_zeal() {
                 // Root 200 strings in the inner scope.
                 let mut inner_handles = Vec::new();
                 for i in 100..300 {
-                    let s = string::from_str(&inner, &format!("root_{i}")).unwrap();
+                    let s = js::JSString::from_str(&inner, &format!("root_{i}")).unwrap();
                     inner_handles.push((i, s));
                 }
 
@@ -87,7 +87,7 @@ fn test_scope_gc_zeal() {
                     // Root 200 strings in the innermost scope.
                     let mut inner2_handles = Vec::new();
                     for i in 300..500 {
-                        let s = string::from_str(&inner2, &format!("root_{i}")).unwrap();
+                        let s = js::JSString::from_str(&inner2, &format!("root_{i}")).unwrap();
                         inner2_handles.push((i, s));
                     }
 
@@ -97,15 +97,15 @@ fn test_scope_gc_zeal() {
 
                     // All 500 should survive.
                     for (i, h) in &outer_handles {
-                        let result = string::to_utf8(&inner2, *h).unwrap();
+                        let result = h.to_utf8(&inner2).unwrap();
                         assert_eq!(result, format!("root_{i}"));
                     }
                     for (i, h) in &inner_handles {
-                        let result = string::to_utf8(&inner2, *h).unwrap();
+                        let result = h.to_utf8(&inner2).unwrap();
                         assert_eq!(result, format!("root_{i}"));
                     }
                     for (i, h) in &inner2_handles {
-                        let result = string::to_utf8(&inner2, *h).unwrap();
+                        let result = h.to_utf8(&inner2).unwrap();
                         assert_eq!(result, format!("root_{i}"));
                     }
                 }
@@ -113,7 +113,7 @@ fn test_scope_gc_zeal() {
 
                 // inner + outer roots still valid.
                 for (i, h) in &inner_handles {
-                    let result = string::to_utf8(&inner, *h).unwrap();
+                    let result = h.to_utf8(&inner).unwrap();
                     assert_eq!(result, format!("root_{i}"));
                 }
             }
@@ -121,7 +121,7 @@ fn test_scope_gc_zeal() {
 
             // Roots 0-99 still valid.
             for (i, h) in &outer_handles {
-                let result = string::to_utf8(&scope, *h).unwrap();
+                let result = h.to_utf8(&scope).unwrap();
                 assert_eq!(result, format!("root_{i}"));
             }
         }
@@ -135,15 +135,15 @@ fn test_scope_gc_zeal() {
             let inner = scope.inner_scope();
 
             // Each root_* call modifies the root set, potentially triggering GC.
-            let s1 = string::from_str(&inner, "roots_change_1").unwrap();
+            let s1 = js::JSString::from_str(&inner, "roots_change_1").unwrap();
             let obj1 = Object::new(&inner, None).unwrap();
-            let s2 = string::from_str(&inner, "roots_change_2").unwrap();
+            let s2 = js::JSString::from_str(&inner, "roots_change_2").unwrap();
             let v1 = inner.root_value(value::from_i32(42));
             let obj2 = Object::new(&inner, None).unwrap();
 
             // All roots must survive despite GC on every root set change.
-            assert_eq!(string::to_utf8(&inner, s1).unwrap(), "roots_change_1");
-            assert_eq!(string::to_utf8(&inner, s2).unwrap(), "roots_change_2");
+            assert_eq!(s1.to_utf8(&inner).unwrap(), "roots_change_1");
+            assert_eq!(s2.to_utf8(&inner).unwrap(), "roots_change_2");
             assert!(!obj1.as_raw().is_null());
             assert!(!obj2.as_raw().is_null());
             assert_eq!(v1.get().to_int32(), 42);
@@ -162,7 +162,7 @@ fn test_scope_gc_zeal() {
             // Root many values — GC fires on every JS allocation.
             let mut string_handles = Vec::new();
             for i in 0..50 {
-                let s = string::from_str(&inner, &format!("alloc_{i}")).unwrap();
+                let s = js::JSString::from_str(&inner, &format!("alloc_{i}")).unwrap();
                 string_handles.push(s);
             }
 
@@ -176,7 +176,7 @@ fn test_scope_gc_zeal() {
 
             // All string roots must survive.
             for (i, h) in string_handles.iter().enumerate() {
-                let result = string::to_utf8(&inner, *h).unwrap();
+                let result = h.to_utf8(&inner).unwrap();
                 assert_eq!(result, format!("alloc_{i}"));
             }
 
@@ -236,7 +236,7 @@ fn test_scope_gc_zeal() {
             // Allocate more to trigger nursery collections.
             let mut strings = Vec::new();
             for i in 0..20 {
-                let s = string::from_str(&inner, &format!("nursery_{i}")).unwrap();
+                let s = js::JSString::from_str(&inner, &format!("nursery_{i}")).unwrap();
                 strings.push(s);
             }
 
@@ -248,7 +248,7 @@ fn test_scope_gc_zeal() {
 
             // All strings should survive.
             for (i, s) in strings.iter().enumerate() {
-                let result = string::to_utf8(&inner, *s).unwrap();
+                let result = s.to_utf8(&inner).unwrap();
                 assert_eq!(result, format!("nursery_{i}"));
             }
 
@@ -322,8 +322,8 @@ fn test_scope_gc_zeal() {
             // Trigger operations that cause allocations (and thus compacting
             // GCs with zeal mode 14).
             for i in 0..10 {
-                let s = string::from_str(&inner, &format!("compact_{i}")).unwrap();
-                let result = string::to_utf8(&inner, s).unwrap();
+                let s = js::JSString::from_str(&inner, &format!("compact_{i}")).unwrap();
+                let result = s.to_utf8(&inner).unwrap();
                 assert_eq!(result, format!("compact_{i}"));
             }
 
@@ -409,12 +409,12 @@ fn test_scope_gc_zeal() {
 
             // Root something in the outer scope to verify it survives
             // all the inner scope churn.
-            let outer_str = string::from_str(&scope, "outer_survivor").unwrap();
+            let outer_str = js::JSString::from_str(&scope, "outer_survivor").unwrap();
 
             for i in 0..100 {
                 let inner = scope.inner_scope();
 
-                let s = string::from_str(&inner, &format!("loop_{i}")).unwrap();
+                let s = js::JSString::from_str(&inner, &format!("loop_{i}")).unwrap();
                 let obj = Object::new(&inner, None).unwrap();
                 let val = inner.root_value(value::from_i32(i));
                 obj.set_property(&inner, c"i", val).unwrap();
@@ -424,19 +424,19 @@ fn test_scope_gc_zeal() {
                 gc::non_incremental_gc(&inner, GCOptions::Normal, GCReason::API);
 
                 // Verify inner roots.
-                let result = string::to_utf8(&inner, s).unwrap();
+                let result = s.to_utf8(&inner).unwrap();
                 assert_eq!(result, format!("loop_{i}"));
                 let got = obj.get_property(&inner, c"i").unwrap();
                 assert_eq!(got.to_int32(), i);
 
                 // Outer root must also survive.
-                let outer = string::to_utf8(&inner, outer_str).unwrap();
+                let outer = outer_str.to_utf8(&inner).unwrap();
                 assert_eq!(outer, "outer_survivor");
                 // inner scope drops
             }
 
             // Final check of outer root.
-            let outer = string::to_utf8(&scope, outer_str).unwrap();
+            let outer = outer_str.to_utf8(&scope).unwrap();
             assert_eq!(outer, "outer_survivor");
 
             reset_zeal(&scope);

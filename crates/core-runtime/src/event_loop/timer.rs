@@ -43,9 +43,9 @@ impl TimerTask {
     /// # Safety
     ///
     /// `callback` must be a valid JS function object.
-    pub unsafe fn one_shot(callback: *mut JSObject) -> Self {
+    pub unsafe fn one_shot(callback: Object) -> Self {
         let heap = RootedTraceableBox::new(Heap::default());
-        heap.set(callback);
+        heap.set(callback.as_raw());
         Self {
             callback: heap,
             interval: None,
@@ -57,9 +57,9 @@ impl TimerTask {
     /// # Safety
     ///
     /// `callback` must be a valid JS function object.
-    pub unsafe fn repeating(callback: *mut JSObject, interval: Duration) -> Self {
+    pub unsafe fn repeating(callback: Object, interval: Duration) -> Self {
         let heap = RootedTraceableBox::new(Heap::default());
-        heap.set(callback);
+        heap.set(callback.as_raw());
         Self {
             callback: heap,
             interval: Some(interval),
@@ -77,18 +77,14 @@ impl Task for TimerTask {
     }
 
     fn run(self: Box<Self>, scope: &Scope<'_>, id: TaskId) -> Result<(), ()> {
-        let cb_handle = self.callback.handle();
-        // TODO: this shouldn't be possible, so maybe mark it as unreachable? Or just use `js::Object`?
-        if cb_handle.get().is_null() {
-            return Ok(());
-        }
+        let cb =
+            Object::from_handle(self.callback.handle()).expect("We should have a callback here");
 
         // Call the callback with no arguments and the global as `this`.
         let result = {
-            let fval = scope.root_value(unsafe { js::value::from_object(cb_handle.get()) });
-            let global = scope.global();
+            let fval = scope.root_value(cb.as_value());
             let args = js::native::HandleValueArray::empty();
-            js::function::call_value(scope, global.handle(), fval, &args)
+            js::Function::call_value(scope, scope.global().handle(), fval, &args)
         };
 
         if result.is_err() {
@@ -97,7 +93,7 @@ impl Task for TimerTask {
 
         // For setInterval: re-queue ourselves with the same delay and ID.
         if let Some(interval) = self.interval {
-            let new_task = unsafe { TimerTask::repeating(cb_handle.get(), interval) };
+            let new_task = unsafe { TimerTask::repeating(cb, interval) };
             CURRENT_EVENT_LOOP.with(|el| {
                 if let Some(el_ptr) = &mut *el.borrow_mut() {
                     // SAFETY: We still have the scope active, so the
@@ -172,7 +168,7 @@ pub fn current_event_loop() -> Option<*mut EventLoop> {
 // TODO: move these to a separate crate under `builtins`, and use `#[jsglobals]`.
 
 use js::native::RawJSContext;
-use js::value;
+use js::{value, Object};
 
 use js::gc::scope::RootScope;
 
@@ -189,7 +185,7 @@ pub unsafe fn install_timer_globals(scope: &Scope<'_>, global: js::Object<'_>) {
     let clear_timeout = c"clearTimeout";
     let clear_interval = c"clearInterval";
 
-    js::function::define_function(
+    js::Function::define(
         scope,
         global.handle(),
         set_timeout,
@@ -198,7 +194,7 @@ pub unsafe fn install_timer_globals(scope: &Scope<'_>, global: js::Object<'_>) {
         0,
     )
     .unwrap();
-    js::function::define_function(
+    js::Function::define(
         scope,
         global.handle(),
         set_interval,
@@ -207,7 +203,7 @@ pub unsafe fn install_timer_globals(scope: &Scope<'_>, global: js::Object<'_>) {
         0,
     )
     .unwrap();
-    js::function::define_function(
+    js::Function::define(
         scope,
         global.handle(),
         clear_timeout,
@@ -216,7 +212,7 @@ pub unsafe fn install_timer_globals(scope: &Scope<'_>, global: js::Object<'_>) {
         0,
     )
     .unwrap();
-    js::function::define_function(
+    js::Function::define(
         scope,
         global.handle(),
         clear_interval,
@@ -268,7 +264,7 @@ unsafe fn queue_timer_from_js(
         );
         return false;
     }
-    let callback = args.get(0).to_object();
+    let callback = Object::from_value(&scope, *args.get(0)).unwrap();
 
     // Argument 1: delay in milliseconds (optional, default 0)
     let delay_ms = if argc > 1 && args.get(1).is_number() {

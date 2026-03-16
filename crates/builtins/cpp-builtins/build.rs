@@ -104,9 +104,7 @@ fn main() {
         build.cpp_link_stdlib(None);
 
         build
-            .flag(format!(
-                "-include{mozjs_include}/js-confdefs.h"
-            ))
+            .flag(format!("-include{mozjs_include}/js-confdefs.h"))
             .flag("-Qunused-arguments")
             .flag("-mthread-model")
             .flag("single")

@@ -5,16 +5,15 @@
 //! Tests that need a JS runtime are grouped in a single test because
 //! `JSEngine` can only be initialized once per process.
 
-use std::ptr::NonNull;
-
 use core_runtime::config::RuntimeConfig;
 use core_runtime::runtime::Runtime;
 
+use js::builtins::IsPrimitive;
 use js::builtins::{Boolean, Double, Int32, Null, StringPrimitive, SymbolPrimitive, Undefined};
-use js::builtins::{Is, IsPrimitive, To};
-use js::error::{CapturedError, JSError};
+use js::conversion::{ConversionBehavior, FromJSVal, ToJSVal};
+use js::error::{CapturedError, ExnThrown};
 use js::rooted;
-use js::value::{self, IntoJSVal, TryFromJSVal};
+use js::value;
 use js::Array;
 use js::Date;
 use js::Map;
@@ -49,54 +48,39 @@ fn test_value_constructors() {
 }
 
 #[test]
-fn test_into_jsval_trait() {
-    let v = true.into_jsval();
+fn test_value_constructors_extra() {
+    // value:: constructors cover the same ground as the old IntoJSVal impls.
+    let v = value::from_bool(true);
     assert!(v.is_boolean());
     assert!(v.to_boolean());
 
-    let v = 42i32.into_jsval();
+    let v = value::from_i32(42);
     assert!(v.is_int32());
     assert_eq!(v.to_int32(), 42);
 
-    let v = 99u32.into_jsval();
+    let v = value::from_u32(99);
     assert!(v.is_int32() || v.is_double());
 
-    let v = 2.71f64.into_jsval();
+    let v = value::from_f64(2.71);
     assert!(v.is_double());
 
-    let v = ().into_jsval();
+    let v = value::undefined();
     assert!(v.is_undefined());
 }
 
 #[test]
-fn test_try_from_jsval_trait() {
-    let v = value::from_bool(false);
-    assert_eq!(bool::try_from_jsval(v).unwrap(), false);
-
-    let v = value::from_i32(-7);
-    assert_eq!(i32::try_from_jsval(v).unwrap(), -7);
-
-    let v = value::from_f64(1.5);
-    assert!((f64::try_from_jsval(v).unwrap() - 1.5).abs() < f64::EPSILON);
-
-    // Type mismatch should produce an error.
-    let v = value::from_bool(true);
-    assert!(i32::try_from_jsval(v).is_err());
-}
-
-#[test]
 fn test_jserror_check() {
-    assert!(JSError::check(true).is_ok());
-    assert!(JSError::check(false).is_err());
-    match JSError::check(false) {
-        Err(JSError) => {}
-        other => panic!("expected JSError, got {other:?}"),
+    assert!(ExnThrown::check(true).is_ok());
+    assert!(ExnThrown::check(false).is_err());
+    match ExnThrown::check(false) {
+        Err(ExnThrown) => {}
+        other => panic!("expected ExnThrown, got {other:?}"),
     }
 }
 
 #[test]
 fn test_jserror_display() {
-    let e = JSError;
+    let e = ExnThrown;
     assert_eq!(format!("{e}"), "JavaScript exception pending");
 
     let e = CapturedError {
@@ -117,8 +101,8 @@ fn test_js_api_with_runtime() {
     let scope = rt.default_global();
 
     // --- String operations ---
-    let s = js::string::from_str(&scope, "hello world").unwrap();
-    let result = js::string::to_utf8(&scope, s).unwrap();
+    let s = js::JSString::from_str(&scope, "hello world").unwrap();
+    let result = s.to_utf8(&scope).unwrap();
     assert_eq!(result, "hello world");
 
     // --- Object creation ---
@@ -132,35 +116,49 @@ fn test_js_api_with_runtime() {
 
     // --- Evaluate and extract ---
     let rval = js::compile::evaluate(&scope, "2 + 3").unwrap();
-    let result = i32::try_from_jsval(rval).unwrap();
+    let result = i32::from_jsval(&scope, rval, ConversionBehavior::Default).unwrap();
     assert_eq!(result, 5);
 
     // --- GC operations ---
     js::gc::maybe_gc(&scope);
     js::gc::prepare_for_full_gc(&scope);
 
-    // --- IntoJSVal additional impls ---
-    let v = Option::<i32>::None.into_jsval();
-    assert!(v.is_null());
-    let v = Some(42i32).into_jsval();
-    assert_eq!(v.to_int32(), 42);
-    let v = 7i8.into_jsval();
-    assert_eq!(v.to_int32(), 7);
-    let v = 300u16.into_jsval();
-    assert_eq!(v.to_int32(), 300);
-    let v = 1.5f32.into_jsval();
-    assert!((v.to_double() - 1.5).abs() < 0.001);
+    // --- ToJSVal ---
+    assert!(Option::<i32>::None.to_jsval(&scope).unwrap().is_null());
+    assert_eq!(Some(42i32).to_jsval(&scope).unwrap().to_int32(), 42);
+    assert_eq!(7i8.to_jsval(&scope).unwrap().to_int32(), 7);
+    assert_eq!(300u16.to_jsval(&scope).unwrap().to_int32(), 300);
+    assert!((1.5f32.to_jsval(&scope).unwrap().to_double() - 1.5).abs() < 0.001);
 
-    // --- TryFromJSVal for u32 ---
-    let v = value::from_u32(100);
-    assert_eq!(u32::try_from_jsval(v).unwrap(), 100);
-    let v = value::from_i32(-1);
-    assert!(u32::try_from_jsval(v).is_err());
+    // --- FromJSVal for bool ---
+    {
+        let v = scope.root_value(value::from_bool(false));
+        assert_eq!(bool::from_jsval(&scope, v, ()).unwrap(), false);
+    }
 
-    // --- TryFromJSVal for *mut JSObject ---
-    let v = value::null();
-    let obj_ptr = <*mut js::native::JSObject>::try_from_jsval(v).unwrap();
-    assert!(obj_ptr.is_null());
+    // --- FromJSVal for i32 ---
+    {
+        let v = scope.root_value(value::from_i32(-7));
+        assert_eq!(
+            i32::from_jsval(&scope, v, ConversionBehavior::Default).unwrap(),
+            -7
+        );
+    }
+
+    // --- FromJSVal for f64 ---
+    {
+        let v = scope.root_value(value::from_f64(1.5));
+        assert!((f64::from_jsval(&scope, v, ()).unwrap() - 1.5).abs() < f64::EPSILON);
+    }
+
+    // --- FromJSVal for u32 ---
+    {
+        let v = scope.root_value(value::from_u32(100));
+        assert_eq!(
+            u32::from_jsval(&scope, v, ConversionBehavior::Default).unwrap(),
+            100
+        );
+    }
 
     // --- Comparison operations ---
     {
@@ -199,9 +197,6 @@ fn test_js_api_with_runtime() {
 
         assert!(map.delete(&scope, key.handle()).unwrap());
         assert_eq!(map.size(&scope), 0);
-
-        // Is check
-        assert!(Map::is(&scope, map.handle()).unwrap());
     }
 
     // --- Set operations ---
@@ -217,9 +212,6 @@ fn test_js_api_with_runtime() {
 
         assert!(set.delete(&scope, key.handle()).unwrap());
         assert_eq!(set.size(&scope), 0);
-
-        // Is check
-        assert!(Set::is(&scope, set.handle()).unwrap());
     }
 
     // --- Array builtins ---
@@ -227,15 +219,14 @@ fn test_js_api_with_runtime() {
         let arr = Array::new(&scope, 3).unwrap();
         let len = arr.length(&scope).unwrap();
         assert_eq!(len, 3);
-
-        assert!(Array::is(&scope, arr.handle()).unwrap());
     }
 
     // --- Date builtins ---
     {
         let rval = js::compile::evaluate(&scope, "new Date(2024, 0, 15)").unwrap();
         let date_obj = Object::from_raw_obj(&scope, rval.to_object()).unwrap();
-        let js_date: Date<'_> = date_obj.to(&scope).unwrap();
+        assert!(Date::is_date(&scope, date_obj.handle()).unwrap());
+        let js_date = date_obj.cast::<Date>().unwrap();
         assert!(js_date.is_valid(&scope).unwrap());
     }
 
@@ -244,7 +235,8 @@ fn test_js_api_with_runtime() {
         let rval = js::compile::evaluate(&scope, "new Promise(function(resolve) { resolve(42) })")
             .unwrap();
         let promise_obj = Object::from_raw_obj(&scope, rval.to_object()).unwrap();
-        let js_promise: Promise<'_> = promise_obj.to(&scope).unwrap();
+        assert!(Promise::is_promise(promise_obj.handle()));
+        let js_promise = promise_obj.cast::<Promise>().unwrap();
         let _id = js_promise.id();
     }
 
@@ -283,13 +275,10 @@ fn test_js_api_with_runtime() {
 
     // --- String char_at ---
     {
-        let s = js::string::from_str(&scope, "ABC").unwrap();
-        // char_at takes NonNull<JSString>; extract from the Handle.
-        // SAFETY: Handle always contains a valid, non-null pointer.
-        let s_nn = NonNull::new(s.get()).unwrap();
-        let ch = js::string::char_at(&scope, s_nn, 0).unwrap();
+        let s = js::JSString::from_str(&scope, "ABC").unwrap();
+        let ch = s.char_at(&scope, 0).unwrap();
         assert_eq!(ch, b'A' as u16);
-        let ch = js::string::char_at(&scope, s_nn, 2).unwrap();
+        let ch = s.char_at(&scope, 2).unwrap();
         assert_eq!(ch, b'C' as u16);
     }
 
@@ -374,19 +363,18 @@ fn test_js_api_with_runtime() {
 
     // --- Closure-based callbacks ---
     {
-        use js::function;
         use js::try_catch::TryCatch;
 
         let scope = scope.inner_scope();
 
         // Simple closure returning a constant
         {
-            let fun = function::new_closure(&scope, c"forty_two", 0, |_scope, _args| {
+            let fun = js::Function::new_closure(&scope, c"forty_two", 0, |_scope, _args| {
                 Ok(value::from_i32(42))
             })
             .expect("new_closure should succeed");
 
-            let fun_val = scope.root_value(value::from_function(fun));
+            let fun_val = scope.root_value(fun.as_value());
             scope
                 .global()
                 .set_property(&scope, c"fortyTwo", fun_val)
@@ -400,14 +388,14 @@ fn test_js_api_with_runtime() {
 
         // Closure that reads arguments
         {
-            let fun = function::new_closure(&scope, c"add", 2, |_scope, args| {
+            let fun = js::Function::new_closure(&scope, c"add", 2, |_scope, args| {
                 let a = args.get_i32(0).unwrap_or(0);
                 let b = args.get_i32(1).unwrap_or(0);
                 Ok(value::from_i32(a + b))
             })
             .expect("new_closure should succeed");
 
-            let fun_val = scope.root_value(value::from_function(fun));
+            let fun_val = scope.root_value(fun.as_value());
             scope
                 .global()
                 .set_property(&scope, c"add", fun_val)
@@ -421,10 +409,10 @@ fn test_js_api_with_runtime() {
 
         // Closure that returns an error
         {
-            let fun = function::new_closure(&scope, c"fail", 0, |_scope, _args| Err(JSError))
+            let fun = js::Function::new_closure(&scope, c"fail", 0, |_scope, _args| Err(ExnThrown))
                 .expect("new_closure should succeed");
 
-            let fun_val = scope.root_value(value::from_function(fun));
+            let fun_val = scope.root_value(fun.as_value());
             scope
                 .global()
                 .set_property(&scope, c"fail", fun_val)
@@ -439,12 +427,12 @@ fn test_js_api_with_runtime() {
 
         // Closure with CallbackArgs metadata
         {
-            let fun = function::new_closure(&scope, c"argInfo", 0, |_scope, args| {
+            let fun = js::Function::new_closure(&scope, c"argInfo", 0, |_scope, args| {
                 Ok(value::from_i32(args.len() as i32))
             })
             .expect("new_closure");
 
-            let fun_val = scope.root_value(value::from_function(fun));
+            let fun_val = scope.root_value(fun.as_value());
             scope
                 .global()
                 .set_property(&scope, c"argInfo", fun_val)

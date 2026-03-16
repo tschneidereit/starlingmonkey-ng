@@ -5,10 +5,8 @@
 //!
 //! This is useful for APIs like `atob`, `self`, etc.
 
-use std::ptr;
-
 use js::compile::evaluate_with_filename;
-use js::string as jsstring;
+use js::prelude::FromJSVal;
 use libstarling::config::RuntimeConfig;
 use libstarling::jsglobals;
 use libstarling::runtime::Runtime;
@@ -75,9 +73,7 @@ fn main() {
     println!("Test 3: greet('SpiderMonkey') from JS");
     let rval = evaluate_with_filename(&scope, "greet('SpiderMonkey')", "test2.js", 1)
         .expect("greet() failed");
-    assert!(rval.is_string());
-    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
-    let result_str = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    let result_str = String::from_jsval(&scope, rval, ()).expect("null string");
     assert_eq!(result_str, "Hello, SpiderMonkey!");
     println!("  PASSED: greet('SpiderMonkey') = '{}'", result_str);
 
@@ -86,9 +82,7 @@ fn main() {
     // ====================================================================
     println!("Test 4: Global constants");
     let rval = evaluate_with_filename(&scope, "version", "test3.js", 1).expect("version failed");
-    assert!(rval.is_string());
-    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
-    let version = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    let version = String::from_jsval(&scope, rval, ()).expect("null string");
     assert_eq!(version, "1.0.0");
     println!("  PASSED: version = '{}'", version);
 
@@ -118,9 +112,7 @@ fn main() {
         1,
     )
     .expect("safeDivide error test failed");
-    assert!(rval.is_string());
-    let str_handle = scope.root_string(ptr::NonNull::new(rval.to_string()).expect("null string"));
-    let err_str = jsstring::to_utf8(&scope, str_handle).expect("utf8 failed");
+    let err_str = String::from_jsval(&scope, rval, ()).expect("null string");
     assert_eq!(err_str, "Division by zero");
     println!("  PASSED: safeDivide(1, 0) throws '{}'", err_str);
 

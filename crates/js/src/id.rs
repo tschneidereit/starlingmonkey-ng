@@ -13,37 +13,37 @@ use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
 
-use super::error::JSError;
+use super::error::ExnThrown;
 
 /// Convert a JS value to a property key (`jsid`).
-pub fn value_to_id(scope: &Scope<'_>, v: mozjs::rust::HandleValue) -> Result<jsid, JSError> {
+pub fn value_to_id(scope: &Scope<'_>, v: mozjs::rust::HandleValue) -> Result<jsid, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut idp = jsid::default());
     let ok = unsafe { wrappers2::JS_ValueToId(scope.cx_mut(), v, idp.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(idp.get())
 }
 
 /// Convert a JS string to a property key.
-pub fn string_to_id(scope: &Scope<'_>, s: HandleString) -> Result<jsid, JSError> {
+pub fn string_to_id(scope: &Scope<'_>, s: HandleString) -> Result<jsid, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut idp = jsid::default());
     let ok = unsafe { wrappers2::JS_StringToId(scope.cx_mut(), s, idp.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(idp.get())
 }
 
 /// Convert a property key back to a JS value.
-pub fn id_to_value(scope: &Scope<'_>, id: jsid) -> Result<Value, JSError> {
+pub fn id_to_value(scope: &Scope<'_>, id: jsid) -> Result<Value, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut vp = UndefinedValue());
     let ok = unsafe { wrappers2::JS_IdToValue(scope.cx(), id, vp.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(vp.get())
 }
 
 /// Convert a numeric index to a property key.
-pub fn index_to_id(scope: &Scope<'_>, index: u32) -> Result<jsid, JSError> {
+pub fn index_to_id(scope: &Scope<'_>, index: u32) -> Result<jsid, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut idp = jsid::default());
     let ok = unsafe { wrappers2::JS_IndexToId(scope.cx(), index, idp.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(idp.get())
 }
 
@@ -58,17 +58,17 @@ pub fn mark_cross_zone_id(scope: &Scope<'_>, id: jsid) {
 }
 
 /// Convert getter/setter property ids.
-pub fn to_getter_id(scope: &Scope<'_>, id: Handle<PropertyKey>) -> Result<PropertyKey, JSError> {
+pub fn to_getter_id(scope: &Scope<'_>, id: Handle<PropertyKey>) -> Result<PropertyKey, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut getter_id = PropertyKey::default());
     let ok = unsafe { wrappers2::ToGetterId(scope.cx_mut(), id, getter_id.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(getter_id.get())
 }
 
 /// Convert to setter property id.
-pub fn to_setter_id(scope: &Scope<'_>, id: Handle<PropertyKey>) -> Result<PropertyKey, JSError> {
+pub fn to_setter_id(scope: &Scope<'_>, id: Handle<PropertyKey>) -> Result<PropertyKey, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut setter_id = PropertyKey::default());
     let ok = unsafe { wrappers2::ToSetterId(scope.cx_mut(), id, setter_id.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(setter_id.get())
 }

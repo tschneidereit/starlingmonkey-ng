@@ -8,12 +8,9 @@
 //! - Stack-newtype upcast/downcast from Rust
 //! - Constructor with parent initialization
 
-use std::ptr;
-
 use js::compile::evaluate_with_filename;
 use js::gc::scope::Scope;
-use js::native::Value;
-use js::string as jsstring;
+use js::prelude::HandleValue;
 use libstarling::config::RuntimeConfig;
 use libstarling::runtime::Runtime;
 use libstarling::{jsclass, jsmethods};
@@ -220,14 +217,14 @@ r.join(", ")
     assert!(s.contains("Puppy proto -> Dog proto: true"));
 
     // ====================================================================
-    // Test 6: Rust-side stack newtype upcast
+    // Test 6: Rust-side stack newtype deref upcast
     // ====================================================================
-    println!("Test 6: Upcast");
+    println!("Test 6: Deref upcast");
     let dog = Dog::new(&scope, "Fido".to_string(), "Poodle".to_string());
-    let animal: Animal = dog.upcast();
+    let animal: Animal = *dog;
     let animal_name = animal.name();
     assert_eq!(animal_name, "Fido");
-    println!("  Upcast Dog->Animal name: {}", animal_name);
+    println!("  Deref upcast Dog->Animal name: {}", animal_name);
 
     // ====================================================================
     // Test 7: Rust-side stack newtype downcast
@@ -252,13 +249,13 @@ r.join(", ")
     println!("Test 8: Multi-level upcast/downcast");
     let puppy = Puppy::new(&scope, "Tiny".to_string(), "Chihuahua".to_string(), 3);
     // Upcast to Dog
-    let as_dog: Dog = puppy.upcast();
+    let as_dog: Dog = *puppy;
     let dog_breed = as_dog.breed();
     assert_eq!(dog_breed, "Chihuahua");
     println!("  Puppy->Dog breed: {}", dog_breed);
 
     // Upcast to Animal (chain: Puppy -> Dog -> Animal)
-    let as_animal: Animal = as_dog.upcast();
+    let as_animal: Animal = *as_dog;
     let animal_name = as_animal.name();
     assert_eq!(animal_name, "Tiny");
     println!("  Puppy->Dog->Animal name: {}", animal_name);
@@ -275,10 +272,10 @@ r.join(", ")
 }
 
 /// Helper: extract a Rust String from a JS string value.
-fn val_to_string(scope: &Scope<'_>, val: &Value) -> String {
+fn val_to_string(scope: &Scope<'_>, val: &HandleValue) -> String {
     assert!(val.is_string(), "Expected string value");
-    let str_handle = scope.root_string(ptr::NonNull::new(val.to_string()).expect("null string"));
-    jsstring::to_utf8(scope, str_handle).expect("utf8 conversion failed")
+    let s = js::JSString::from_value(scope, *val).expect("null string");
+    s.to_utf8(scope).expect("utf8 conversion failed")
 }
 
 #[test]

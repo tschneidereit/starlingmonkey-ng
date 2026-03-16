@@ -50,8 +50,8 @@
 //! use crate::gc::scope::RootScope;
 //!
 //! let scope = RootScope::new_global(rt.cx(), &SIMPLE_GLOBAL_CLASS, options);
-//! let s = js::string::from_str(&scope, "hello")?;
-//! // s is a Handle<'_, *mut JSString> — rooted in the scope
+//! let s = js::JSString::from_str(&scope, "hello")?;
+//! // s is a JSString<'_> — rooted in the scope
 //! ```
 //!
 //! [`HandlePool`]: mozjs::gc::pool::HandlePool
@@ -64,7 +64,7 @@ use std::ptr::NonNull;
 use super::pool::{ScopeAlloc, SlotTag};
 use crate::Object;
 use mozjs::context::JSContext;
-use mozjs::gc::Handle;
+use mozjs::gc::{Handle, MutableHandle};
 use mozjs::jsapi::JSContext as RawJSContext;
 use mozjs::jsapi::JS::{BigInt, Symbol};
 use mozjs::jsapi::{
@@ -177,47 +177,66 @@ impl<'cx> Scope<'cx> {
     }
 
     /// Root an object pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_object(&self, obj: NonNull<JSObject>) -> Handle<'_, *mut JSObject> {
+    pub fn root_object(&self, obj: NonNull<JSObject>) -> Handle<'cx, *mut JSObject> {
         let ptr = self.alloc_mut().alloc(SlotTag::Object, obj.as_ptr() as u64);
         // SAFETY: The pointer is in a traced page slot — it is a marked location.
         unsafe { Handle::from_marked_location(ptr as *const *mut JSObject) }
     }
 
+    /// Root a mutable object slot, returning a [`MutableHandle`] tied to this scope.
+    ///
+    /// The slot is initialized with `obj` and can be used as an output parameter
+    /// for JSAPI functions that write into a `MutableHandleObject`.
+    pub fn root_object_mut(&self, obj: *mut JSObject) -> MutableHandle<'cx, *mut JSObject> {
+        let ptr = self.alloc_mut().alloc(SlotTag::Object, obj as u64);
+        unsafe { MutableHandle::from_marked_location(ptr as *mut *mut JSObject) }
+    }
+
     /// Root a value, returning a [`Handle`] tied to this scope.
-    pub fn root_value(&self, val: Value) -> Handle<'_, Value> {
+    pub fn root_value(&self, val: Value) -> Handle<'cx, Value> {
         // SAFETY: Value is repr(C) and always 8 bytes (u64).
         let bits = unsafe { std::mem::transmute::<Value, u64>(val) };
         let ptr = self.alloc_mut().alloc(SlotTag::Value, bits);
         unsafe { Handle::from_marked_location(ptr as *const Value) }
     }
 
+    /// Root a mutable value slot, returning a [`MutableHandle`] tied to this scope.
+    ///
+    /// The slot is initialized with `val` and can be used as an output parameter
+    /// for JSAPI functions that write into a `MutableHandleValue`.
+    pub fn root_value_mut(&self, val: Value) -> MutableHandle<'cx, Value> {
+        let bits = unsafe { std::mem::transmute::<Value, u64>(val) };
+        let ptr = self.alloc_mut().alloc(SlotTag::Value, bits);
+        unsafe { MutableHandle::from_marked_location(ptr as *mut Value) }
+    }
+
     /// Root a string pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_string(&self, s: NonNull<JSString>) -> Handle<'_, *mut JSString> {
+    pub fn root_string(&self, s: NonNull<JSString>) -> Handle<'cx, *mut JSString> {
         let ptr = self.alloc_mut().alloc(SlotTag::String, s.as_ptr() as u64);
         unsafe { Handle::from_marked_location(ptr as *const *mut JSString) }
     }
 
     /// Root a script pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_script(&self, s: NonNull<JSScript>) -> Handle<'_, *mut JSScript> {
+    pub fn root_script(&self, s: NonNull<JSScript>) -> Handle<'cx, *mut JSScript> {
         let ptr = self.alloc_mut().alloc(SlotTag::Script, s.as_ptr() as u64);
         unsafe { Handle::from_marked_location(ptr as *const *mut JSScript) }
     }
 
     /// Root a property key (jsid), returning a [`Handle`] tied to this scope.
-    pub fn root_id(&self, id: jsid) -> Handle<'_, jsid> {
+    pub fn root_id(&self, id: jsid) -> Handle<'cx, jsid> {
         let bits = unsafe { std::mem::transmute_copy::<jsid, u64>(&id) };
         let ptr = self.alloc_mut().alloc(SlotTag::Id, bits);
         unsafe { Handle::from_marked_location(ptr as *const jsid) }
     }
 
     /// Root a symbol pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_symbol(&self, sym: NonNull<Symbol>) -> Handle<'_, *mut Symbol> {
+    pub fn root_symbol(&self, sym: NonNull<Symbol>) -> Handle<'cx, *mut Symbol> {
         let ptr = self.alloc_mut().alloc(SlotTag::Symbol, sym.as_ptr() as u64);
         unsafe { Handle::from_marked_location(ptr as *const *mut Symbol) }
     }
 
     /// Root a function pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_function(&self, fun: NonNull<JSFunction>) -> Handle<'_, *mut JSFunction> {
+    pub fn root_function(&self, fun: NonNull<JSFunction>) -> Handle<'cx, *mut JSFunction> {
         let ptr = self
             .alloc_mut()
             .alloc(SlotTag::Function, fun.as_ptr() as u64);
@@ -225,7 +244,7 @@ impl<'cx> Scope<'cx> {
     }
 
     /// Root a BigInt pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_bigint(&self, bi: NonNull<BigInt>) -> Handle<'_, *mut BigInt> {
+    pub fn root_bigint(&self, bi: NonNull<BigInt>) -> Handle<'cx, *mut BigInt> {
         let ptr = self.alloc_mut().alloc(SlotTag::BigInt, bi.as_ptr() as u64);
         unsafe { Handle::from_marked_location(ptr as *const *mut BigInt) }
     }
@@ -248,11 +267,8 @@ impl<'cx> Scope<'cx> {
     pub fn global(&self) -> Object<'_> {
         use mozjs::rust::wrappers2::CurrentGlobal;
         // SAFETY: We have an entered realm. CurrentGlobal returns a pointer to
-        // the global which is rooted by the realm. We root a copy in our scope.
-        let global_ptr = unsafe { *CurrentGlobal(self.cx()) };
-        // SAFETY: The global object is always non-null when a realm has been entered.
-        let nn = unsafe { NonNull::new_unchecked(global_ptr) };
-        Object::from_handle(self.root_object(nn))
+        // the global which is rooted by the realm.
+        unsafe { Object::from_raw(self, *CurrentGlobal(self.cx())).unwrap() }
     }
 }
 

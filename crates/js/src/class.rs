@@ -15,16 +15,14 @@ use std::marker::PhantomData;
 use std::os::raw::c_char;
 use std::ptr::{self, NonNull};
 
-use crate::conversions::{
-    ConversionBehavior, ConversionResult, FromJSValConvertible, ToJSValConvertible,
-};
-use crate::error::{capture_stack_from_error, JSError};
-use crate::gc::handle::{JsType, Stack};
+use crate::builtins::{get_class_tag, is_derived_from_type, CastError, CastTarget, JSType};
+use crate::conversion::{ConversionBehavior, ConversionError, FromJSVal, ToJSVal};
+use crate::error::{capture_stack_from_error, ExnThrown};
+use crate::gc::handle::Stack;
 use crate::gc::scope::{RootScope, Scope};
 use crate::heap::{Heap as MozHeap, Trace};
 use crate::native::{
-    CallArgs, GCContext, HandleObject, JSContext, JSNative, JSObject, JSTracer, MutableHandleValue,
-    RawJSContext, Value,
+    CallArgs, GCContext, HandleObject, JSContext, JSNative, JSObject, JSTracer, RawJSContext, Value,
 };
 use crate::value;
 use crate::Object;
@@ -63,7 +61,7 @@ pub unsafe fn init_class<'s>(
     fs: *const JSFunctionSpec,
     static_ps: *const JSPropertySpec,
     static_fs: *const JSFunctionSpec,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj = wrappers2::JS_InitClass(
         scope.cx_mut(),
         global,
@@ -79,7 +77,7 @@ pub unsafe fn init_class<'s>(
     );
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Create a new global object.
@@ -94,18 +92,18 @@ pub unsafe fn new_global_object<'s>(
     principals: *mut JSPrincipals,
     hook_option: OnNewGlobalHookOption,
     options: *const RealmOptions,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     let obj =
         wrappers2::JS_NewGlobalObject(scope.cx_mut(), clasp, principals, hook_option, options);
     NonNull::new(obj)
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Initialize the standard classes on a global object.
-pub fn init_standard_classes(scope: &Scope<'_>) -> Result<(), JSError> {
+pub fn init_standard_classes(scope: &Scope<'_>) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::InitRealmStandardClasses(scope.cx_mut()) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Resolve a standard class by name (lazily).
@@ -113,49 +111,58 @@ pub fn resolve_standard_class(
     scope: &Scope<'_>,
     obj: HandleObject,
     id: Handle<PropertyKey>,
-) -> Result<bool, JSError> {
+) -> Result<bool, ExnThrown> {
     let mut resolved = false;
     let ok = unsafe { wrappers2::JS_ResolveStandardClass(scope.cx_mut(), obj, id, &mut resolved) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     Ok(resolved)
 }
 
 /// Eagerly enumerate all standard classes on a global object.
-pub fn enumerate_standard_classes(scope: &Scope<'_>, obj: HandleObject) -> Result<(), JSError> {
+pub fn enumerate_standard_classes(scope: &Scope<'_>, obj: HandleObject) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::JS_EnumerateStandardClasses(scope.cx_mut(), obj) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Get the constructor for a standard class by `JSProtoKey`.
 pub fn get_class_object<'s>(
     scope: &'s Scope<'_>,
     key: JSProtoKey,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut objp: *mut JSObject = std::ptr::null_mut());
     let ok = unsafe { wrappers2::JS_GetClassObject(scope.cx_mut(), key, objp.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     NonNull::new(objp.get())
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
 }
 
 /// Get the prototype for a standard class by `JSProtoKey`.
 pub fn get_class_prototype<'s>(
     scope: &'s Scope<'_>,
     key: JSProtoKey,
-) -> Result<Handle<'s, *mut JSObject>, JSError> {
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut objp: *mut JSObject = std::ptr::null_mut());
     let ok = unsafe { wrappers2::JS_GetClassPrototype(scope.cx_mut(), key, objp.handle_mut()) };
-    JSError::check(ok)?;
+    ExnThrown::check(ok)?;
     NonNull::new(objp.get())
         .map(|p| scope.root_object(p))
-        .ok_or(JSError)
+        .ok_or(ExnThrown)
+}
+
+/// Get the `JSClass` for a standard class by `JSProtoKey`.
+///
+/// Returns a stable pointer to the `JSClass` that SpiderMonkey uses for
+/// builtin types like `Array`, `Date`, `Promise`, etc.
+pub fn proto_key_to_class(key: JSProtoKey) -> *const JSClass {
+    // SAFETY: ProtoKeyToClass is a pure lookup into a static table.
+    unsafe { mozjs::jsapi::ProtoKeyToClass(key) }
 }
 
 /// Initialize `Reflect.parse` on a global object.
-pub fn init_reflect_parse(scope: &Scope<'_>, global: HandleObject) -> Result<(), JSError> {
+pub fn init_reflect_parse(scope: &Scope<'_>, global: HandleObject) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::JS_InitReflectParse(scope.cx_mut(), global) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Link a constructor and its prototype.
@@ -163,9 +170,9 @@ pub fn link_constructor_and_prototype(
     scope: &Scope<'_>,
     ctor: HandleObject,
     proto: HandleObject,
-) -> Result<(), JSError> {
+) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::JS_LinkConstructorAndPrototype(scope.cx_mut(), ctor, proto) };
-    JSError::check(ok)
+    ExnThrown::check(ok)
 }
 
 /// Fire the `onNewGlobalObject` hook for a newly created global.
@@ -216,7 +223,7 @@ pub fn instance_of(scope: &Scope<'_>, obj: HandleObject, clasp: &JSClass) -> boo
 // Marker types
 // ============================================================================
 
-impl<'s, T: JsType + ClassDef> Stack<'s, T> {
+impl<'s, T: JSType + ClassDef> Stack<'s, T> {
     /// Get a reference to the private Rust data.
     ///
     /// Returns `None` if the object doesn't have private data of type `T`.
@@ -235,43 +242,15 @@ impl<'s, T: JsType + ClassDef> Stack<'s, T> {
     pub unsafe fn data_mut(&self) -> Option<&mut T> {
         unsafe { get_private_or_ancestor_mut::<T>(self.handle.get()) }
     }
-
-    /// Type-checked cast to another type.
-    ///
-    /// Returns `Ok` if the underlying JS object is an instance of `U`
-    /// (or a subclass), `Err(CastError)` otherwise.
-    pub fn cast<U: JsType + ClassDef>(self) -> Result<Stack<'s, U>, CastError> {
-        let concrete_tag = unsafe { get_class_tag(self.handle.get()) };
-        let target_tag = class_tag::<U>();
-        if !is_derived_from_type(concrete_tag, target_tag) {
-            return Err(CastError {
-                from: <T as ClassDef>::NAME,
-                to: <U as ClassDef>::NAME,
-            });
-        }
-        Ok(unsafe { Stack::from_handle_unchecked(self.handle) })
-    }
-
-    /// Type-checked construction from an untyped `Object`.
-    ///
-    /// Returns `Ok(Stack<T>)` if the underlying JS object is an instance
-    /// of `T` (or a subclass), `Err(CastError)` otherwise.
-    pub fn from_object(obj: Object<'s>) -> Result<Self, CastError> {
-        let concrete_tag = unsafe { get_class_tag(obj.as_raw()) };
-        let target_tag = class_tag::<T>();
-        if !is_derived_from_type(concrete_tag, target_tag) {
-            return Err(CastError {
-                from: "Object",
-                to: <T as ClassDef>::NAME,
-            });
-        }
-        Ok(unsafe { Stack::from_handle_unchecked(obj.handle()) })
-    }
 }
 
-// Blanket impl: every ClassDef is automatically a JsType.
-impl<T: ClassDef> JsType for T {
+// Blanket impl: every ClassDef is automatically a JSType.
+impl<T: ClassDef> JSType for T {
     const JS_NAME: &'static str = T::NAME;
+
+    fn js_class() -> *const JSClass {
+        T::class()
+    }
 }
 
 /// Typed variadic rest arguments in `#[jsmethods]`.
@@ -343,66 +322,6 @@ impl<'a, T> IntoIterator for &'a RestArgs<T> {
 }
 
 // ============================================================================
-// FromJSValue trait — type-safe conversion from JS values
-// ============================================================================
-
-/// Trait for converting a JS `Value` into a Rust type.
-///
-/// Used by `RestArgs<T>` to automatically convert each variadic argument.
-/// Implement this trait for custom types to support them in `RestArgs<MyType>`.
-pub trait FromJSValue: Sized {
-    /// Converts a JS value to this Rust type, or returns `Err(())` on failure.
-    fn from_js_value(scope: &Scope<'_>, val: Value) -> Result<Self, ()>;
-}
-
-impl FromJSValue for Value {
-    fn from_js_value(_scope: &Scope<'_>, val: Value) -> Result<Self, ()> {
-        Ok(val)
-    }
-}
-
-impl FromJSValue for f64 {
-    fn from_js_value(_scope: &Scope<'_>, val: Value) -> Result<Self, ()> {
-        if val.is_double() {
-            Ok(val.to_double())
-        } else if val.is_int32() {
-            Ok(val.to_int32() as f64)
-        } else {
-            Err(())
-        }
-    }
-}
-
-impl FromJSValue for i32 {
-    fn from_js_value(_scope: &Scope<'_>, val: Value) -> Result<Self, ()> {
-        if val.is_int32() {
-            Ok(val.to_int32())
-        } else if val.is_double() {
-            Ok(val.to_double() as i32)
-        } else {
-            Err(())
-        }
-    }
-}
-
-impl FromJSValue for bool {
-    fn from_js_value(_scope: &Scope<'_>, val: Value) -> Result<Self, ()> {
-        Ok(val.to_boolean())
-    }
-}
-
-impl FromJSValue for String {
-    fn from_js_value(scope: &Scope<'_>, val: Value) -> Result<Self, ()> {
-        if !val.is_string() {
-            return Err(());
-        }
-        let str_ptr = ptr::NonNull::new(val.to_string()).ok_or(())?;
-        let str_handle = scope.root_string(str_ptr);
-        crate::string::to_utf8(scope, str_handle).map_err(|_| ())
-    }
-}
-
-// ============================================================================
 // Inheritance traits
 // ============================================================================
 
@@ -435,10 +354,6 @@ pub trait HasParent: ClassDef {
 /// a parent class creates a direct derivation relationship.
 pub trait DerivedFrom<T: ClassDef>: ClassDef {}
 
-// ============================================================================
-// StackType — trait for generated stack newtypes
-// ============================================================================
-
 /// Trait implemented by all generated stack newtype wrappers (e.g. `Dog<'s>`).
 ///
 /// Enables type-checked [`cast`](StackType::cast) between stack newtypes
@@ -459,22 +374,21 @@ pub trait StackType<'s>: Sized + Copy {
     /// Get the underlying rooted object handle.
     fn js_handle(self) -> crate::native::GCHandle<'s, *mut JSObject>;
 
-    /// Type-checked cast to another stack newtype.
+    /// Type-checked cast to another type.
     ///
     /// Returns `Ok(T)` if the underlying JS object is an instance of `T`
-    /// (or a subclass), `Err(CastError)` otherwise. Does not require a scope
-    /// because the handle is already rooted.
-    fn cast<T: StackType<'s>>(self) -> Result<T, CastError> {
+    /// or a subclass of `T`, `Err(CastError)` otherwise.
+    fn cast<T: CastTarget<'s>>(self) -> Result<T::Output, CastError> {
         let ptr = self.js_handle().get();
         let concrete_tag = unsafe { crate::object::get_object_class(ptr) } as usize;
-        let target_tag = class_tag::<T::Inner>();
+        let target_tag = T::target_class_tag();
         if !is_derived_from_type(concrete_tag, target_tag) {
             return Err(CastError {
                 from: Self::Inner::NAME,
-                to: T::Inner::NAME,
+                to: T::TARGET_NAME,
             });
         }
-        Ok(unsafe { T::from_handle_unchecked(self.js_handle()) })
+        Ok(unsafe { T::construct_unchecked(self.js_handle()) })
     }
 }
 
@@ -493,23 +407,6 @@ impl<'s, T: ClassDef> StackType<'s> for Stack<'s, T> {
         self.handle
     }
 }
-
-/// Error returned when a type-checked [`cast`](StackType::cast) fails.
-#[derive(Debug)]
-pub struct CastError {
-    /// Name of the source class.
-    pub from: &'static str,
-    /// Name of the target class.
-    pub to: &'static str,
-}
-
-impl std::fmt::Display for CastError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "cannot cast {} to {}", self.from, self.to)
-    }
-}
-
-impl std::error::Error for CastError {}
 
 // ============================================================================
 // Private data storage
@@ -547,15 +444,6 @@ pub unsafe fn set_private<T: 'static>(obj: *mut JSObject, data: T) {
 #[inline]
 pub fn class_tag<T: ClassDef>() -> usize {
     T::class() as *const JSClass as usize
-}
-
-/// Read the type tag from a JS object by inspecting its `JSClass` pointer.
-///
-/// # Safety
-///
-/// - `obj` must be a valid, non-null JS object pointer.
-pub unsafe fn get_class_tag(obj: *mut JSObject) -> usize {
-    crate::object::get_object_class(obj) as usize
 }
 
 /// Retrieve a reference to the Rust data stored in a JS object's reserved slot 0.
@@ -783,6 +671,14 @@ struct InheritanceInfo {
     accessor_mut: unsafe fn(*mut c_void) -> *mut c_void,
 }
 
+pub(crate) fn inherits_from(concrete_tag: usize, target_tag: usize) -> bool {
+    INHERITANCE_REGISTRY.with(|reg| {
+        let map = reg.borrow();
+        map.get(&concrete_tag)
+            .is_some_and(|info| info.ancestors.contains(&target_tag))
+    })
+}
+
 // Registry mapping child type tag → parent info.
 // Thread-local because the SpiderMonkey runtime is single-threaded.
 thread_local! {
@@ -840,18 +736,6 @@ unsafe fn get_raw_private(obj: *mut JSObject) -> Option<*const c_void> {
         return None;
     }
     Some(ptr)
-}
-
-/// Check if a concrete type (by tag) derives from a target type (by tag).
-pub fn is_derived_from_type(concrete_tag: usize, target_tag: usize) -> bool {
-    if concrete_tag == target_tag {
-        return true;
-    }
-    INHERITANCE_REGISTRY.with(|reg| {
-        let map = reg.borrow();
-        map.get(&concrete_tag)
-            .is_some_and(|info| info.ancestors.contains(&target_tag))
-    })
 }
 
 /// Inheritance-aware immutable private data access.
@@ -980,7 +864,7 @@ pub trait ClassDef: Sized + Trace + 'static {
     ///
     /// Return `Ok(Self)` to create the object, or `Err(())` with a pending
     /// JS exception to signal an error.
-    fn constructor(scope: &Scope<'_>, args: &CallArgs) -> Result<Self, ()>;
+    fn constructor(scope: &Scope<'_>, args: &CallArgs) -> Result<Self, ExnThrown>;
 
     /// Register methods on the class prototype.
     ///
@@ -1057,6 +941,33 @@ pub trait ClassDef: Sized + Trace + 'static {
     ///
     /// Set automatically by `#[webidl_interface]`.
     const CONSTANTS_ON_PROTOTYPE: bool = false;
+
+    /// Post-construction hook called after the private data has been stored
+    /// on the JS object.
+    ///
+    /// This runs inside `generic_constructor`, after `set_private`, with access
+    /// to the JS object and the original constructor arguments. Use this for
+    /// initialization steps that require the JS object reference (e.g., setting
+    /// up child objects that back-reference the parent).
+    ///
+    /// Use `#[post_init]` in `#[jsmethods]` to define this.
+    fn post_init(
+        _scope: &Scope<'_>,
+        _obj: *mut JSObject,
+        _args: &CallArgs,
+    ) -> Result<(), ExnThrown> {
+        Ok(())
+    }
+
+    /// Debug assertion that all bare `Heap<T>` fields have been initialized.
+    ///
+    /// Called automatically after construction + post_init completes.
+    /// The proc macro generates an override that checks each `Heap<T>`
+    /// field; `Option<Heap<T>>` fields are skipped since `None` is valid.
+    ///
+    /// The default implementation is a no-op for classes without `Heap<T>`
+    /// fields.
+    fn debug_assert_fully_initialized(&self) {}
 }
 
 // ============================================================================
@@ -1241,7 +1152,7 @@ pub unsafe fn register_class<'s, T: ClassDef>(
 
     // Use init_class to set up constructor + prototype.
     // The class name comes from T::class().name (a static C string pointer).
-    let proto = match self::init_class(
+    let proto = self::init_class(
         scope,
         global.handle(),
         class,
@@ -1253,50 +1164,45 @@ pub unsafe fn register_class<'s, T: ClassDef>(
         methods_ptr,
         static_properties_ptr,
         static_methods_ptr,
-    ) {
-        Ok(handle) => handle.get(),
-        Err(_) => ptr::null_mut(),
-    };
+    )
+    .expect("init_class failed");
 
-    if !proto.is_null() {
-        register_prototype::<T>(global, proto);
+    register_prototype::<T>(global, proto.get());
 
-        // Define Symbol.toStringTag if the class specifies one.
-        if !T::TO_STRING_TAG.is_empty() {
-            let proto_handle = scope.root_object(NonNull::new(proto).unwrap());
-            define_to_string_tag(scope, proto_handle, T::TO_STRING_TAG);
+    // Define Symbol.toStringTag if the class specifies one.
+    if !T::TO_STRING_TAG.is_empty() {
+        define_to_string_tag(scope, proto, T::TO_STRING_TAG);
+    }
+
+    // Install constants on the constructor (and optionally the prototype).
+    if !constants.is_empty() {
+        let name = CString::new(T::NAME).expect("Class name must not contain null bytes");
+        let ctor_val = global
+            .get_property(scope, &name)
+            .expect("constructor not found on global after init_class");
+        let ctor_obj =
+            Object::from_value(scope, ctor_val.get()).expect("constructor is not an object");
+        let attrs = (crate::class_spec::JSPROP_READONLY
+            | crate::class_spec::JSPROP_ENUMERATE
+            | crate::class_spec::JSPROP_PERMANENT) as std::ffi::c_uint;
+        for &(const_name, value) in &constants {
+            ctor_obj
+                .define_property(scope, const_name, &value, attrs)
+                .expect("failed to define constant on constructor");
         }
 
-        // Install constants on the constructor (and optionally the prototype).
-        if !constants.is_empty() {
-            let name = CString::new(T::NAME).expect("Class name must not contain null bytes");
-            let ctor_val = global
-                .get_property(scope, &name)
-                .expect("constructor not found on global after init_class");
-            let ctor_raw = ctor_val.to_object_or_null();
-            let ctor_handle =
-                scope.root_object(NonNull::new(ctor_raw).expect("constructor is null"));
-            let attrs = (crate::class_spec::JSPROP_READONLY
-                | crate::class_spec::JSPROP_ENUMERATE
-                | crate::class_spec::JSPROP_PERMANENT) as std::ffi::c_uint;
+        // WebIDL §3.7.3: constants are also defined on the prototype.
+        if T::CONSTANTS_ON_PROTOTYPE {
+            let proto_obj = Object::from_handle(proto).expect("prototype is null");
             for &(const_name, value) in &constants {
-                crate::object::define_property(scope, ctor_handle, const_name, &value, attrs)
-                    .expect("failed to define constant on constructor");
-            }
-
-            // WebIDL §3.7.3: constants are also defined on the prototype.
-            if T::CONSTANTS_ON_PROTOTYPE {
-                let proto_handle: crate::native::HandleObject =
-                    scope.root_object(NonNull::new(proto).unwrap());
-                for &(const_name, value) in &constants {
-                    crate::object::define_property(scope, proto_handle, const_name, &value, attrs)
-                        .expect("failed to define constant on prototype");
-                }
+                proto_obj
+                    .define_property(scope, const_name, &value, attrs)
+                    .expect("failed to define constant on prototype");
             }
         }
     }
 
-    Object::from_raw(scope, proto).unwrap()
+    Object::from_raw(scope, proto.get()).unwrap()
 }
 
 /// Generic constructor callback for all ClassDef types.
@@ -1315,34 +1221,49 @@ unsafe extern "C" fn generic_constructor<T: ClassDef>(
         return false;
     }
 
-    // Get the JSClass for this type
-    let class: &'static JSClass = T::class();
-
-    // Create the new JS object using the constructor's prototype
-    let obj = crate::class_spec::JS_NewObjectForConstructor(cx, class, &args);
-    if obj.is_null() {
-        return false;
-    }
-
     // SAFETY: SpiderMonkey guarantees cx is valid and a realm is entered during a native call.
     let mut js_cx = JSContext::from_ptr(NonNull::new_unchecked(cx));
     let scope = RootScope::from_current_realm(&mut js_cx);
 
+    // Get the JSClass for this type
+    let class: &'static JSClass = T::class();
+
+    // Create the new JS object using the constructor's prototype
+    let obj = match Object::from_raw(
+        &scope,
+        crate::class_spec::JS_NewObjectForConstructor(cx, class, &args),
+    ) {
+        Some(obj) => obj,
+        None => return false,
+    };
+
     // Call the Rust constructor
     match T::constructor(&scope, &args) {
         Ok(instance) => {
-            unsafe { set_private(obj, instance) };
+            unsafe { set_private(obj.handle().get(), instance) };
+
+            // Post-construction hook: runs after the private data is at its
+            // final heap location, so GC write barriers are registered at
+            // stable addresses.
+            if T::post_init(&scope, obj.handle().get(), &args).is_err() {
+                return false;
+            }
+
+            #[cfg(debug_assertions)]
+            if let Some(data) = get_private::<T>(obj.handle().get()) {
+                data.debug_assert_fully_initialized();
+            }
 
             // For error-data classes, capture the current stack.
             if T::HAS_ERROR_DATA {
-                let obj_typed = Object::from_raw(&scope, obj).unwrap();
-                unsafe { capture_stack_from_error(&scope, &obj_typed) };
+                unsafe { capture_stack_from_error(&scope, &obj) };
             }
 
-            args.rval().set(unsafe { value::from_object(obj) });
+            args.rval()
+                .set(unsafe { value::from_object(obj.handle().get()) });
             true
         }
-        Err(()) => false,
+        Err(ExnThrown) => false,
     }
 }
 
@@ -1380,23 +1301,23 @@ pub unsafe extern "C" fn generic_class_trace<T: ClassDef>(trc: *mut JSTracer, ob
 ///
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
-pub unsafe fn get_arg<T: FromJSValConvertible<Config = ()>>(
+pub unsafe fn get_arg<T: FromJSVal<Config = ()>>(
     scope: &Scope<'_>,
     args: &CallArgs,
     index: u32,
-) -> Result<T, ()> {
+) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
         unsafe { crate::error::report_error_ascii(scope.cx_mut(), c"Not enough arguments") };
-        return Err(());
+        return Err(ExnThrown);
     }
     let val = crate::native::Handle::from_raw(args.get(index));
-    match unsafe { T::from_jsval(scope.cx_mut().raw_cx(), val, ()) }? {
-        ConversionResult::Success(v) => Ok(v),
-        ConversionResult::Failure(msg) => {
+    T::from_jsval(scope, val, ()).map_err(|e| match e {
+        ConversionError::ExnPending => ExnThrown,
+        ConversionError::Failure(msg) => {
             unsafe { crate::error::report_error_ascii(scope.cx_mut(), &msg) };
-            Err(())
+            ExnThrown
         }
-    }
+    })
 }
 
 /// Extract an integer argument with configurable conversion behavior.
@@ -1405,24 +1326,24 @@ pub unsafe fn get_arg<T: FromJSValConvertible<Config = ()>>(
 ///
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
-pub unsafe fn get_int_arg<T: FromJSValConvertible<Config = ConversionBehavior>>(
+pub unsafe fn get_int_arg<T: FromJSVal<Config = ConversionBehavior>>(
     scope: &Scope<'_>,
     args: &CallArgs,
     index: u32,
     behavior: ConversionBehavior,
-) -> Result<T, ()> {
+) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
         unsafe { crate::error::report_error_ascii(scope.cx_mut(), c"Not enough arguments") };
-        return Err(());
+        return Err(ExnThrown);
     }
     let val = crate::native::Handle::from_raw(args.get(index));
-    match unsafe { T::from_jsval(scope.cx_mut().raw_cx(), val, behavior) }? {
-        ConversionResult::Success(v) => Ok(v),
-        ConversionResult::Failure(msg) => {
+    T::from_jsval(scope, val, behavior).map_err(|e| match e {
+        ConversionError::ExnPending => ExnThrown,
+        ConversionError::Failure(msg) => {
             unsafe { crate::error::report_error_ascii(scope.cx_mut(), &msg) };
-            Err(())
+            ExnThrown
         }
-    }
+    })
 }
 
 /// Extract a stack newtype argument from CallArgs.
@@ -1440,10 +1361,10 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
     scope: &'s Scope<'_>,
     args: &CallArgs,
     index: u32,
-) -> Result<T, ()> {
+) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
         crate::error::report_error_ascii(scope.cx_mut(), c"Not enough arguments");
-        return Err(());
+        return Err(ExnThrown);
     }
     let val = *args.get(index);
     if !val.is_object() {
@@ -1454,7 +1375,7 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
         ))
         .unwrap_or_else(|_| CString::new("argument is not an object").unwrap());
         crate::error::throw_type_error(scope.cx_mut(), &msg);
-        return Err(());
+        return Err(ExnThrown);
     }
     let obj = val.to_object();
     let concrete_tag = crate::object::get_object_class(obj) as usize;
@@ -1467,7 +1388,7 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
         ))
         .unwrap_or_else(|_| CString::new("argument is not the expected class").unwrap());
         crate::error::throw_type_error(scope.cx_mut(), &msg);
-        return Err(());
+        return Err(ExnThrown);
     }
     let nn = NonNull::new(obj).unwrap();
     Ok(unsafe { T::from_handle_unchecked(scope.root_object(nn)) })
@@ -1481,11 +1402,14 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
 ///
 /// - The CallArgs must be from a valid JSNative call.
 /// - The `this` object must have private data of type `T`.
-pub unsafe fn get_this<'a, T: ClassDef>(scope: &Scope<'_>, args: &CallArgs) -> Result<&'a T, ()> {
+pub unsafe fn get_this<'a, T: ClassDef>(
+    scope: &Scope<'_>,
+    args: &CallArgs,
+) -> Result<&'a T, ExnThrown> {
     let this_val = args.thisv();
     if !this_val.is_object() {
         crate::error::throw_type_error(scope.cx_mut(), c"'this' is not an object");
-        return Err(());
+        return Err(ExnThrown);
     }
     let obj = this_val.to_object();
     match get_private_or_ancestor::<T>(obj) {
@@ -1495,7 +1419,7 @@ pub unsafe fn get_this<'a, T: ClassDef>(scope: &Scope<'_>, args: &CallArgs) -> R
                 scope.cx_mut(),
                 c"'this' does not have the expected private data",
             );
-            Err(())
+            Err(ExnThrown)
         }
     }
 }
@@ -1508,11 +1432,11 @@ pub unsafe fn get_this<'a, T: ClassDef>(scope: &Scope<'_>, args: &CallArgs) -> R
 pub unsafe fn get_this_mut<'a, T: ClassDef>(
     scope: &Scope<'_>,
     args: &CallArgs,
-) -> Result<&'a mut T, ()> {
+) -> Result<&'a mut T, ExnThrown> {
     let this_val = args.thisv();
     if !this_val.is_object() {
         crate::error::throw_type_error(scope.cx_mut(), c"'this' is not an object");
-        return Err(());
+        return Err(ExnThrown);
     }
     let obj = this_val.to_object();
     match get_private_or_ancestor_mut::<T>(obj) {
@@ -1522,7 +1446,7 @@ pub unsafe fn get_this_mut<'a, T: ClassDef>(
                 scope.cx_mut(),
                 c"'this' does not have the expected private data",
             );
-            Err(())
+            Err(ExnThrown)
         }
     }
 }
@@ -1532,11 +1456,11 @@ pub unsafe fn get_this_mut<'a, T: ClassDef>(
 /// # Safety
 ///
 /// - `cx` and `args` must be from a valid JSNative call.
-pub unsafe fn set_return<T: ToJSValConvertible>(scope: &Scope<'_>, args: &CallArgs, value: &T) {
-    value.to_jsval(
-        scope.cx_mut().raw_cx(),
-        MutableHandleValue::from_raw(args.rval()),
-    );
+pub unsafe fn set_return<'s, T: ToJSVal<'s>>(scope: &'s Scope<'s>, args: &CallArgs, value: &T) {
+    let val = value
+        .to_jsval(scope)
+        .expect("Failed to convert return value to JS");
+    args.rval().set(val.get());
 }
 
 // ============================================================================
@@ -1588,17 +1512,21 @@ autoref_reg!(
     __ConstantReg,
     "Autoref specialization helper for constant registration."
 );
+autoref_reg!(
+    __PostInitReg,
+    "Autoref specialization helper for post-construction initialization."
+);
 
 /// Trait for constructor registration via autoref specialization.
 /// The blanket impl on `&__CtorReg<T>` panics; `#[jsmethods]` provides
 /// the real impl on `__CtorReg<T>` directly.
 #[doc(hidden)]
 pub trait __ConstructorRegistrar<T: ClassDef> {
-    fn construct(&self, scope: &Scope<'_>, args: &CallArgs) -> Result<T, ()>;
+    fn construct(&self, scope: &Scope<'_>, args: &CallArgs) -> Result<T, ExnThrown>;
 }
 
 impl<T: ClassDef> __ConstructorRegistrar<T> for &__CtorReg<T> {
-    fn construct(&self, _scope: &Scope<'_>, _args: &CallArgs) -> Result<T, ()> {
+    fn construct(&self, _scope: &Scope<'_>, _args: &CallArgs) -> Result<T, ExnThrown> {
         panic!("No #[constructor] defined. Use #[jsmethods] with #[constructor] to define one.");
     }
 }
@@ -1659,6 +1587,30 @@ impl<T: ClassDef> __ConstantRegistrar<T> for &__ConstantReg<T> {
     }
 }
 
+/// Trait for post-construction initialization via autoref specialization.
+/// The blanket impl on `&__PostInitReg<T>` is a no-op; `#[jsmethods]` provides
+/// the real impl on `__PostInitReg<T>` directly when `#[post_init]` is used.
+#[doc(hidden)]
+pub trait __PostInitRegistrar<T: ClassDef> {
+    fn post_init(
+        &self,
+        scope: &Scope<'_>,
+        obj: *mut JSObject,
+        args: &CallArgs,
+    ) -> Result<(), ExnThrown>;
+}
+
+impl<T: ClassDef> __PostInitRegistrar<T> for &__PostInitReg<T> {
+    fn post_init(
+        &self,
+        _scope: &Scope<'_>,
+        _obj: *mut JSObject,
+        _args: &CallArgs,
+    ) -> Result<(), ExnThrown> {
+        Ok(())
+    }
+}
+
 /// Create a JS object backed by a Rust value constructed by `init`.
 ///
 /// The closure receives the newly allocated (but empty) JS object and
@@ -1673,11 +1625,11 @@ impl<T: ClassDef> __ConstantRegistrar<T> for &__ConstantReg<T> {
 pub unsafe fn create_instance_with<'s, T: ClassDef>(
     scope: &'s Scope<'_>,
     init: impl FnOnce(Object<'s>) -> T,
-) -> Result<Object<'s>, JSError> {
+) -> Result<Object<'s>, ExnThrown> {
     let global = scope.global();
     let proto = match get_prototype::<T>(global) {
         Some(p) => Object::from_raw_obj(scope, p).unwrap(),
-        None => return Err(JSError), // TODO: Actually throw an error here.
+        None => return Err(ExnThrown), // TODO: Actually throw an error here.
     };
 
     let class = T::class();
@@ -1708,10 +1660,10 @@ pub fn define_to_string_tag(
     tag_value: &str,
 ) {
     let tag_key = crate::symbol::get_well_known_key(scope, crate::native::SymbolCode::toStringTag);
-    let tag_str =
-        crate::string::from_str(scope, tag_value).expect("failed to create toStringTag string");
+    let tag_str = crate::string::Str::from_str(scope, tag_value)
+        .expect("failed to create toStringTag string");
     // SAFETY: tag_str is a live JSString* from `from_str` above, valid in the current scope.
-    let str_val = unsafe { value::from_string_raw(tag_str.get()) };
+    let str_val = unsafe { value::from_string_raw(tag_str.as_raw()) };
 
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let desc = crate::native::PropertyDescriptor {
         _bitfield_align_1: [0; 0],
@@ -1733,7 +1685,8 @@ pub fn define_to_string_tag(
     });
 
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let tag_id = tag_key);
-    let proto_handle: crate::native::HandleObject = proto;
-    crate::object::define_property_by_id(scope, proto_handle, tag_id.handle(), desc.handle())
+    let proto_obj = Object::from_handle(proto).expect("prototype is null");
+    proto_obj
+        .define_property_by_id(scope, tag_id.handle(), desc.handle())
         .expect("failed to define Symbol.toStringTag");
 }

@@ -186,7 +186,8 @@ impl Runtime {
     /// in that context. The caller is responsible for keeping the `Rc<Runtime>`
     /// alive for as long as the runtime is needed.
     pub fn init(config: &RuntimeConfig) -> Rc<Self> {
-        let mut mozjs_rt = unsafe { MozJSRuntime::create_with_internal_job_queues(engine_handle(), None) };
+        let mut mozjs_rt =
+            unsafe { MozJSRuntime::create_with_internal_job_queues(engine_handle(), None) };
         js::gc::init(mozjs_rt.cx());
 
         let rt = Rc::new(Self {
@@ -232,8 +233,11 @@ impl Runtime {
             module::init_module_loader(rt.rt(), base_path);
         }
 
-        rt.default_global
-            .set(rt.new_global().global().handle().get());
+        // Create the default global and register builtins.
+        // `new_global` sets `default_global` before registering classes
+        // so the GC trace callback can trace the ClassRegistry during
+        // class registration (where compacting GC may fire).
+        drop(rt.new_global());
         rt.run_initializer_script(config);
 
         rt
@@ -246,15 +250,14 @@ impl Runtime {
             &js::class::STARLING_GLOBAL_CLASS,
             RealmOptions::default(),
         );
-        let _global = scope.global();
 
-        // Install built-in host APIs.
-        // unsafe {
-        //     if !cpp_support::install(scope.cx_mut().raw_cx(), global.handle()) {
-        //         report_pending_exception(&scope);
-        //         process::exit(1);
-        //     }
-        // }
+        // Store the global in `default_global` before any class registration.
+        // Class registration allocates JS objects, which can trigger compacting
+        // GC (especially under GC zeal mode 14). The GC trace callback needs
+        // `default_global` to be set so it can find and trace the ClassRegistry's
+        // Heap entries — otherwise compaction moves prototype objects without
+        // updating the Heap pointers, leaving them stale.
+        self.default_global.set(scope.global().handle().get());
 
         unsafe {
             event_loop::timer::install_timer_globals(&scope, scope.global());
@@ -378,6 +381,7 @@ impl Drop for Runtime {
 ///
 /// - `trc` must be a valid `JSTracer` pointer provided by SpiderMonkey's GC.
 /// - `data` must point to a live `Runtime` instance.
+#[js::allow_unrooted]
 unsafe extern "C" fn trace_runtime_cb(trc: *mut JSTracer, data: *mut c_void) {
     let rt = &*(data as *const Runtime);
     rt.default_global.trace(trc);
@@ -387,5 +391,12 @@ unsafe extern "C" fn trace_runtime_cb(trc: *mut JSTracer, data: *mut c_void) {
         js::class::trace_class_registry_for_global(trc, global);
     }
     // Trace all tasks in the event loop (they may hold JS object references).
-    rt.event_loop.borrow().trace(trc);
+    //
+    // Use `as_ptr()` to bypass `RefCell` borrow tracking. GC tracing runs
+    // with JS execution paused (stop-the-world), so the `&mut EventLoop`
+    // on the caller's stack isn't being actively used — no aliasing hazard.
+    // A normal `borrow()` would panic when the event loop driver already
+    // holds a `borrow_mut()`.
+    let el = unsafe { &*rt.event_loop.as_ptr() };
+    el.trace(trc);
 }
