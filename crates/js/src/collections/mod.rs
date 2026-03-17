@@ -10,9 +10,9 @@
 //! ```ignore
 //! use crate::collections::map::Map;
 //!
-//! rooted!(&in(cx) let map = Map::new(cx)?);
-//! map.set(cx, key.handle(), val.handle())?;
-//! assert!(map.has(cx, key.handle())?);
+//! let map = Map::new(scope)?;
+//! map.set(scope, key, val)?;
+//! assert!(map.has(scope, key)?);
 //! ```
 
 pub mod map;

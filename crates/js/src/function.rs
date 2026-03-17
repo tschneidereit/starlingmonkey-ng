@@ -48,7 +48,6 @@ use mozjs::jsapi::{
     JSCLASS_FOREGROUND_FINALIZE, JSCLASS_RESERVED_SLOTS_SHIFT,
 };
 use mozjs::jsval::UndefinedValue;
-use mozjs::rooted;
 use mozjs::rust::wrappers2;
 
 use super::error::ExnThrown;
@@ -285,18 +284,19 @@ impl<'s> Stack<'s, Function> {
 
         // Create a carrier object that owns the closure pointer and will free
         // it in its GC finalizer.
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let carrier = unsafe {
+        let carrier = unsafe {
             wrappers2::JS_NewObjectWithGivenProto(
                 scope.cx_mut(),
                 &CLOSURE_CARRIER_CLASS,
                 mozjs::gc::HandleObject::null(),
             )
-        });
-        if carrier.get().is_null() {
+        };
+        let carrier = NonNull::new(carrier).ok_or_else(|| {
             // Allocation failed — free the already-boxed closure before returning.
             unsafe { drop(Box::from_raw(raw)) };
-            return Err(ExnThrown);
-        }
+            ExnThrown
+        })?;
+        let carrier = scope.root_object(carrier);
 
         // Store the closure pointer in the carrier's reserved slot 0.
         unsafe {
@@ -547,8 +547,7 @@ unsafe extern "C" fn closure_trampoline(
     // realm is always entered.
     // SAFETY: SpiderMonkey guarantees cx is valid and a realm is entered
     // when calling a native function.
-    let mut js_cx = mozjs::context::JSContext::from_ptr(std::ptr::NonNull::new_unchecked(cx));
-    let scope = crate::gc::scope::RootScope::from_current_realm(&mut js_cx);
+    let scope = crate::gc::scope::RootScope::from_current_realm(cx);
 
     let cb_args = CallbackArgs { args: &args };
 

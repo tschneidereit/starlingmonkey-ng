@@ -8,10 +8,9 @@
 
 use crate::gc::scope::Scope;
 use mozjs::jsapi::{
-    CloneDataPolicy, JSStructuredCloneCallbacks, JSStructuredCloneData, StructuredCloneScope, Value,
+    CloneDataPolicy, JSStructuredCloneCallbacks, JSStructuredCloneData, StructuredCloneScope,
 };
 use mozjs::jsval::UndefinedValue;
-use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::HandleValue;
 
@@ -22,17 +21,17 @@ use super::error::ExnThrown;
 /// # Safety
 ///
 /// `callbacks` must be a valid pointer (or null). `closure` is passed through.
-pub unsafe fn clone(
-    scope: &Scope<'_>,
+pub unsafe fn clone<'r>(
+    scope: &'r Scope<'_>,
     value: HandleValue,
     callbacks: *const JSStructuredCloneCallbacks,
     closure: *mut std::os::raw::c_void,
-) -> Result<Value, ExnThrown> {
-    rooted!(in(scope.raw_cx_no_gc()) let mut rval = UndefinedValue());
+) -> Result<HandleValue<'r>, ExnThrown> {
+    let mut rval = scope.root_value_mut(UndefinedValue());
     let ok =
-        wrappers2::JS_StructuredClone(scope.cx_mut(), value, rval.handle_mut(), callbacks, closure);
+        wrappers2::JS_StructuredClone(scope.cx_mut(), value, rval.reborrow(), callbacks, closure);
     ExnThrown::check(ok)?;
-    Ok(rval.get())
+    Ok(rval.handle())
 }
 
 /// Write a value into structured clone data.
@@ -70,26 +69,26 @@ pub unsafe fn write(
 ///
 /// `data` and `policy` must be valid pointers. `callbacks` may be null.
 /// `closure` is passed through to callbacks.
-pub unsafe fn read(
-    scope: &Scope<'_>,
+pub unsafe fn read<'r>(
+    scope: &'r Scope<'_>,
     data: *const JSStructuredCloneData,
     version: u32,
     clone_scope: StructuredCloneScope,
     policy: *const CloneDataPolicy,
     callbacks: *const JSStructuredCloneCallbacks,
     closure: *mut std::os::raw::c_void,
-) -> Result<Value, ExnThrown> {
-    rooted!(in(scope.raw_cx_no_gc()) let mut rval = UndefinedValue());
+) -> Result<HandleValue<'r>, ExnThrown> {
+    let mut rval = scope.root_value_mut(UndefinedValue());
     let ok = wrappers2::JS_ReadStructuredClone(
         scope.cx_mut(),
         data,
         version,
         clone_scope,
-        rval.handle_mut(),
+        rval.reborrow(),
         policy,
         callbacks,
         closure,
     );
     ExnThrown::check(ok)?;
-    Ok(rval.get())
+    Ok(rval.handle())
 }

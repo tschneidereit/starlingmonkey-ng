@@ -22,7 +22,7 @@ use crate::gc::handle::Stack;
 use crate::gc::scope::{RootScope, Scope};
 use crate::heap::{Heap as MozHeap, Trace};
 use crate::native::{
-    CallArgs, GCContext, HandleObject, JSContext, JSNative, JSObject, JSTracer, RawJSContext, Value,
+    CallArgs, GCContext, HandleObject, JSNative, JSObject, JSTracer, RawJSContext, Value,
 };
 use crate::value;
 use crate::Object;
@@ -129,12 +129,10 @@ pub fn get_class_object<'s>(
     scope: &'s Scope<'_>,
     key: JSProtoKey,
 ) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut objp: *mut JSObject = std::ptr::null_mut());
-    let ok = unsafe { wrappers2::JS_GetClassObject(scope.cx_mut(), key, objp.handle_mut()) };
+    let mut objp = scope.root_object_mut(std::ptr::null_mut());
+    let ok = unsafe { wrappers2::JS_GetClassObject(scope.cx_mut(), key, objp.reborrow()) };
     ExnThrown::check(ok)?;
-    NonNull::new(objp.get())
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
+    Ok(objp.handle())
 }
 
 /// Get the prototype for a standard class by `JSProtoKey`.
@@ -142,12 +140,10 @@ pub fn get_class_prototype<'s>(
     scope: &'s Scope<'_>,
     key: JSProtoKey,
 ) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut objp: *mut JSObject = std::ptr::null_mut());
-    let ok = unsafe { wrappers2::JS_GetClassPrototype(scope.cx_mut(), key, objp.handle_mut()) };
+    let mut objp = scope.root_object_mut(std::ptr::null_mut());
+    let ok = unsafe { wrappers2::JS_GetClassPrototype(scope.cx_mut(), key, objp.reborrow()) };
     ExnThrown::check(ok)?;
-    NonNull::new(objp.get())
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
+    Ok(objp.handle())
 }
 
 /// Get the `JSClass` for a standard class by `JSProtoKey`.
@@ -1147,8 +1143,7 @@ pub unsafe fn register_class<'s, T: ClassDef>(
 
     // Register inheritance information (parent accessor functions)
     T::register_inheritance();
-    let parent_proto = T::parent_prototype(scope);
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let parent_proto_rooted = parent_proto);
+    let parent_proto = scope.root_object(NonNull::new_unchecked(T::parent_prototype(scope)));
 
     // Use init_class to set up constructor + prototype.
     // The class name comes from T::class().name (a static C string pointer).
@@ -1156,7 +1151,7 @@ pub unsafe fn register_class<'s, T: ClassDef>(
         scope,
         global.handle(),
         class,
-        parent_proto_rooted.handle(),
+        parent_proto,
         class.name,
         Some(generic_constructor::<T>),
         0,
@@ -1179,9 +1174,9 @@ pub unsafe fn register_class<'s, T: ClassDef>(
         let name = CString::new(T::NAME).expect("Class name must not contain null bytes");
         let ctor_val = global
             .get_property(scope, &name)
+            .expect("getting ctor property failed after init_class");
+        let ctor_obj = Object::from_value(scope, ctor_val.get())
             .expect("constructor not found on global after init_class");
-        let ctor_obj =
-            Object::from_value(scope, ctor_val.get()).expect("constructor is not an object");
         let attrs = (crate::class_spec::JSPROP_READONLY
             | crate::class_spec::JSPROP_ENUMERATE
             | crate::class_spec::JSPROP_PERMANENT) as std::ffi::c_uint;
@@ -1193,7 +1188,8 @@ pub unsafe fn register_class<'s, T: ClassDef>(
 
         // WebIDL §3.7.3: constants are also defined on the prototype.
         if T::CONSTANTS_ON_PROTOTYPE {
-            let proto_obj = Object::from_handle(proto).expect("prototype is null");
+            let proto_obj =
+                Object::from_handle(proto).expect("prototype not found after init_class");
             for &(const_name, value) in &constants {
                 proto_obj
                     .define_property(scope, const_name, &value, attrs)
@@ -1213,17 +1209,14 @@ unsafe extern "C" fn generic_constructor<T: ClassDef>(
     argc: u32,
     vp: *mut Value,
 ) -> bool {
+    // SAFETY: SpiderMonkey guarantees cx is valid and a realm is entered during a native call.
+    let scope = RootScope::from_current_realm(cx);
     let args = CallArgs::from_vp(vp, argc);
 
     if !args.is_constructing() {
-        let mut js_cx = JSContext::from_ptr(NonNull::new_unchecked(cx));
-        crate::error::throw_type_error(&mut js_cx, c"Constructor must be called with 'new'");
+        crate::error::throw_type_error(&scope, c"Constructor must be called with 'new'");
         return false;
     }
-
-    // SAFETY: SpiderMonkey guarantees cx is valid and a realm is entered during a native call.
-    let mut js_cx = JSContext::from_ptr(NonNull::new_unchecked(cx));
-    let scope = RootScope::from_current_realm(&mut js_cx);
 
     // Get the JSClass for this type
     let class: &'static JSClass = T::class();
@@ -1256,7 +1249,7 @@ unsafe extern "C" fn generic_constructor<T: ClassDef>(
 
             // For error-data classes, capture the current stack.
             if T::HAS_ERROR_DATA {
-                unsafe { capture_stack_from_error(&scope, &obj) };
+                capture_stack_from_error(&scope, &obj);
             }
 
             args.rval()
@@ -1301,22 +1294,21 @@ pub unsafe extern "C" fn generic_class_trace<T: ClassDef>(trc: *mut JSTracer, ob
 ///
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
-pub unsafe fn get_arg<T: FromJSVal<Config = ()>>(
-    scope: &Scope<'_>,
+pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
+    scope: &'s Scope<'s>,
     args: &CallArgs,
     index: u32,
 ) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
-        unsafe { crate::error::report_error_ascii(scope.cx_mut(), c"Not enough arguments") };
-        return Err(ExnThrown);
+        return Err(crate::error::report_error_ascii(
+            scope,
+            c"Not enough arguments",
+        ));
     }
     let val = crate::native::Handle::from_raw(args.get(index));
     T::from_jsval(scope, val, ()).map_err(|e| match e {
         ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => {
-            unsafe { crate::error::report_error_ascii(scope.cx_mut(), &msg) };
-            ExnThrown
-        }
+        ConversionError::Failure(msg) => crate::error::report_error_ascii(scope, &msg),
     })
 }
 
@@ -1326,23 +1318,22 @@ pub unsafe fn get_arg<T: FromJSVal<Config = ()>>(
 ///
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
-pub unsafe fn get_int_arg<T: FromJSVal<Config = ConversionBehavior>>(
-    scope: &Scope<'_>,
+pub unsafe fn get_int_arg<'s, T: FromJSVal<'s, Config = ConversionBehavior>>(
+    scope: &'s Scope<'s>,
     args: &CallArgs,
     index: u32,
     behavior: ConversionBehavior,
 ) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
-        unsafe { crate::error::report_error_ascii(scope.cx_mut(), c"Not enough arguments") };
-        return Err(ExnThrown);
+        return Err(crate::error::report_error_ascii(
+            scope,
+            c"Not enough arguments",
+        ));
     }
     let val = crate::native::Handle::from_raw(args.get(index));
     T::from_jsval(scope, val, behavior).map_err(|e| match e {
         ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => {
-            unsafe { crate::error::report_error_ascii(scope.cx_mut(), &msg) };
-            ExnThrown
-        }
+        ConversionError::Failure(msg) => crate::error::report_error_ascii(scope, &msg),
     })
 }
 
@@ -1363,8 +1354,10 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
     index: u32,
 ) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
-        crate::error::report_error_ascii(scope.cx_mut(), c"Not enough arguments");
-        return Err(ExnThrown);
+        return Err(crate::error::report_error_ascii(
+            scope,
+            c"Not enough arguments",
+        ));
     }
     let val = *args.get(index);
     if !val.is_object() {
@@ -1373,9 +1366,8 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
             index,
             T::Inner::NAME,
         ))
-        .unwrap_or_else(|_| CString::new("argument is not an object").unwrap());
-        crate::error::throw_type_error(scope.cx_mut(), &msg);
-        return Err(ExnThrown);
+        .unwrap_or_else(|_| c"argument is not an object".into());
+        return Err(crate::error::throw_type_error(scope, &msg));
     }
     let obj = val.to_object();
     let concrete_tag = crate::object::get_object_class(obj) as usize;
@@ -1386,9 +1378,8 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
             index,
             T::Inner::NAME,
         ))
-        .unwrap_or_else(|_| CString::new("argument is not the expected class").unwrap());
-        crate::error::throw_type_error(scope.cx_mut(), &msg);
-        return Err(ExnThrown);
+        .unwrap_or_else(|_| c"argument is not the expected class".into());
+        return Err(crate::error::throw_type_error(scope, &msg));
     }
     let nn = NonNull::new(obj).unwrap();
     Ok(unsafe { T::from_handle_unchecked(scope.root_object(nn)) })
@@ -1408,19 +1399,18 @@ pub unsafe fn get_this<'a, T: ClassDef>(
 ) -> Result<&'a T, ExnThrown> {
     let this_val = args.thisv();
     if !this_val.is_object() {
-        crate::error::throw_type_error(scope.cx_mut(), c"'this' is not an object");
-        return Err(ExnThrown);
+        return Err(crate::error::throw_type_error(
+            scope,
+            c"'this' is not an object",
+        ));
     }
     let obj = this_val.to_object();
     match get_private_or_ancestor::<T>(obj) {
         Some(data) => Ok(data),
-        None => {
-            crate::error::throw_type_error(
-                scope.cx_mut(),
-                c"'this' does not have the expected private data",
-            );
-            Err(ExnThrown)
-        }
+        None => Err(crate::error::throw_type_error(
+            scope,
+            &CString::new(format!("'this' is not of type {}", T::NAME)).unwrap(),
+        )),
     }
 }
 
@@ -1435,18 +1425,19 @@ pub unsafe fn get_this_mut<'a, T: ClassDef>(
 ) -> Result<&'a mut T, ExnThrown> {
     let this_val = args.thisv();
     if !this_val.is_object() {
-        crate::error::throw_type_error(scope.cx_mut(), c"'this' is not an object");
-        return Err(ExnThrown);
+        return Err(crate::error::throw_type_error(
+            scope,
+            c"'this' is not an object",
+        ));
     }
     let obj = this_val.to_object();
     match get_private_or_ancestor_mut::<T>(obj) {
         Some(data) => Ok(data),
         None => {
-            crate::error::throw_type_error(
-                scope.cx_mut(),
-                c"'this' does not have the expected private data",
-            );
-            Err(ExnThrown)
+            return Err(crate::error::throw_type_error(
+                scope,
+                &CString::new(format!("'this' is not of type {}", T::NAME)).unwrap(),
+            ));
         }
     }
 }

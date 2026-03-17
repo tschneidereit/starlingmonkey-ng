@@ -10,13 +10,13 @@ use std::ptr::NonNull;
 
 use crate::gc::scope::Scope;
 use crate::{Object, Promise};
-use mozjs::gc::{Handle, HandleObject, HandleString};
+use mozjs::gc::{Handle, HandleObject, HandleString, HandleValue};
 use mozjs::jsapi::mozilla::Utf8Unit;
 use mozjs::jsapi::{
     JSObject, JSScript, JSString, ModuleErrorBehaviour, ModuleType, ReadOnlyCompileOptions,
     SourceText,
 };
-use mozjs::rooted;
+use mozjs::jsval::UndefinedValue;
 use mozjs::rust::wrappers2;
 
 use super::error::ExnThrown;
@@ -76,16 +76,16 @@ pub fn link(scope: &Scope<'_>, module_record: Object) -> Result<(), ExnThrown> {
 /// Evaluate a linked module.
 ///
 /// Returns the evaluation result (typically a promise for top-level await).
-pub fn evaluate(
-    scope: &Scope<'_>,
+pub fn evaluate<'r>(
+    scope: &'r Scope<'_>,
     module_record: Object,
-) -> Result<mozjs::jsapi::Value, ExnThrown> {
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = mozjs::jsval::UndefinedValue());
+) -> Result<HandleValue<'r>, ExnThrown> {
+    let mut rval = scope.root_value_mut(UndefinedValue());
     let ok = unsafe {
-        wrappers2::ModuleEvaluate(scope.cx_mut(), module_record.handle(), rval.handle_mut())
+        wrappers2::ModuleEvaluate(scope.cx_mut(), module_record.handle(), rval.reborrow())
     };
     ExnThrown::check(ok)?;
-    Ok(rval.get())
+    Ok(rval.handle())
 }
 
 /// Throw if module evaluation failed.

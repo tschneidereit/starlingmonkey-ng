@@ -2163,7 +2163,7 @@ fn gen_method_native(
                     let __handle = unsafe {
                         ::js::native::Handle::from_raw(__args.get(__i))
                     };
-                    match <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
+                    match <#inner_ty as ::js::conversion::FromJSVal<'_>>::from_jsval(
                         &scope,
                         __handle,
                         ()
@@ -2171,7 +2171,7 @@ fn gen_method_native(
                         Ok(__v) => __rest_vec.push(__v),
                         Err(e) => {
                             if let ::js::conversion::ConversionError::Failure(reason) = e {
-                                ::js::error::throw_type_error(scope.cx_mut(), &*reason);
+                                ::js::error::throw_type_error(&scope, &*reason);
                             }
                             return false;
                         },
@@ -2286,8 +2286,7 @@ fn gen_method_native(
             argc: u32,
             vp: *mut ::js::native::Value,
         ) -> bool {
-            let mut __cx = unsafe { ::js::native::JSContext::from_ptr(::std::ptr::NonNull::new_unchecked(raw_cx)) };
-            let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(&mut __cx) };
+            let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(raw_cx) };
             let __args = ::js::native::CallArgs::from_vp(vp, argc);
             #this_extraction
             #(#arg_extractions)*
@@ -2434,8 +2433,7 @@ fn gen_accessor_native(
             argc: u32,
             vp: *mut ::js::native::Value,
         ) -> bool {
-            let mut __cx = unsafe { ::js::native::JSContext::from_ptr(::std::ptr::NonNull::new_unchecked(raw_cx)) };
-            let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(&mut __cx) };
+            let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(raw_cx) };
             let __args = ::js::native::CallArgs::from_vp(vp, argc);
             #this_extraction
             #body
@@ -2700,8 +2698,7 @@ pub fn jsmodule(attr: TokenStream, item: TokenStream) -> TokenStream {
                 argc: u32,
                 vp: *mut ::js::native::Value,
             ) -> bool {
-                let mut __cx = unsafe { ::js::native::JSContext::from_ptr(::std::ptr::NonNull::new_unchecked(raw_cx)) };
-                let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(&mut __cx) };
+                let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(raw_cx) };
                 let args = ::js::native::CallArgs::from_vp(vp, argc);
                 #(#arg_extractions)*
                 #body
@@ -2988,8 +2985,7 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
                 argc: u32,
                 vp: *mut ::js::native::Value,
             ) -> bool {
-                let mut __cx = unsafe { ::js::native::JSContext::from_ptr(::std::ptr::NonNull::new_unchecked(raw_cx)) };
-                let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(&mut __cx) };
+                let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(raw_cx) };
                 let args = ::js::native::CallArgs::from_vp(vp, argc);
                 #(#arg_extractions)*
                 #body
@@ -3272,8 +3268,7 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
                 argc: u32,
                 vp: *mut ::js::native::Value,
             ) -> bool {
-                let mut __cx = unsafe { ::js::native::JSContext::from_ptr(::std::ptr::NonNull::new_unchecked(raw_cx)) };
-                let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(&mut __cx) };
+                let scope = unsafe { ::js::gc::scope::RootScope::from_current_realm(raw_cx) };
                 let args = ::js::native::CallArgs::from_vp(vp, argc);
                 #(#arg_extractions)*
                 #body

@@ -309,7 +309,7 @@ impl Runtime {
     ///
     /// A realm must already be entered on this runtime's context.
     pub unsafe fn scope(&self) -> RootScope<'_, js::gc::scope::EnteredRealm> {
-        RootScope::from_current_realm(self.mozjs_rt_mut().cx())
+        RootScope::from_current_realm(self.mozjs_rt_mut().cx().raw_cx())
     }
 
     /// Returns the underlying mozjs `Runtime`.

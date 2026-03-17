@@ -208,12 +208,6 @@ pub mod module_raw {
     };
 }
 
-/// The `rooted!` macro for stack-allocating GC roots.
-///
-/// This is sometimes necessary in low-level code that interacts directly
-/// with SpiderMonkey. Prefer `Scope::root_*` methods when possible.
-pub use mozjs::rooted;
-
 pub use macros::{allow_unrooted, allow_unrooted_interior, must_root};
 
 use crate::gc::handle::Stack;

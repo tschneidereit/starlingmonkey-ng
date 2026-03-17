@@ -13,9 +13,9 @@ use std::ptr::NonNull;
 use crate::builtins::JSType;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
-use mozjs::jsapi::{JSString, RegExpFlags, Value};
+use mozjs::gc::HandleValue;
+use mozjs::jsapi::{JSString, RegExpFlags};
 use mozjs::jsval::UndefinedValue;
-use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::HandleObject;
 
@@ -100,14 +100,14 @@ impl<'s> Stack<'s, RegExp> {
     ///
     /// The `chars` slice must be a valid UTF-16 string and must remain valid for
     /// the duration of this call.
-    pub unsafe fn execute_no_statics(
+    pub unsafe fn execute_no_statics<'r>(
         &self,
-        scope: &Scope<'_>,
+        scope: &'r Scope<'_>,
         chars: &[u16],
         indexp: &mut usize,
         test: bool,
-    ) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
+    ) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = wrappers2::ExecuteRegExpNoStatics(
             scope.cx_mut(),
             self.handle(),
@@ -115,33 +115,33 @@ impl<'s> Stack<'s, RegExp> {
             chars.len(),
             indexp,
             test,
-            rval.handle_mut(),
+            rval.reborrow(),
         );
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Check whether a regular expression pattern is syntactically valid.
     ///
     /// If the pattern is invalid, returns the error value. If valid,
     /// returns `undefined`.
-    pub fn check_syntax(
-        scope: &Scope<'_>,
+    pub fn check_syntax<'r>(
+        scope: &'r Scope<'_>,
         chars: &[u16],
         flags: RegExpFlags,
-    ) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut error = UndefinedValue());
+    ) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut error = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
             wrappers2::CheckRegExpSyntax(
                 scope.cx_mut(),
                 chars.as_ptr(),
                 chars.len(),
                 flags,
-                error.handle_mut(),
+                error.reborrow(),
             )
         };
         ExnThrown::check(ok)?;
-        Ok(error.get())
+        Ok(error.handle())
     }
 }
 

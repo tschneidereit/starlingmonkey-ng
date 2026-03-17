@@ -6,10 +6,10 @@
 //! use crate::prelude::*;
 //! ```
 
-pub use super::error::{CapturedError, ConversionError, ExnThrown};
+pub use super::error::{CapturedError, ExnThrown};
 
 // Re-export the conversion traits.
-pub use super::conversion::{FromJSVal, ToJSVal};
+pub use super::conversion::{ConversionError, FromJSVal, ToJSVal};
 
 // Re-export the scope-based rooting types.
 pub use crate::gc::scope::{InnerScope, RootScope, Scope};

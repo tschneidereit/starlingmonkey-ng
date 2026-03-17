@@ -47,7 +47,7 @@ use std::ptr;
 use js::conversion::ToJSVal;
 use js::heap::{Heap, Trace};
 use js::module_raw::{transform_str_to_source_text, CompileOptionsWrapper, SetModulePrivate};
-use js::native::{HandleObject, JSContext, JSNative, JSObject, JSString, JSTracer, Value};
+use js::native::{HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
 use js::prelude::RootScope;
 use js::{value, Object};
 use oxc_resolver::{ResolveOptions, Resolver};
@@ -200,13 +200,10 @@ unsafe extern "C" fn module_resolve_hook(
     match resolve_file_module(cx, &specifier) {
         Ok(obj) => obj,
         Err(msg) => {
-            let c_msg = CString::new(msg)
-                .unwrap_or_else(|_| CString::new("Module resolution failed").unwrap());
+            let c_msg = CString::new(msg).unwrap_or_else(|_| c"Module resolution failed".into());
             // SAFETY: cx is a valid RawJSContext from the resolve hook.
-            let mut js_cx = unsafe {
-                js::native::JSContext::from_ptr(std::ptr::NonNull::new_unchecked(cx as _))
-            };
-            js::error::report_error_ascii(&mut js_cx, &c_msg);
+            let scope = RootScope::from_current_realm(cx);
+            js::error::report_error_ascii(&scope, &c_msg);
             ptr::null_mut()
         }
     }
@@ -303,8 +300,7 @@ unsafe fn jsstring_to_string(
 ) -> Option<String> {
     use js::conversion::jsstr_to_string;
     use std::ptr::NonNull;
-    let mut js_cx = JSContext::from_ptr(NonNull::new_unchecked(cx));
-    let scope = RootScope::from_current_realm(&mut js_cx);
+    let scope = RootScope::from_current_realm(cx);
     NonNull::new(s).map(|nn| jsstr_to_string(&scope, nn))
 }
 

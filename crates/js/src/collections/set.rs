@@ -7,9 +7,7 @@ use std::ptr::NonNull;
 use crate::builtins::JSType;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
-use mozjs::jsapi::Value;
 use mozjs::jsval::UndefinedValue;
-use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::{HandleObject, HandleValue};
 
@@ -78,27 +76,27 @@ impl<'s> Stack<'s, Set> {
     }
 
     /// Get an iterator over the set's keys (same as values for sets).
-    pub fn keys(&self, scope: &Scope<'_>) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::SetKeys(scope.cx_mut(), self.handle(), rval.handle_mut()) };
+    pub fn keys<'r>(&self, scope: &'r Scope<'_>) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
+        let ok = unsafe { wrappers2::SetKeys(scope.cx_mut(), self.handle(), rval.reborrow()) };
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Get an iterator over the set's values.
-    pub fn values(&self, scope: &Scope<'_>) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::SetValues(scope.cx_mut(), self.handle(), rval.handle_mut()) };
+    pub fn values<'r>(&self, scope: &'r Scope<'_>) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
+        let ok = unsafe { wrappers2::SetValues(scope.cx_mut(), self.handle(), rval.reborrow()) };
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Get an iterator over the set's entries.
-    pub fn entries(&self, scope: &Scope<'_>) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::SetEntries(scope.cx_mut(), self.handle(), rval.handle_mut()) };
+    pub fn entries<'r>(&self, scope: &'r Scope<'_>) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
+        let ok = unsafe { wrappers2::SetEntries(scope.cx_mut(), self.handle(), rval.reborrow()) };
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Call a callback for each value in the set.

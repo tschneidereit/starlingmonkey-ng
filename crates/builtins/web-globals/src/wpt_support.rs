@@ -46,8 +46,7 @@ unsafe extern "C" fn eval_script_native(
 ) -> bool {
     use js::prelude::RootScope;
 
-    let mut cx = js::native::JSContext::from_ptr(std::ptr::NonNull::new_unchecked(raw_cx));
-    let scope = RootScope::from_current_realm(&mut cx);
+    let scope = RootScope::from_current_realm(raw_cx);
     let args = js::native::CallArgs::from_vp(vp, argc);
     let source =
         match String::from_jsval(&scope, Handle::from_raw(args.get(0)), ()).inspect_err(|e| {

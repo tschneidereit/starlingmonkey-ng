@@ -11,7 +11,7 @@
 //!
 //! [`DOMException`]: https://webidl.spec.whatwg.org/#idl-DOMException
 
-use js::error::ThrowException;
+use js::error::{ExnThrown, ThrowException};
 use js::gc::scope::Scope;
 use js::native::{ExceptionStackBehavior, HandleValueArray};
 use js::prelude::ToJSVal;
@@ -158,15 +158,15 @@ impl DOMException {
 /// This creates a new DOMException object via the JS constructor and sets it
 /// as the pending exception. Returns `false` to indicate an exception has
 /// been thrown (for use in JSNative return values).
-pub fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) {
+pub fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) -> ExnThrown {
     // Build the constructor arguments: [message, name].
     let name_val = match name.to_jsval(scope) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return ExnThrown,
     };
     let msg_val = match message.to_jsval(scope) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return ExnThrown,
     };
 
     let argv = [msg_val.get(), name_val.get()];
@@ -179,26 +179,24 @@ pub fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) {
     let global = scope.global();
     let ctor_val = match global.get_property(scope, c"DOMException") {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return ExnThrown,
     };
 
     if !ctor_val.is_object() {
-        unsafe {
-            js::error::throw_type_error(scope.cx_mut(), c"DOMException constructor not found")
-        };
-        return;
+        js::error::throw_type_error(scope, c"DOMException constructor not found");
+        return ExnThrown;
     }
 
     let exception = match js::Function::construct(scope, ctor_val, &hva) {
         Ok(obj) => obj,
-        Err(_) => return,
+        Err(_) => return ExnThrown,
     };
 
     // Set the created DOMException as the pending exception.
     let exc_val = exception
         .to_jsval(scope)
         .expect("Value conversion doesn't fail");
-    js::exception::set_pending(scope, exc_val, ExceptionStackBehavior::Capture);
+    js::exception::set_pending(scope, exc_val, ExceptionStackBehavior::Capture)
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +250,8 @@ impl std::fmt::Display for DOMExceptionError {
 impl std::error::Error for DOMExceptionError {}
 
 impl ThrowException for DOMExceptionError {
-    unsafe fn throw(self, scope: &Scope<'_>) {
-        throw_dom_exception(scope, self.name, &self.message);
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+        throw_dom_exception(scope, self.name, &self.message)
     }
 }
 

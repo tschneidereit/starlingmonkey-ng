@@ -7,9 +7,7 @@ use std::ptr::NonNull;
 use crate::builtins::JSType;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
-use mozjs::jsapi::Value;
 use mozjs::jsval::UndefinedValue;
-use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::HandleValue;
 
@@ -48,13 +46,13 @@ impl<'s> Stack<'s, WeakMap> {
     ///
     /// This is named `lookup` rather than `get` to avoid confusion with
     /// `Handle::get`.
-    pub fn lookup(&self, scope: &Scope<'_>, key: HandleValue) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
+    pub fn lookup<'r>(&self, scope: &'r Scope<'_>, key: HandleValue<'r>) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
-            wrappers2::GetWeakMapEntry(scope.cx(), self.handle(), key, rval.handle_mut())
+            wrappers2::GetWeakMapEntry(scope.cx(), self.handle(), key, rval.reborrow())
         };
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Insert a key-value pair.

@@ -24,7 +24,6 @@ use std::ptr;
 
 use crate::gc::scope::Scope;
 use crate::Object;
-use mozjs::context::JSContext;
 use mozjs::jsapi::{
     JSErrorFormatString, JSExnType, JSString, JS_ClearPendingException, JS_GetPendingException,
     JS_IsExceptionPending, JS_ReportErrorNumberUTF8, StackFormat,
@@ -81,16 +80,15 @@ impl ExnThrown {
                 return CapturedError::default();
             }
 
-            rooted!(in(raw) let mut exc_val = UndefinedValue());
-            if !JS_GetPendingException(raw, exc_val.handle_mut().into()) {
+            let mut exc_val = scope.root_value_mut(UndefinedValue());
+            if !JS_GetPendingException(raw, exc_val.reborrow().into()) {
                 return CapturedError::default();
             }
             JS_ClearPendingException(raw);
 
             // Try to extract the error report if the exception is an Error object.
-            let exc = exc_val.get();
-            if exc.is_object() {
-                let exc_obj = Object::from_value(scope, exc).unwrap();
+            if exc_val.is_object() {
+                let exc_obj = Object::from_value(scope, *exc_val).unwrap();
                 let report = mozjs::jsapi::JS_ErrorFromException(raw, exc_obj.handle().into());
 
                 // Try to extract the stack trace from the error object.
@@ -216,21 +214,6 @@ impl fmt::Display for CapturedError {
 
 impl std::error::Error for CapturedError {}
 
-/// Error type for type-conversion mismatches when extracting Rust values from
-/// a [`JSVal`](mozjs::jsval::JSVal).
-///
-/// This is a pure Rust error — no JavaScript exception is involved.
-#[derive(Debug, Clone)]
-pub struct ConversionError(pub &'static str);
-
-impl fmt::Display for ConversionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for ConversionError {}
-
 // ---------------------------------------------------------------------------
 // Throw helpers
 // ---------------------------------------------------------------------------
@@ -288,65 +271,45 @@ unsafe extern "C" fn get_error_message(
 /// Throw a `TypeError` with the given message and return `ExnThrown`.
 ///
 /// The message must be a valid C string (no interior NUL bytes).
-///
-/// # Safety
-///
-/// A realm must be entered on `cx`.
-pub unsafe fn throw_type_error(cx: &mut JSContext, error: &CStr) -> ExnThrown {
-    throw_js_error(cx, error, JSExnType::JSEXN_TYPEERR as u32);
-    ExnThrown
+pub fn throw_type_error(scope: &Scope<'_>, error: &CStr) -> ExnThrown {
+    throw_js_error(scope, error, JSExnType::JSEXN_TYPEERR as u32)
 }
 
 /// Throw a `RangeError` with the given message and return `ExnThrown`.
-///
-/// # Safety
-///
-/// A realm must be entered on `cx`.
-pub unsafe fn throw_range_error(cx: &mut JSContext, error: &CStr) -> ExnThrown {
-    throw_js_error(cx, error, JSExnType::JSEXN_RANGEERR as u32);
-    ExnThrown
+pub fn throw_range_error(scope: &Scope<'_>, error: &CStr) -> ExnThrown {
+    throw_js_error(scope, error, JSExnType::JSEXN_RANGEERR as u32)
 }
 
 /// Throw an `InternalError` with the given message and return `ExnThrown`.
-///
-/// # Safety
-///
-/// A realm must be entered on `cx`.
-pub unsafe fn throw_internal_error(cx: &mut JSContext, error: &CStr) -> ExnThrown {
-    throw_js_error(cx, error, JSExnType::JSEXN_INTERNALERR as u32);
-    ExnThrown
+pub fn throw_internal_error(scope: &Scope<'_>, error: &CStr) -> ExnThrown {
+    throw_js_error(scope, error, JSExnType::JSEXN_INTERNALERR as u32)
 }
 
 /// Throw a `SyntaxError` with the given message and return `ExnThrown`.
-///
-/// # Safety
-///
-/// A realm must be entered on `cx`.
-pub unsafe fn throw_syntax_error(cx: &mut JSContext, error: &CStr) -> ExnThrown {
-    throw_js_error(cx, error, JSExnType::JSEXN_SYNTAXERR as u32);
-    ExnThrown
+pub fn throw_syntax_error(scope: &Scope<'_>, error: &CStr) -> ExnThrown {
+    throw_js_error(scope, error, JSExnType::JSEXN_SYNTAXERR as u32)
 }
 
-unsafe fn throw_js_error(cx: &mut JSContext, error: &CStr, error_number: u32) {
-    JS_ReportErrorNumberUTF8(
-        cx.raw_cx(),
-        Some(get_error_message),
-        std::ptr::null_mut(),
-        error_number,
-        error.as_ptr(),
-    );
+fn throw_js_error(scope: &Scope<'_>, error: &CStr, error_number: u32) -> ExnThrown {
+    unsafe {
+        JS_ReportErrorNumberUTF8(
+            scope.cx_mut().raw_cx(),
+            Some(get_error_message),
+            std::ptr::null_mut(),
+            error_number,
+            error.as_ptr(),
+        )
+    };
+    ExnThrown
 }
 
 /// Report a simple ASCII error message, setting a pending exception.
 ///
 /// This is a lightweight alternative to the typed error functions above.
 /// The message is reported as a generic `Error` (not `TypeError`, etc.).
-///
-/// # Safety
-///
-/// A realm must be entered on `cx`.
-pub unsafe fn report_error_ascii(cx: &mut JSContext, msg: &CStr) {
-    mozjs::rust::wrappers2::ReportErrorASCII(cx, msg.as_ptr());
+pub fn report_error_ascii(scope: &Scope<'_>, msg: &CStr) -> ExnThrown {
+    unsafe { mozjs::rust::wrappers2::ReportErrorASCII(scope.cx_mut(), msg.as_ptr()) };
+    ExnThrown
 }
 
 // ---------------------------------------------------------------------------
@@ -380,10 +343,10 @@ impl TypeError {
     /// # Safety
     ///
     /// A realm must be entered on the scope's context.
-    pub unsafe fn throw(&self, scope: &Scope<'_>) {
+    pub fn throw(&self, scope: &Scope<'_>) -> ExnThrown {
         let c_msg =
             CString::new(self.0.as_str()).unwrap_or_else(|_| CString::new("type error").unwrap());
-        throw_type_error(scope.cx_mut(), &c_msg);
+        throw_type_error(scope, &c_msg)
     }
 }
 
@@ -403,14 +366,10 @@ pub struct RangeError(pub String);
 
 impl RangeError {
     /// Throw this error as a pending JavaScript `RangeError` exception.
-    ///
-    /// # Safety
-    ///
-    /// A realm must be entered on the scope's context.
-    pub unsafe fn throw(&self, scope: &Scope<'_>) {
+    pub fn throw(&self, scope: &Scope<'_>) -> ExnThrown {
         let c_msg =
             CString::new(self.0.as_str()).unwrap_or_else(|_| CString::new("range error").unwrap());
-        throw_range_error(scope.cx_mut(), &c_msg);
+        throw_range_error(scope, &c_msg)
     }
 }
 
@@ -430,14 +389,10 @@ pub struct SyntaxError(pub String);
 
 impl SyntaxError {
     /// Throw this error as a pending JavaScript `SyntaxError` exception.
-    ///
-    /// # Safety
-    ///
-    /// A realm must be entered on the scope's context.
-    pub unsafe fn throw(&self, scope: &Scope<'_>) {
+    pub fn throw(&self, scope: &Scope<'_>) -> ExnThrown {
         let c_msg =
             CString::new(self.0.as_str()).unwrap_or_else(|_| CString::new("syntax error").unwrap());
-        throw_syntax_error(scope.cx_mut(), &c_msg);
+        throw_syntax_error(scope, &c_msg)
     }
 }
 
@@ -464,51 +419,44 @@ impl std::error::Error for SyntaxError {}
 ///
 /// Custom error types (like `DOMExceptionError`) can implement this trait to
 /// throw domain-specific exception objects.
-///
-/// # Safety
-///
-/// Implementations must set a pending exception on the context. The scope
-/// guarantees that a realm is entered.
 pub trait ThrowException {
     /// Set a pending JavaScript exception from this error value.
     ///
     /// After this call, a JS exception must be pending on the context.
-    ///
-    /// # Safety
-    ///
-    /// A realm must be entered on the scope's context.
-    unsafe fn throw(self, scope: &Scope<'_>);
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown;
 }
 
 impl ThrowException for String {
     /// Throw a `TypeError` with this string as the message.
-    unsafe fn throw(self, scope: &Scope<'_>) {
-        throw_error(scope, &self);
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+        throw_error(scope, &self)
     }
 }
 
 impl ThrowException for TypeError {
-    unsafe fn throw(self, scope: &Scope<'_>) {
-        TypeError::throw(&self, scope);
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+        TypeError::throw(&self, scope)
     }
 }
 
 impl ThrowException for RangeError {
-    unsafe fn throw(self, scope: &Scope<'_>) {
-        RangeError::throw(&self, scope);
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+        RangeError::throw(&self, scope)
     }
 }
 
 impl ThrowException for SyntaxError {
-    unsafe fn throw(self, scope: &Scope<'_>) {
-        SyntaxError::throw(&self, scope);
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+        SyntaxError::throw(&self, scope)
     }
 }
 
 impl ThrowException for ExnThrown {
     /// No-op: `ExnThrown` indicates an exception is already pending on the
     /// context, so there is nothing additional to throw.
-    unsafe fn throw(self, _scope: &Scope<'_>) {}
+    fn throw(self, _scope: &Scope<'_>) -> ExnThrown {
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -523,9 +471,9 @@ impl ThrowException for ExnThrown {
 /// # Safety
 ///
 /// A realm must be entered on the scope's context.
-pub unsafe fn throw_error(scope: &Scope<'_>, msg: &str) {
+pub fn throw_error(scope: &Scope<'_>, msg: &str) -> ExnThrown {
     let c_msg = CString::new(msg).unwrap_or_else(|_| CString::new("unknown error").unwrap());
-    throw_type_error(scope.cx_mut(), &c_msg);
+    throw_type_error(scope, &c_msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -543,10 +491,7 @@ pub unsafe fn throw_error(scope: &Scope<'_>, msg: &str) {
 ///
 /// Silently returns without setting `stack` if any step fails.
 ///
-/// # Safety
-///
-/// Must be called within a valid scope with an active realm.
-pub unsafe fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
+pub fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
     use crate::class_spec::JSProtoKey;
     use crate::native::HandleValueArray;
 

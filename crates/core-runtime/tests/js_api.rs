@@ -162,20 +162,20 @@ fn test_js_api_with_runtime() {
 
     // --- Comparison operations ---
     {
-        rooted!(&in(&scope) let v1 = value::from_i32(42));
-        rooted!(&in(&scope) let v2 = value::from_i32(42));
-        rooted!(&in(&scope) let v3 = value::from_f64(42.0));
+        let v1 = 42.to_jsval(&scope).unwrap();
+        let v2 = 42.to_jsval(&scope).unwrap();
+        let v3 = 42.0.to_jsval(&scope).unwrap();
 
         // Strict equality: 42 === 42
-        let eq = js::comparison::strictly_equal(&scope, v1.handle(), v2.handle()).unwrap();
+        let eq = js::comparison::strictly_equal(&scope, v1, v2).unwrap();
         assert!(eq, "42 === 42 should be true");
 
         // Loose equality: 42 == 42.0
-        let eq = js::comparison::loosely_equal(&scope, v1.handle(), v3.handle()).unwrap();
+        let eq = js::comparison::loosely_equal(&scope, v1, v3).unwrap();
         assert!(eq, "42 == 42.0 should be true");
 
         // SameValue: Object.is(42, 42)
-        let eq = js::comparison::same_value(&scope, v1.handle(), v2.handle()).unwrap();
+        let eq = js::comparison::same_value(&scope, v1, v2).unwrap();
         assert!(eq, "Object.is(42, 42) should be true");
     }
 
@@ -185,17 +185,17 @@ fn test_js_api_with_runtime() {
 
         assert_eq!(map.size(&scope), 0);
 
-        rooted!(&in(&scope) let key = value::from_i32(1));
-        rooted!(&in(&scope) let val = value::from_i32(100));
-        map.insert(&scope, key.handle(), val.handle()).unwrap();
+        let key = 1.to_jsval(&scope).unwrap();
+        let val = 100.to_jsval(&scope).unwrap();
+        map.insert(&scope, key, val).unwrap();
         assert_eq!(map.size(&scope), 1);
 
-        assert!(map.has(&scope, key.handle()).unwrap());
+        assert!(map.has(&scope, key).unwrap());
 
-        let result_val = map.lookup(&scope, key.handle()).unwrap();
+        let result_val = map.lookup(&scope, key).unwrap();
         assert_eq!(result_val.to_int32(), 100);
 
-        assert!(map.delete(&scope, key.handle()).unwrap());
+        assert!(map.delete(&scope, key).unwrap());
         assert_eq!(map.size(&scope), 0);
     }
 
@@ -205,12 +205,12 @@ fn test_js_api_with_runtime() {
 
         assert_eq!(set.size(&scope), 0);
 
-        rooted!(&in(&scope) let key = value::from_i32(42));
-        set.add(&scope, key.handle()).unwrap();
+        let key = 42.to_jsval(&scope).unwrap();
+        set.add(&scope, key).unwrap();
         assert_eq!(set.size(&scope), 1);
-        assert!(set.has(&scope, key.handle()).unwrap());
+        assert!(set.has(&scope, key).unwrap());
 
-        assert!(set.delete(&scope, key.handle()).unwrap());
+        assert!(set.delete(&scope, key).unwrap());
         assert_eq!(set.size(&scope), 0);
     }
 

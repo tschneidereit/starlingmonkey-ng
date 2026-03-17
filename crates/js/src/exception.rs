@@ -7,9 +7,8 @@
 //! see [`super::error::ExnThrown`].
 
 use crate::gc::scope::Scope;
-use mozjs::jsapi::{ExceptionStackBehavior, Value};
+use mozjs::jsapi::ExceptionStackBehavior;
 use mozjs::jsval::UndefinedValue;
-use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::HandleValue;
 
@@ -28,16 +27,21 @@ pub fn is_throwing_oom(scope: &Scope<'_>) -> bool {
 /// Get the pending exception value.
 ///
 /// Returns `Err` if no exception is pending or retrieval fails.
-pub fn get_pending(scope: &Scope<'_>) -> Result<Value, ExnThrown> {
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut vp = UndefinedValue());
-    let ok = unsafe { wrappers2::JS_GetPendingException(scope.cx_mut(), vp.handle_mut()) };
+pub fn get_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, ExnThrown> {
+    let mut vp = scope.root_value_mut(UndefinedValue());
+    let ok = unsafe { wrappers2::JS_GetPendingException(scope.cx_mut(), vp.reborrow().into()) };
     ExnThrown::check(ok)?;
-    Ok(vp.get())
+    Ok(vp.handle())
 }
 
 /// Set a pending exception on the context.
-pub fn set_pending(scope: &Scope<'_>, v: HandleValue, behavior: ExceptionStackBehavior) {
-    unsafe { wrappers2::JS_SetPendingException(scope.cx_mut(), v, behavior) }
+pub fn set_pending(
+    scope: &Scope<'_>,
+    v: HandleValue,
+    behavior: ExceptionStackBehavior,
+) -> ExnThrown {
+    unsafe { wrappers2::JS_SetPendingException(scope.cx_mut(), v, behavior) };
+    ExnThrown
 }
 
 /// Clear any pending exception on the context.

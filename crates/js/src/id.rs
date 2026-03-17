@@ -7,8 +7,8 @@
 //! converting between property keys and their constituent types.
 
 use crate::gc::scope::Scope;
-use mozjs::gc::{Handle, HandleId, HandleString};
-use mozjs::jsapi::{jsid, JSProtoKey, PropertyKey, Value};
+use mozjs::gc::{Handle, HandleId, HandleString, HandleValue};
+use mozjs::jsapi::{jsid, JSProtoKey, PropertyKey};
 use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
@@ -32,11 +32,11 @@ pub fn string_to_id(scope: &Scope<'_>, s: HandleString) -> Result<jsid, ExnThrow
 }
 
 /// Convert a property key back to a JS value.
-pub fn id_to_value(scope: &Scope<'_>, id: jsid) -> Result<Value, ExnThrown> {
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut vp = UndefinedValue());
-    let ok = unsafe { wrappers2::JS_IdToValue(scope.cx(), id, vp.handle_mut()) };
+pub fn id_to_value<'r>(scope: &'r Scope<'_>, id: jsid) -> Result<HandleValue<'r>, ExnThrown> {
+    let mut vp = scope.root_value_mut(UndefinedValue());
+    let ok = unsafe { wrappers2::JS_IdToValue(scope.cx(), id, vp.reborrow()) };
     ExnThrown::check(ok)?;
-    Ok(vp.get())
+    Ok(vp.handle())
 }
 
 /// Convert a numeric index to a property key.

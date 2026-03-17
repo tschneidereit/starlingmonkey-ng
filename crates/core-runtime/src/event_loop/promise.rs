@@ -10,13 +10,12 @@
 //! API in [`class`](crate::class). The promise task model allows futures to
 //! be driven by the platform driver and resolved individually as they complete.
 //!
-//! TODO: use js::Promise objects throughout here to avoid `rooted!` and raw pointers.
+//! TODO: use js::Promise objects throughout here to avoid raw pointers.
 
 use std::ffi::CString;
 
 use js::heap::{Heap, RootedTraceableBox, Trace};
 use js::native::{JSObject, JSTracer};
-use js::rooted;
 use js::value;
 use js::Promise;
 
@@ -72,8 +71,8 @@ impl Task for PromiseTask {
             let promise = Promise::from_handle_unchecked(promise_handle);
             match self.outcome {
                 PromiseOutcome::Resolve(set_value) => {
-                    rooted!(in(scope.raw_cx_no_gc()) let mut val = value::undefined());
-                    if set_value(scope.cx_mut().raw_cx(), val.handle_mut()) {
+                    let mut val = scope.root_value_mut(value::undefined());
+                    if set_value(scope.cx_mut().raw_cx(), val.reborrow()) {
                         let _ = promise.resolve(scope, val.handle());
                     }
                 }

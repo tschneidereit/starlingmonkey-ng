@@ -7,9 +7,8 @@
 
 use crate::gc::scope::Scope;
 use mozjs::gc::{HandleObject, HandleString, HandleValue, MutableHandleValue};
-use mozjs::jsapi::{JSONWriteCallback, Value};
+use mozjs::jsapi::JSONWriteCallback;
 use mozjs::jsval::UndefinedValue;
-use mozjs::rooted;
 use mozjs::rust::wrappers2;
 
 use super::error::ExnThrown;
@@ -17,28 +16,28 @@ use super::error::ExnThrown;
 /// Parse a JSON string into a JS value.
 ///
 /// Accepts a Rust `&str` and parses it using SpiderMonkey's JSON parser.
-pub fn parse(scope: &Scope<'_>, json: &str) -> Result<Value, ExnThrown> {
+pub fn parse<'r>(scope: &'r Scope<'_>, json: &str) -> Result<HandleValue<'r>, ExnThrown> {
     let utf16: Vec<u16> = json.encode_utf16().collect();
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
+    let mut rval = scope.root_value_mut(UndefinedValue());
     // SAFETY: utf16 is a valid buffer that lives for the duration of this call.
     let ok = unsafe {
         wrappers2::JS_ParseJSON(
             scope.cx_mut(),
             utf16.as_ptr(),
             utf16.len() as u32,
-            rval.handle_mut(),
+            rval.reborrow(),
         )
     };
     ExnThrown::check(ok)?;
-    Ok(rval.get())
+    Ok(rval.handle())
 }
 
 /// Parse a JSON string (represented as a `JSString`) into a JS value.
-pub fn parse_js_string(scope: &Scope<'_>, json_str: HandleString) -> Result<Value, ExnThrown> {
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-    let ok = unsafe { wrappers2::JS_ParseJSON1(scope.cx_mut(), json_str, rval.handle_mut()) };
+pub fn parse_js_string<'r>(scope: &'r Scope<'_>, json_str: HandleString) -> Result<HandleValue<'r>, ExnThrown> {
+    let mut rval = scope.root_value_mut(UndefinedValue());
+    let ok = unsafe { wrappers2::JS_ParseJSON1(scope.cx_mut(), json_str, rval.reborrow()) };
     ExnThrown::check(ok)?;
-    Ok(rval.get())
+    Ok(rval.handle())
 }
 
 /// Parse a JSON string from UTF-16 chars into a JS value.
@@ -46,27 +45,27 @@ pub fn parse_js_string(scope: &Scope<'_>, json_str: HandleString) -> Result<Valu
 /// # Safety
 ///
 /// `chars` must point to a valid UTF-16 buffer of at least `len` code units.
-pub unsafe fn parse_utf16(
-    scope: &Scope<'_>,
+pub unsafe fn parse_utf16<'r>(
+    scope: &'r Scope<'_>,
     chars: *const u16,
     len: u32,
-) -> Result<Value, ExnThrown> {
-    rooted!(in(scope.raw_cx_no_gc()) let mut rval = UndefinedValue());
-    let ok = wrappers2::JS_ParseJSON(scope.cx_mut(), chars, len, rval.handle_mut());
+) -> Result<HandleValue<'r>, ExnThrown> {
+    let mut rval = scope.root_value_mut(UndefinedValue());
+    let ok = wrappers2::JS_ParseJSON(scope.cx_mut(), chars, len, rval.reborrow());
     ExnThrown::check(ok)?;
-    Ok(rval.get())
+    Ok(rval.handle())
 }
 
 /// Parse a JSON string with a reviver function.
 ///
 /// Accepts a Rust `&str` and parses it with a JS reviver function.
-pub fn parse_with_reviver(
-    scope: &Scope<'_>,
+pub fn parse_with_reviver<'r>(
+    scope: &'r Scope<'_>,
     json: &str,
     reviver: HandleValue,
-) -> Result<Value, ExnThrown> {
+) -> Result<HandleValue<'r>, ExnThrown> {
     let utf16: Vec<u16> = json.encode_utf16().collect();
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
+    let mut rval = scope.root_value_mut(UndefinedValue());
     // SAFETY: utf16 is a valid buffer that lives for the duration of this call.
     let ok = unsafe {
         wrappers2::JS_ParseJSONWithReviver(
@@ -74,25 +73,25 @@ pub fn parse_with_reviver(
             utf16.as_ptr(),
             utf16.len() as u32,
             reviver,
-            rval.handle_mut(),
+            rval.reborrow(),
         )
     };
     ExnThrown::check(ok)?;
-    Ok(rval.get())
+    Ok(rval.handle())
 }
 
 /// Parse JSON with a reviver function (JS string input).
-pub fn parse_js_string_with_reviver(
-    scope: &Scope<'_>,
+pub fn parse_js_string_with_reviver<'r>(
+    scope: &'r Scope<'_>,
     json_str: HandleString,
     reviver: HandleValue,
-) -> Result<Value, ExnThrown> {
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
+) -> Result<HandleValue<'r>, ExnThrown> {
+    let mut rval = scope.root_value_mut(UndefinedValue());
     let ok = unsafe {
-        wrappers2::JS_ParseJSONWithReviver1(scope.cx_mut(), json_str, reviver, rval.handle_mut())
+        wrappers2::JS_ParseJSONWithReviver1(scope.cx_mut(), json_str, reviver, rval.reborrow())
     };
     ExnThrown::check(ok)?;
-    Ok(rval.get())
+    Ok(rval.handle())
 }
 
 /// Stringify a JS value to JSON using a callback to receive the output.

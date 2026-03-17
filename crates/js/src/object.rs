@@ -18,16 +18,19 @@
 //! let val = obj.get_property(&scope, c"foo")?;
 //! ```
 
+use std::borrow::Cow;
 use std::ffi::CStr;
 use std::os::raw::c_uint;
 use std::ptr::NonNull;
 
 use crate::builtins::JSType;
-use crate::error::ConversionError;
+use crate::conversion::ConversionError;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
+use crate::prelude::FromJSVal;
+
 use mozjs::conversions::ToJSValConvertible;
-use mozjs::gc::{Handle, HandleId, HandleObject, HandleValue, MutableHandle, MutableHandleValue};
+use mozjs::gc::{Handle, HandleId, HandleObject, HandleValue, MutableHandle};
 use mozjs::jsapi::{
     JSClass, JSFunctionSpec, JSObject, JSPropertySpec, ObjectOpResult, PropertyDescriptor, Value,
 };
@@ -128,11 +131,17 @@ impl<'s> Stack<'s, Object> {
     }
 
     /// Create from a JS value. Returns an error if the value is not an object.
-    pub fn from_value(scope: &'s Scope<'_>, val: Value) -> Result<Self, ConversionError> {
+    pub fn from_value(
+        scope: &'s Scope<'_>,
+        val: impl Into<Value>,
+    ) -> Result<Self, ConversionError> {
+        let val = val.into();
         if val.is_object() {
             Ok(Self::from_raw_obj(scope, val.to_object()).unwrap())
         } else {
-            Err(ConversionError("Value isn't an object"))
+            Err(ConversionError::Failure(Cow::Borrowed(
+                c"Value isn't an object",
+            )))
         }
     }
 
@@ -455,10 +464,6 @@ impl<'s> Stack<'s, Object> {
         ExnThrown::check(ok)
     }
 
-    // -----------------------------------------------------------------------
-    // Object creation (associated functions that take HandleObject)
-    // -----------------------------------------------------------------------
-
     /// Define an object property that is itself a new object.
     pub fn define_object(
         scope: &'s Scope<'_>,
@@ -611,14 +616,16 @@ impl<'s> Stack<'s, Object> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Value wrapping
-// ---------------------------------------------------------------------------
+impl<'s> FromJSVal<'s> for Stack<'s, Object> {
+    type Config = ();
 
-/// Wrap a value for use in the current compartment.
-pub fn wrap_value(scope: &Scope<'_>, vp: MutableHandleValue) -> Result<(), ExnThrown> {
-    let ok = unsafe { wrappers2::JS_WrapValue(scope.cx_mut(), vp) };
-    ExnThrown::check(ok)
+    fn from_jsval(
+        scope: &'s Scope<'s>,
+        val: HandleValue<'s>,
+        _option: Self::Config,
+    ) -> Result<Self, ConversionError> {
+        Self::from_value(scope, *val)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -103,8 +103,7 @@ pub unsafe fn report_pending_exception(scope: &js::gc::scope::Scope<'_>) {
 
     // Try to convert the exception to a string.
     // TODO: use mozjs's better abstractions for this.
-    let exc_handle = scope.root_value(exc_val);
-    match js::JSString::from_value(scope, exc_handle) {
+    match js::JSString::from_value(scope, exc_val) {
         Ok(js_str) => match js_str.to_utf8(scope) {
             Ok(msg) => eprintln!("Error: {}", msg),
             Err(_) => eprintln!("Error: script execution failed"),

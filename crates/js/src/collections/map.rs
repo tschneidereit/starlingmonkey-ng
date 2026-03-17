@@ -7,9 +7,7 @@ use std::ptr::NonNull;
 use crate::builtins::JSType;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
-use mozjs::jsapi::Value;
 use mozjs::jsval::UndefinedValue;
-use mozjs::rooted;
 use mozjs::rust::wrappers2;
 use mozjs::rust::{HandleObject, HandleValue};
 
@@ -53,12 +51,12 @@ impl<'s> Stack<'s, Map> {
     ///
     /// This is named `lookup` rather than `get` to avoid confusion with
     /// `Handle::get`.
-    pub fn lookup(&self, scope: &Scope<'_>, key: HandleValue) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
+    pub fn lookup<'r>(&self, scope: &'r Scope<'_>, key: HandleValue<'r>) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
         let ok =
-            unsafe { wrappers2::MapGet(scope.cx_mut(), self.handle(), key, rval.handle_mut()) };
+            unsafe { wrappers2::MapGet(scope.cx_mut(), self.handle(), key, rval.reborrow()) };
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Check whether the map contains a key.
@@ -98,27 +96,27 @@ impl<'s> Stack<'s, Map> {
     }
 
     /// Get an iterator over the map's keys.
-    pub fn keys(&self, scope: &Scope<'_>) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::MapKeys(scope.cx_mut(), self.handle(), rval.handle_mut()) };
+    pub fn keys<'r>(&self, scope: &'r Scope<'_>) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
+        let ok = unsafe { wrappers2::MapKeys(scope.cx_mut(), self.handle(), rval.reborrow()) };
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Get an iterator over the map's values.
-    pub fn values(&self, scope: &Scope<'_>) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::MapValues(scope.cx_mut(), self.handle(), rval.handle_mut()) };
+    pub fn values<'r>(&self, scope: &'r Scope<'_>) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
+        let ok = unsafe { wrappers2::MapValues(scope.cx_mut(), self.handle(), rval.reborrow()) };
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Get an iterator over the map's entries (key-value pairs).
-    pub fn entries(&self, scope: &Scope<'_>) -> Result<Value, ExnThrown> {
-        rooted!(in(unsafe { scope.raw_cx_no_gc() }) let mut rval = UndefinedValue());
-        let ok = unsafe { wrappers2::MapEntries(scope.cx_mut(), self.handle(), rval.handle_mut()) };
+    pub fn entries<'r>(&self, scope: &'r Scope<'_>) -> Result<HandleValue<'r>, ExnThrown> {
+        let mut rval = scope.root_value_mut(UndefinedValue());
+        let ok = unsafe { wrappers2::MapEntries(scope.cx_mut(), self.handle(), rval.reborrow()) };
         ExnThrown::check(ok)?;
-        Ok(rval.get())
+        Ok(rval.handle())
     }
 
     /// Call a callback for each entry in the map.

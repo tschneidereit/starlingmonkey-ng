@@ -252,8 +252,7 @@ unsafe fn queue_timer_from_js(
     vp: *mut js::native::Value,
     repeating: bool,
 ) -> bool {
-    let mut cx = js::native::JSContext::from_ptr(std::ptr::NonNull::new_unchecked(raw_cx));
-    let scope = RootScope::from_current_realm(&mut cx);
+    let scope = RootScope::from_current_realm(raw_cx);
     let args = js::native::CallArgs::from_vp(vp, argc);
 
     // Argument 0: callback (required)

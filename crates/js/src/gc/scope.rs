@@ -400,11 +400,10 @@ impl<'cx> RootScope<'cx, EnteredRealm> {
     /// # Safety
     ///
     /// The caller must ensure that a realm is currently entered on `cx`.
-    pub unsafe fn from_current_realm(cx: &'cx mut JSContext) -> RootScope<'cx, EnteredRealm> {
-        let raw_cx = cx.raw_cx();
-        let scope = Scope::new(raw_cx);
+    pub unsafe fn from_current_realm(cx: *mut RawJSContext) -> RootScope<'cx, EnteredRealm> {
+        let scope = Scope::new(cx);
         RootScope {
-            raw_cx: UnsafeCell::new(raw_cx),
+            raw_cx: UnsafeCell::new(cx),
             scope: Some(scope),
             realm: None,
             _state: PhantomData,
