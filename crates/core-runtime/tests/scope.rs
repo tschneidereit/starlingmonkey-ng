@@ -7,7 +7,6 @@
 
 use core_runtime::config::RuntimeConfig;
 use core_runtime::runtime::Runtime;
-use js::rooted;
 use js::value;
 
 #[test]
@@ -82,26 +81,6 @@ fn test_scope_rooting() {
     {
         let rval = js::compile::evaluate(&scope, "1 + 2 + 3").unwrap();
         assert_eq!(rval.to_int32(), 6);
-    }
-
-    // --- Mixed rooted! and scope ---
-    {
-        // Use rooted! macro alongside scope-based rooting.
-        rooted!(&in(&scope) let mut val = value::from_i32(10));
-
-        // scope-based root
-        let scope_val = scope.root_value(value::from_i32(20));
-
-        // Both should work.
-        assert_eq!(val.get().to_int32(), 10);
-        assert_eq!(scope_val.get().to_int32(), 20);
-
-        // Modify the rooted! value.
-        val.set(value::from_i32(30));
-        assert_eq!(val.get().to_int32(), 30);
-
-        // scope value unchanged.
-        assert_eq!(scope_val.get().to_int32(), 20);
     }
 
     // --- Many roots of the same type ---

@@ -12,7 +12,6 @@ use js::builtins::IsPrimitive;
 use js::builtins::{Boolean, Double, Int32, Null, StringPrimitive, SymbolPrimitive, Undefined};
 use js::conversion::{ConversionBehavior, FromJSVal, ToJSVal};
 use js::error::{CapturedError, ExnThrown};
-use js::rooted;
 use js::value;
 use js::Array;
 use js::Date;
