@@ -6,9 +6,8 @@
 # safety — ensuring that GC pointers are always stored in traced containers.
 #
 # This script:
-#   1. Builds the crown binary (from crown/)
-#   2. Creates a wrapper that sets LD_LIBRARY_PATH for the nightly sysroot
-#   3. Runs `cargo check` with RUSTC_WRAPPER=crown and --features "js/crown"
+#   1. Builds the crown binary (from crown/) with rpath baked in
+#   2. Runs `cargo check` with RUSTC_WRAPPER=crown and --features "js/crown"
 #
 # The `crown` Cargo feature propagates through the workspace:
 #   starling → libstarling → core-runtime + simple-http → mozjs → mozjs_sys
@@ -24,35 +23,29 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Step 1: Build crown (uses RUSTC_BOOTSTRAP=1 for rustc_private)
-echo "=== Building crown linter ==="
-RUSTC_BOOTSTRAP=1 cargo build --manifest-path "$ROOT_DIR/crown/Cargo.toml" --release 2>&1
+# All crown operations run from the crown/ directory so cargo picks up
+# crown/rust-toolchain.toml (which may differ from the workspace toolchain).
+CROWN_DIR="$ROOT_DIR/crown"
+CROWN_BIN="$CROWN_DIR/target/release/crown"
+CROWN_SYSROOT="$(cd "$CROWN_DIR" && rustc --print sysroot)"
+CROWN_LIB="$CROWN_SYSROOT/lib"
 
-CROWN_BIN="$ROOT_DIR/crown/target/release/crown"
+# Step 1: Build crown with the rpath baked in so it always finds librustc_driver
+echo "=== Building crown linter ==="
+(cd "$CROWN_DIR" && \
+    RUSTFLAGS="-C link-arg=-Wl,-rpath,$CROWN_LIB" \
+    RUSTC_BOOTSTRAP=1 cargo build --release 2>&1)
+
 if [[ ! -x "$CROWN_BIN" ]]; then
     echo "ERROR: crown binary not found at $CROWN_BIN"
     exit 1
 fi
 echo "Crown binary: $CROWN_BIN"
 
-# Step 2: Find the sysroot for rustc shared libraries for crown's used toolchain
-CROWN_SYSROOT="$(cd "$ROOT_DIR/crown" && rustc --print sysroot)"
-CROWN_LIB="$CROWN_SYSROOT/lib"
-
-# Step 3: Create a wrapper script that sets LD_LIBRARY_PATH before invoking crown
-WRAPPER="$(mktemp)"
-cat > "$WRAPPER" <<EOF
-#!/usr/bin/env bash
-export LD_LIBRARY_PATH="$CROWN_LIB:\${LD_LIBRARY_PATH:-}"
-exec "$CROWN_BIN" "\$@"
-EOF
-chmod +x "$WRAPPER"
-trap "rm -f '$WRAPPER'" EXIT
-
-# Step 4: Run cargo check with crown as the compiler wrapper
+# Step 2: Run cargo check with crown as the compiler wrapper
 echo ""
 echo "=== Running crown check ==="
-RUSTC_BOOTSTRAP="1" RUSTC_WRAPPER="$WRAPPER" cargo check \
+RUSTC_BOOTSTRAP="1" RUSTC_WRAPPER="$CROWN_BIN" cargo check \
     --manifest-path "$ROOT_DIR/Cargo.toml" \
     --features "js/crown" \
     "$@"
