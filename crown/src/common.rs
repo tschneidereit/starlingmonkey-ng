@@ -37,6 +37,28 @@ pub fn match_def_path(cx: &LateContext, def_id: DefId, path: &[Symbol]) -> bool 
         .all(|(e, p)| e.data.get_opt_name().as_ref() == Some(p))
 }
 
+/// Check if a DefId's intra-crate path suffix matches the given segments,
+/// ignoring the crate name.  Matches both external crates and local modules.
+///
+/// For example, `match_def_path_suffix(cx, id, &["jsapi", "JS", "Value"])`
+/// matches `mozjs_sys::jsapi::JS::Value` in real code and also matches a
+/// local `mod mozjs_sys { pub mod jsapi { pub mod JS { pub struct Value ... } } }` in tests.
+pub fn match_def_path_suffix(cx: &LateContext, def_id: DefId, suffix: &[Symbol]) -> bool {
+    let def_path = cx.tcx.def_path(def_id);
+    let segments: Vec<_> = def_path
+        .data
+        .iter()
+        .filter_map(|d| d.data.get_opt_name())
+        .collect();
+    if segments.len() < suffix.len() {
+        return false;
+    }
+    segments[segments.len() - suffix.len()..]
+        .iter()
+        .zip(suffix)
+        .all(|(seg, expected)| seg == expected)
+}
+
 pub fn in_derive_expn(span: Span) -> bool {
     matches!(
         span.ctxt().outer_expn_data().kind,

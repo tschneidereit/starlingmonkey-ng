@@ -6,12 +6,12 @@
 struct Foo(i32);
 
 struct Bar<TH: TypeHolderTrait>(TH::F);
-//~^ ERROR: Type must be rooted, use #[crown::unrooted_must_root_lint::must_root] on the struct definition to propagate
+//~^ ERROR: Type must be rooted, use #[js::must_root] on the struct definition to propagate
 
 trait TypeHolderTrait {
     #[crown::unrooted_must_root_lint::must_root]
     type F;
-    //~^ Mismatched use of #[crown::unrooted_must_root_lint::must_root] between associated type declaration and impl definition. [crown::unrooted_must_root]
+    //~^ Mismatched use of #[js::must_root] between associated type declaration and impl definition
 }
 
 struct TypeHolder;
