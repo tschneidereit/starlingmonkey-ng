@@ -28,7 +28,7 @@ fn run_mode(mode: &'static str, bless: bool) {
     config.src_base = PathBuf::from("tests").join(mode);
     config.rustc_path = PROFILE_PATH.join("crown");
     config.target_rustcflags = Some(format!(
-        "-L {} -L {} -Zcrate-attr=feature(register_tool) -Zcrate-attr=register_tool(crown)",
+        "-L {} -L {}",
         PROFILE_PATH.display(),
         PROFILE_PATH.join("deps").display()
     ));

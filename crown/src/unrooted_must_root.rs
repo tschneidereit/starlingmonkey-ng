@@ -124,9 +124,9 @@ fn is_unrooted_ty<'tcx>(
                     match inner.kind() {
                         ty::Adt(did, _) => !has_attr(did.did(), sym.allow_unrooted_in_rc),
                         ty::Alias(
-                            ty::AliasTyKind::Projection |
-                            ty::AliasTyKind::Inherent |
-                            ty::AliasTyKind::Free,
+                            ty::AliasTyKind::Projection
+                            | ty::AliasTyKind::Inherent
+                            | ty::AliasTyKind::Free,
                             ty,
                         ) => !has_attr(ty.def_id, sym.allow_unrooted_in_rc),
                         _ => true,
