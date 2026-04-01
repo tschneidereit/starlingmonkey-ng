@@ -10,14 +10,17 @@
 //! static type information about the kind of JS object.
 
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::ptr::NonNull;
 
 use crate::builtins::{get_class_tag, is_derived_from_type, CastError, CastTarget, JSType};
 use crate::conversion::{ConversionError, ToJSVal};
 use crate::gc::scope::Scope;
-use crate::heap::{Heap as MozHeap, Trace};
+use crate::heap::Trace;
 use crate::native::{JSObject, JSTracer, RawHandle};
 use mozjs::gc::{Handle, HandleValue};
+
+pub use crate::heap::Heap as MozHeap;
 
 /// A scope-rooted handle to a JavaScript object of type `T`.
 ///
@@ -166,7 +169,7 @@ impl<'s, T: JSType> ToJSVal<'s> for Stack<'s, T> {
 /// the stack newtype directly (e.g. `Item<'s>` for `Heap<ItemImpl>`).
 #[crate::must_root]
 pub struct Heap<T: JSType> {
-    heap: Box<MozHeap<*mut JSObject>>,
+    heap: Pin<Box<MozHeap<*mut JSObject>>>,
     _marker: PhantomData<T>,
 }
 
@@ -179,8 +182,8 @@ impl<T: JSType> Heap<T> {
     /// `obj` must be a valid, non-null JS object of type `T`.
     pub unsafe fn from_raw(obj: *mut JSObject) -> Self {
         debug_assert!(!obj.is_null(), "Heap::from_raw called with null pointer");
-        let heap = Box::new(MozHeap::default());
-        heap.set(obj);
+        let heap = Box::pin(MozHeap::default());
+        (*heap).set(obj);
         Heap {
             heap,
             _marker: PhantomData,
@@ -230,7 +233,7 @@ impl<T: JSType> Heap<T> {
 impl<T: JSType> Default for Heap<T> {
     fn default() -> Self {
         Heap {
-            heap: Box::new(MozHeap::default()),
+            heap: Box::pin(MozHeap::default()),
             _marker: PhantomData,
         }
     }
@@ -243,8 +246,8 @@ impl<T: JSType> Default for Heap<T> {
 #[crate::allow_unrooted]
 impl<'s, T: JSType> From<Stack<'s, T>> for Heap<T> {
     fn from(stack: Stack<'s, T>) -> Self {
-        let heap = Box::new(MozHeap::default());
-        heap.set(stack.as_raw());
+        let heap = Box::pin(MozHeap::default());
+        (*heap).set(stack.as_raw());
         Heap {
             heap,
             _marker: PhantomData,
