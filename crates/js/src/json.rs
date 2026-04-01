@@ -33,7 +33,10 @@ pub fn parse<'r>(scope: &'r Scope<'_>, json: &str) -> Result<HandleValue<'r>, Ex
 }
 
 /// Parse a JSON string (represented as a `JSString`) into a JS value.
-pub fn parse_js_string<'r>(scope: &'r Scope<'_>, json_str: HandleString) -> Result<HandleValue<'r>, ExnThrown> {
+pub fn parse_js_string<'r>(
+    scope: &'r Scope<'_>,
+    json_str: HandleString,
+) -> Result<HandleValue<'r>, ExnThrown> {
     let mut rval = scope.root_value_mut(UndefinedValue());
     let ok = unsafe { wrappers2::JS_ParseJSON1(scope.cx_mut(), json_str, rval.reborrow()) };
     ExnThrown::check(ok)?;

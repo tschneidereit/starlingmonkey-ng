@@ -51,10 +51,13 @@ impl<'s> Stack<'s, Map> {
     ///
     /// This is named `lookup` rather than `get` to avoid confusion with
     /// `Handle::get`.
-    pub fn lookup<'r>(&self, scope: &'r Scope<'_>, key: HandleValue<'r>) -> Result<HandleValue<'r>, ExnThrown> {
+    pub fn lookup<'r>(
+        &self,
+        scope: &'r Scope<'_>,
+        key: HandleValue<'r>,
+    ) -> Result<HandleValue<'r>, ExnThrown> {
         let mut rval = scope.root_value_mut(UndefinedValue());
-        let ok =
-            unsafe { wrappers2::MapGet(scope.cx_mut(), self.handle(), key, rval.reborrow()) };
+        let ok = unsafe { wrappers2::MapGet(scope.cx_mut(), self.handle(), key, rval.reborrow()) };
         ExnThrown::check(ok)?;
         Ok(rval.handle())
     }
