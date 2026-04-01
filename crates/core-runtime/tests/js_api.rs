@@ -89,7 +89,7 @@ fn test_jserror_display() {
         column: 5,
         stack: None,
     };
-    assert_eq!(format!("{e}"), "bad thing at test.js:10");
+    assert_eq!(format!("{e}"), "bad thing at test.js:10:5");
 }
 
 // --- Engine-dependent tests (single test function) ---
@@ -360,18 +360,22 @@ fn test_js_api_with_runtime() {
         assert_eq!(result.to_int32(), 3);
     }
 
-    // --- Closure-based callbacks ---
+    // --- Callbacks ---
     {
         use js::try_catch::TryCatch;
 
         let scope = scope.inner_scope();
 
-        // Simple closure returning a constant
+        // Simple callback returning a constant
         {
-            let fun = js::Function::new_closure(&scope, c"forty_two", 0, |_scope, _args| {
-                Ok(value::from_i32(42))
-            })
-            .expect("new_closure should succeed");
+            let fun = js::Function::new_callback(
+                &scope,
+                c"forty_two",
+                0,
+                |_scope, _args, _| Ok(value::from_i32(42)),
+                (),
+            )
+            .expect("new_callback should succeed");
 
             let fun_val = scope.root_value(fun.as_value());
             scope
@@ -385,14 +389,20 @@ fn test_js_api_with_runtime() {
             assert_eq!(result.to_int32(), 42);
         }
 
-        // Closure that reads arguments
+        // Callback that reads arguments
         {
-            let fun = js::Function::new_closure(&scope, c"add", 2, |_scope, args| {
-                let a = args.get_i32(0).unwrap_or(0);
-                let b = args.get_i32(1).unwrap_or(0);
-                Ok(value::from_i32(a + b))
-            })
-            .expect("new_closure should succeed");
+            let fun = js::Function::new_callback(
+                &scope,
+                c"add",
+                2,
+                |_scope, args, _| {
+                    let a = args.get_i32(0).unwrap_or(0);
+                    let b = args.get_i32(1).unwrap_or(0);
+                    Ok(value::from_i32(a + b))
+                },
+                (),
+            )
+            .expect("new_callback should succeed");
 
             let fun_val = scope.root_value(fun.as_value());
             scope
@@ -406,10 +416,16 @@ fn test_js_api_with_runtime() {
             assert_eq!(result.to_int32(), 42);
         }
 
-        // Closure that returns an error
+        // Callback that returns an error
         {
-            let fun = js::Function::new_closure(&scope, c"fail", 0, |_scope, _args| Err(ExnThrown))
-                .expect("new_closure should succeed");
+            let fun = js::Function::new_callback(
+                &scope,
+                c"fail",
+                0,
+                |_scope, _args, _| Err(ExnThrown),
+                (),
+            )
+            .expect("new_callback should succeed");
 
             let fun_val = scope.root_value(fun.as_value());
             scope
@@ -424,12 +440,16 @@ fn test_js_api_with_runtime() {
             tc.reset();
         }
 
-        // Closure with CallbackArgs metadata
+        // Callback with CallbackArgs metadata
         {
-            let fun = js::Function::new_closure(&scope, c"argInfo", 0, |_scope, args| {
-                Ok(value::from_i32(args.len() as i32))
-            })
-            .expect("new_closure");
+            let fun = js::Function::new_callback(
+                &scope,
+                c"argInfo",
+                0,
+                |_scope, args, _| Ok(value::from_i32(args.len() as i32)),
+                (),
+            )
+            .expect("new_callback should succeed");
 
             let fun_val = scope.root_value(fun.as_value());
             scope
