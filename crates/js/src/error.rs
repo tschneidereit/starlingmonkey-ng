@@ -22,6 +22,7 @@ use std::ffi::{CStr, CString};
 use std::fmt;
 use std::ptr;
 
+use crate::exception::is_pending;
 use crate::gc::scope::Scope;
 use crate::Object;
 use mozjs::jsapi::{
@@ -30,7 +31,7 @@ use mozjs::jsapi::{
 };
 use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
-use mozjs::rust::wrappers2;
+use mozjs::rust::{wrappers2, Runtime};
 
 /// A lightweight marker indicating that a JavaScript exception is pending on
 /// the context.
@@ -58,6 +59,26 @@ impl ExnThrown {
     /// API and Rust's `Result` type.
     #[inline]
     pub fn check(ok: bool) -> Result<(), ExnThrown> {
+        #[cfg(debug_assertions)]
+        {
+            use crate::exception::is_pending;
+
+            if let Some(rt) = Runtime::get() {
+                let raw_cx = rt.as_ptr();
+                let scope = unsafe { crate::gc::scope::RootScope::from_current_realm(raw_cx) };
+                if ok {
+                    debug_assert!(
+                        !is_pending(&scope),
+                        "Native JS function returned true but an exception is pending",
+                    );
+                } else {
+                    debug_assert!(
+                        is_pending(&scope),
+                        "Native JS function returned false but no exception is pending",
+                    );
+                }
+            }
+        }
         if ok {
             Ok(())
         } else {
@@ -177,6 +198,18 @@ impl fmt::Display for ExnThrown {
 
 impl std::error::Error for ExnThrown {}
 
+#[derive(Debug)]
+pub enum EvalError {
+    Exn,
+}
+
+impl EvalError {
+    pub fn format(scope: &Scope<'_>) -> String {
+        let error = ExnThrown::capture(scope);
+        format!("{error:?}")
+    }
+}
+
 /// Captured details from a JavaScript exception.
 ///
 /// Created by [`ExnThrown::capture`]. Contains the message, source location,
@@ -203,7 +236,7 @@ impl fmt::Display for CapturedError {
             write!(f, "JavaScript exception")?;
         }
         if let Some(file) = &self.filename {
-            write!(f, " at {file}:{}", self.lineno)?;
+            write!(f, " at {file}:{}:{}", self.lineno, self.column)?;
         }
         if let Some(s) = &self.stack {
             write!(f, "\n{s}")?;
@@ -454,7 +487,11 @@ impl ThrowException for SyntaxError {
 impl ThrowException for ExnThrown {
     /// No-op: `ExnThrown` indicates an exception is already pending on the
     /// context, so there is nothing additional to throw.
-    fn throw(self, _scope: &Scope<'_>) -> ExnThrown {
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+        debug_assert!(
+            is_pending(scope),
+            "ExnThrown::throw called but no exception is pending"
+        );
         self
     }
 }

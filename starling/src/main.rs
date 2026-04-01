@@ -5,10 +5,20 @@
 //! Parses command-line arguments into a [`RuntimeConfig`](libstarling::config::RuntimeConfig)
 //! and delegates execution to [`libstarling::run`].
 
+use std::process::exit;
+
 use libstarling::config::RuntimeConfig;
 
 fn main() {
-    libstarling::run(RuntimeConfig::from_args(std::env::args()).unwrap());
+    let config = match RuntimeConfig::from_args(std::env::args()) {
+        Ok(config) => config,
+        Err(e) => {
+            let _ = e.print();
+            exit(0);
+        }
+    };
+
+    let _ = libstarling::run(config).map_err(|e| println!("{e}"));
 }
 
 #[test]
@@ -17,5 +27,7 @@ fn cli_runs() {
         ["starling", "-e", "1 + 1"].iter().map(|s| s.to_string()),
     )
     .unwrap();
-    libstarling::run(config);
+    libstarling::run(config)
+        .map_err(|e| println!("{e}"))
+        .expect("Run failed");
 }

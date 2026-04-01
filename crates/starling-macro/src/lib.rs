@@ -2211,33 +2211,34 @@ fn gen_method_native(
         let all_args: Vec<_> = call_args.iter().chain(rest_arg_expr.iter()).collect();
         quote! { #type_name::#fn_name(#(#all_args),*) }
     };
+    let name_str = format!("{}::{}", struct_name, fn_name);
 
     let body = match &info.return_style {
         ReturnStyle::Raw => quote! {
             match #call {
-                Ok(()) => true,
-                Err(::js::error::ExnThrown) => false,
+                Ok(()) => js::exception::check_fn_return(&scope, true, &#name_str),
+                Err(::js::error::ExnThrown) => js::exception::check_fn_return(&scope, false, &#name_str),
             }
         },
         ReturnStyle::Value => quote! {
             let __result = #call;
             ::js::class::set_return(&scope, &__args, &__result);
-            true
+            js::exception::check_fn_return(&scope, true, &#name_str)
         },
         ReturnStyle::Void => quote! {
             #call;
             ::js::class::set_return(&scope, &__args, &::js::value::undefined());
-            true
+            js::exception::check_fn_return(&scope, true, &#name_str)
         },
         ReturnStyle::ResultVoid => quote! {
             match #call {
                 Ok(()) => {
                     ::js::class::set_return(&scope, &__args, &::js::value::undefined());
-                    true
+                    js::exception::check_fn_return(&scope, true, &#name_str)
                 }
                 Err(__e) => {
                     ::js::error::ThrowException::throw(__e, &scope);
-                    false
+                    js::exception::check_fn_return(&scope, false, &#name_str)
                 }
             }
         },
@@ -2245,11 +2246,11 @@ fn gen_method_native(
             match #call {
                 Ok(__v) => {
                     ::js::class::set_return(&scope, &__args, &__v);
-                    true
+                    js::exception::check_fn_return(&scope, true, &#name_str)
                 }
                 Err(__e) => {
                     ::js::error::ThrowException::throw(__e, &scope);
-                    false
+                    js::exception::check_fn_return(&scope, false, &#name_str)
                 }
             }
         },
@@ -2257,7 +2258,7 @@ fn gen_method_native(
             // Create a bare JS Promise (no executor)
             let __promise = match ::js::promise::Promise::new_pending(&scope) {
                 Ok(p) => p,
-                Err(_) => return false,
+                Err(_) => return js::exception::check_fn_return(&scope, false, &#name_str),
             };
             // Return the promise object to JS immediately
             __args.rval().set(unsafe { ::js::value::from_object(__promise.as_raw()) });
@@ -2265,17 +2266,17 @@ fn gen_method_native(
             let __js_promise = #call;
             // Spawn the future, which will resolve/reject the promise later
             ::js::class::__spawn_promise(__promise.as_raw(), __js_promise);
-            true
+            js::exception::check_fn_return(&scope, true, &#name_str)
         },
         ReturnStyle::InstanceValue => quote! {
             let __obj = match ::js::class::create_instance_with::<#type_name>(&scope, |_| {
                 #call
             }) {
                 Ok(o) => o,
-                Err(_) => return false,
+                Err(_) => return js::exception::check_fn_return(&scope, false, &#name_str),
             };
             __args.rval().set(unsafe { ::js::value::from_object(__obj.as_raw()) });
-            true
+            js::exception::check_fn_return(&scope, true, &#name_str)
         },
     };
 
@@ -2338,7 +2339,7 @@ fn gen_accessor_native(
         quote! {
             let __self = match ::js::class::get_this_mut::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(::js::error::ExnThrown) => return false,
+                Err(::js::error::ExnThrown) => return js::exception::check_fn_return(&scope, false, &#name_str),
             };
         }
     };
@@ -2356,31 +2357,31 @@ fn gen_accessor_native(
         match &info.return_style {
             ReturnStyle::Raw => quote! {
                 match #call {
-                    Ok(()) => true,
-                    Err(::js::error::ExnThrown) => false,
+                    Ok(()) => js::exception::check_fn_return(&scope, true, &#name_str),
+                    Err(::js::error::ExnThrown) => js::exception::check_fn_return(&scope, false, &#name_str),
                 }
             },
             ReturnStyle::Value => quote! {
                 let __result = #call;
                 ::js::class::set_return(&scope, &__args, &__result);
-                true
+                js::exception::check_fn_return(&scope, true, &#name_str)
             },
             ReturnStyle::ResultValue => quote! {
                 match #call {
                     Ok(__v) => {
                         ::js::class::set_return(&scope, &__args, &__v);
-                        true
+                        js::exception::check_fn_return(&scope, true, &#name_str)
                     }
                     Err(__e) => {
                         ::js::error::ThrowException::throw(__e, &scope);
-                        false
+                        js::exception::check_fn_return(&scope, false, &#name_str)
                     }
                 }
             },
             _ => quote! {
                 let __result = #call;
                 ::js::class::set_return(&scope, &__args, &__result);
-                true
+                js::exception::check_fn_return(&scope, true, &#name_str)
             },
         }
     } else {
@@ -2400,8 +2401,8 @@ fn gen_accessor_native(
         match &info.return_style {
             ReturnStyle::Raw => quote! {
                 match #call {
-                    Ok(()) => true,
-                    Err(::js::error::ExnThrown) => false,
+                    Ok(()) => js::exception::check_fn_return(&scope, true, &#name_str),
+                    Err(::js::error::ExnThrown) => js::exception::check_fn_return(&scope, false, &#name_str),
                 }
             },
             ReturnStyle::ResultVoid => quote! {
@@ -2409,11 +2410,11 @@ fn gen_accessor_native(
                 match #call {
                     Ok(()) => {
                         __args.rval().set(::js::value::undefined());
-                        true
+                        js::exception::check_fn_return(&scope, true, &#name_str)
                     }
                     Err(__e) => {
                         ::js::error::ThrowException::throw(__e, &scope);
-                        false
+                        js::exception::check_fn_return(&scope, false, &#name_str)
                     }
                 }
             },
@@ -2421,7 +2422,7 @@ fn gen_accessor_native(
                 #(#arg_extractions)*
                 #call;
                 __args.rval().set(::js::value::undefined());
-                true
+                js::exception::check_fn_return(&scope, true, &#name_str)
             },
         }
     };

@@ -2,7 +2,7 @@
 
 //! Shared test helpers for `core-runtime` in-crate tests.
 
-use js::conversion::FromJSVal;
+use js::{conversion::FromJSVal, error::ExnThrown};
 
 use crate::{config::RuntimeConfig, runtime::Runtime};
 
@@ -30,9 +30,13 @@ pub fn eval_with_setup(setup: impl FnOnce(), code: &str) -> String {
     setup();
     let rt = Runtime::init(&RuntimeConfig::default());
     let scope = rt.default_global();
-    let rval =
-        js::compile::evaluate_with_filename(&scope, code, "test.js", 1).expect("eval failed");
-    String::from_jsval(&scope, rval, ()).unwrap()
+    match js::compile::evaluate_with_filename(&scope, code, "test.js", 1) {
+        Ok(val) => String::from_jsval(&scope, val, ()).unwrap(),
+        Err(_) => panic!(
+            "JS evaluation threw an exception: {:?}",
+            ExnThrown::capture(&scope)
+        ),
+    }
 }
 
 /// Run setup, create a runtime, and check whether JS code throws.

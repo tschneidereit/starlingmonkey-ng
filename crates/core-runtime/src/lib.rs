@@ -7,11 +7,10 @@ pub mod runtime;
 
 pub mod test_util;
 
-use std::process;
-
+use js::error::ExnThrown;
 pub use js::macros::{
-    jsclass, jsglobals, jsmethods, jsmodule, jsnamespace, webidl_interface, webidl_namespace,
-    Traceable,
+    jsclass, jsglobals, jsmethods, jsmodule, jsnamespace, webidl_dictionary, webidl_interface,
+    webidl_namespace, Traceable,
 };
 
 use crate::runtime::Runtime;
@@ -28,7 +27,7 @@ use crate::runtime::Runtime;
 /// 6. Runs the event loop to completion (timers, promises, etc.)
 ///
 /// Exits the process with code 1 on any JS error.
-pub fn run(config: config::RuntimeConfig) {
+pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
     let runtime = Runtime::init(&config);
     let scope = runtime.default_global();
 
@@ -37,10 +36,12 @@ pub fn run(config: config::RuntimeConfig) {
         (eval.clone(), "<eval>".to_string())
     } else {
         let path = &config.script_path;
-        let source = std::fs::read_to_string(path).unwrap_or_else(|e| {
-            eprintln!("Error reading script '{}': {}", path, e);
-            process::exit(1);
-        });
+        let source = match std::fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(e) => {
+                return Err(format!("Error reading script '{}': {}", path, e));
+            }
+        };
         (source, path.clone())
     };
 
@@ -55,15 +56,16 @@ pub fn run(config: config::RuntimeConfig) {
                 module::evaluate_module(&scope, &source, &filename)
             } else {
                 js::compile::evaluate_with_filename(&scope, &source, &filename, 1)
-                    .map(|_| ())
-                    .map_err(|_| ())
             }
         })
     };
 
+    println!("Res: {eval_result:?}");
+
     if eval_result.is_err() {
-        unsafe { report_pending_exception(&scope) };
-        process::exit(1);
+        let exn = ExnThrown::capture(&scope);
+        println!("exn: {exn}");
+        return Err(format!("Script evaluation failed with error {exn}"));
     }
 
     // Run the event loop to process any queued async work.
@@ -74,9 +76,11 @@ pub fn run(config: config::RuntimeConfig) {
     event_loop::run_microtasks(&scope);
 
     if el.has_pending() && event_loop::native::run_to_completion(&scope, &mut el).is_err() {
-        unsafe { report_pending_exception(&scope) };
-        process::exit(1);
+        let exn = ExnThrown::capture(&scope);
+        return Err(format!("Script evaluation failed with error {exn:?}"));
     }
+
+    Ok(())
 }
 
 /// Extract and print the pending JS exception, if any.
@@ -128,14 +132,18 @@ mod tests {
     fn run_eval_module_mode() {
         let config = config_from(&["starling", "-e", "globalThis._x = 1 + 2;"]);
         assert!(config.module_mode());
-        run(config);
+        run(config)
+            .map_err(|e| println!("{e}"))
+            .expect("Run failed");
     }
 
     #[test]
     fn run_eval_legacy_script() {
         let config = config_from(&["starling", "-e", "var x = 42;", "--legacy-script"]);
         assert!(!config.module_mode());
-        run(config);
+        run(config)
+            .map_err(|e| println!("{e}"))
+            .expect("Run failed");
     }
 
     #[test]
@@ -145,7 +153,9 @@ mod tests {
         std::fs::write(&script, "const x = 1 + 2;\n").unwrap();
 
         let config = config_from(&["starling", &script.to_string_lossy()]);
-        run(config);
+        run(config)
+            .map_err(|e| println!("{e}"))
+            .expect("Run failed");
     }
 
     #[test]
@@ -155,7 +165,9 @@ mod tests {
         std::fs::write(&script, "var x = 1 + 2;\n").unwrap();
 
         let config = config_from(&["starling", &script.to_string_lossy(), "--legacy-script"]);
-        run(config);
+        run(config)
+            .map_err(|e| println!("{e}"))
+            .expect("Run failed");
     }
 
     #[test]
@@ -170,7 +182,9 @@ mod tests {
         .unwrap();
 
         let config = config_from(&["starling", &entry.to_string_lossy()]);
-        run(config);
+        run(config)
+            .map_err(|e| println!("{e}"))
+            .expect("Run failed");
     }
 
     #[test]
@@ -187,6 +201,8 @@ mod tests {
             "-i",
             &init.to_string_lossy(),
         ]);
-        run(config);
+        run(config)
+            .map_err(|e| println!("{e}"))
+            .expect("Run failed");
     }
 }

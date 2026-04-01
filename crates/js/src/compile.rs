@@ -16,6 +16,7 @@
 use std::ffi::CString;
 use std::ptr::NonNull;
 
+use crate::error::EvalError;
 use crate::gc::scope::Scope;
 use mozjs::gc::{Handle, HandleFunction, HandleScript, HandleValue};
 use mozjs::jsapi::mozilla::Utf8Unit;
@@ -28,7 +29,7 @@ use super::error::ExnThrown;
 ///
 /// This is the primary entry point for evaluating JavaScript from Rust. It
 /// handles compile options creation internally.
-pub fn evaluate<'s>(scope: &'s Scope<'_>, script: &str) -> Result<HandleValue<'s>, ExnThrown> {
+pub fn evaluate<'s>(scope: &'s Scope<'_>, script: &str) -> Result<HandleValue<'s>, EvalError> {
     evaluate_with_filename(scope, script, "<inline>", 1)
 }
 
@@ -38,7 +39,7 @@ pub fn evaluate_with_filename<'s>(
     script: &str,
     filename: &str,
     lineno: u32,
-) -> Result<HandleValue<'s>, ExnThrown> {
+) -> Result<HandleValue<'s>, EvalError> {
     evaluate_with_options(scope, script, filename, lineno, false)
 }
 
@@ -56,7 +57,7 @@ pub fn evaluate_non_syntactic<'s>(
     script: &str,
     filename: &str,
     lineno: u32,
-) -> Result<HandleValue<'s>, ExnThrown> {
+) -> Result<HandleValue<'s>, EvalError> {
     evaluate_with_options(scope, script, filename, lineno, true)
 }
 
@@ -66,7 +67,7 @@ fn evaluate_with_options<'s>(
     filename: &str,
     lineno: u32,
     non_syntactic_scope: bool,
-) -> Result<HandleValue<'s>, ExnThrown> {
+) -> Result<HandleValue<'s>, EvalError> {
     let filename_cstr =
         CString::new(filename).unwrap_or_else(|_| CString::new("<unknown>").unwrap());
     let options = CompileOptionsWrapper::new(scope.cx(), filename_cstr, lineno);
@@ -84,7 +85,7 @@ fn evaluate_with_options<'s>(
     let mut rval = scope.root_value_mut(crate::value::undefined());
     let ok =
         unsafe { wrappers2::Evaluate2(scope.cx_mut(), options.ptr, &mut source, rval.reborrow()) };
-    ExnThrown::check(ok)?;
+    ExnThrown::check(ok).map_err(|_| EvalError::Exn)?;
     Ok(rval.handle())
 }
 

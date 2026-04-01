@@ -45,10 +45,12 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use js::conversion::ToJSVal;
+use js::error::EvalError;
+use js::gc::scope::Scope;
 use js::heap::{Heap, Trace};
 use js::module_raw::{transform_str_to_source_text, CompileOptionsWrapper, SetModulePrivate};
 use js::native::{HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
-use js::prelude::RootScope;
+use js::prelude::{HandleValue, RootScope};
 use js::{value, Object};
 use oxc_resolver::{ResolveOptions, Resolver};
 
@@ -99,7 +101,7 @@ pub trait NativeModule: 'static {
     /// # Safety
     ///
     /// `scope` must be valid. `env` is the module environment object.
-    unsafe fn evaluate(scope: &js::gc::scope::Scope<'_>, env: HandleObject) -> bool;
+    unsafe fn evaluate(scope: &Scope<'_>, env: HandleObject) -> bool;
 }
 
 // ============================================================================
@@ -355,7 +357,7 @@ pub fn clear_module_state() {
 /// # Safety
 ///
 /// - [`init_module_loader`] must have been called first.
-pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>) -> bool {
+pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
     let declarations = T::declarations();
 
     // 1. Generate JS module source: `export var name1; export var name2; ...`
@@ -461,18 +463,17 @@ pub unsafe fn register_module<T: NativeModule>(scope: &js::gc::scope::Scope<'_>)
 ///
 /// - `cx` must be a valid `JSContext` pointer.
 /// - [`init_module_loader`] must have been called first.
-#[allow(clippy::result_unit_err)]
-pub unsafe fn evaluate_module(
-    scope: &js::gc::scope::Scope<'_>,
+pub unsafe fn evaluate_module<'s>(
+    scope: &'s Scope<'_>,
     source: &str,
     filename: &str,
-) -> Result<(), ()> {
+) -> Result<HandleValue<'s>, EvalError> {
     let c_filename = CString::new(filename).unwrap();
     let options = CompileOptionsWrapper::new(scope.cx_mut(), c_filename, 1);
 
     let mut src = transform_str_to_source_text(source);
-    let module =
-        unsafe { js::module::compile_module(scope, options.ptr, &mut src) }.map_err(|_| ())?;
+    let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
+        .map_err(|_| EvalError::Exn)?;
 
     // Set the module private so the resolve hook receives a valid
     // referencing module when this module's imports are resolved.
@@ -494,10 +495,8 @@ pub unsafe fn evaluate_module(
         }
     }
 
-    js::module::link(scope, module).map_err(|_| ())?;
-    js::module::evaluate(scope, module).map_err(|_| ())?;
-
-    Ok(())
+    js::module::link(scope, module).map_err(|_| EvalError::Exn)?;
+    js::module::evaluate(scope, module).map_err(|_| EvalError::Exn)
 }
 
 /// Helper to set a value export on a module environment object.
@@ -509,7 +508,7 @@ pub unsafe fn evaluate_module(
 /// - `cx` must be valid.
 /// - `env` must be a valid module environment object.
 pub unsafe fn set_module_export<'s, V: ToJSVal<'s> + ?Sized>(
-    scope: &'s js::gc::scope::Scope<'_>,
+    scope: &'s Scope<'_>,
     env: HandleObject,
     name: &str,
     value: &V,

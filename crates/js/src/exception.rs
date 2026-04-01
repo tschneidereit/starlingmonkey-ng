@@ -14,6 +14,21 @@ use mozjs::rust::HandleValue;
 
 use super::error::ExnThrown;
 
+pub fn check_fn_return(scope: &Scope<'_>, ok: bool, name: &str) -> bool {
+    if ok {
+        debug_assert!(
+            !is_pending(scope),
+            "Native function '{name}' returned true but an exception is pending",
+        );
+    } else {
+        debug_assert!(
+            is_pending(scope),
+            "Native function '{name}' returned false but no exception is pending",
+        );
+    }
+    ok
+}
+
 /// Check whether an exception is pending on the context.
 pub fn is_pending(scope: &Scope<'_>) -> bool {
     unsafe { wrappers2::JS_IsExceptionPending(scope.cx()) }
@@ -27,10 +42,15 @@ pub fn is_throwing_oom(scope: &Scope<'_>) -> bool {
 /// Get the pending exception value.
 ///
 /// Returns `Err` if no exception is pending or retrieval fails.
-pub fn get_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, ExnThrown> {
+pub fn get_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static str> {
     let mut vp = scope.root_value_mut(UndefinedValue());
-    let ok = unsafe { wrappers2::JS_GetPendingException(scope.cx_mut(), vp.reborrow().into()) };
-    ExnThrown::check(ok)?;
+    let ok = unsafe { wrappers2::JS_GetPendingException(scope.cx_mut(), vp.reborrow()) };
+    if !ok {
+        if !is_pending(scope) {
+            return Err("No exception pending");
+        }
+        return Err("Failed to get pending exception");
+    }
     Ok(vp.handle())
 }
 

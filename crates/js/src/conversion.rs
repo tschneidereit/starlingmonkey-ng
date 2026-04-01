@@ -49,7 +49,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::{ptr, slice};
 
-use crate::error::throw_type_error;
+use crate::error::{throw_type_error, ExnThrown, ThrowException};
 use crate::prelude::Scope;
 
 trait As<O>: Copy {
@@ -140,6 +140,22 @@ pub enum ConversionError {
     ExnPending,
     /// Conversion failed, without a pending JS exception.
     Failure(Cow<'static, CStr>),
+}
+
+impl ConversionError {
+    /// Throw ConversionError::Failure as a JavaScript `TypeError` exception.
+    pub fn throw(&self, scope: &Scope<'_>) -> ExnThrown {
+        if let ConversionError::Failure(msg) = self {
+            return throw_type_error(scope, msg.as_ref());
+        }
+        ExnThrown
+    }
+}
+
+impl ThrowException for ConversionError {
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+        ConversionError::throw(&self, scope)
+    }
 }
 
 /// A trait to convert `JSVal`s to Rust types.
