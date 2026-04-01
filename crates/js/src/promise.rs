@@ -60,6 +60,37 @@ impl<'s> Stack<'s, Promise> {
             .ok_or(ExnThrown)
     }
 
+    /// Create a new `Promise` that is immediately resolved with the given `value`.
+    pub fn new_resolved_with_value(
+        scope: &'s Scope<'_>,
+        value: HandleValue,
+    ) -> Result<Self, ExnThrown> {
+        let promise = Self::new_pending(scope)?;
+        promise.resolve(scope, value)?;
+        Ok(promise)
+    }
+
+    /// Create a new `Promise` that is immediately rejected with the given `error`.
+    pub fn new_rejected_with_error(
+        scope: &'s Scope<'_>,
+        error: HandleValue,
+    ) -> Result<Self, ExnThrown> {
+        let promise = Self::new_pending(scope)?;
+        promise.reject(scope, error)?;
+        Ok(promise)
+    }
+
+    /// Create a new `Promise` that is immediately rejected with the pending exception.
+    pub fn new_rejected_with_pending_error(scope: &'s Scope<'_>) -> Result<Self, &'static str> {
+        let pending_exception = crate::exception::get_pending(scope)?;
+        crate::exception::clear(scope);
+        let promise = Self::new_pending(scope).map_err(|_| "Failed to create promise")?;
+        promise
+            .reject(scope, pending_exception)
+            .map_err(|_| "Failed to reject promise with pending exception")?;
+        Ok(promise)
+    }
+
     /// Check whether an object is a `Promise`.
     pub fn is_promise(obj: HandleObject) -> bool {
         // SAFETY: IsPromiseObject only inspects the object's class pointer.
@@ -70,6 +101,23 @@ impl<'s> Stack<'s, Promise> {
     pub fn state(&self) -> PromiseState {
         // SAFETY: self is a rooted handle to a valid Promise object.
         unsafe { wrappers2::GetPromiseState(self.handle()) }
+    }
+
+    /// Check whether this promise is already rejected.
+    pub fn is_rejected(&self) -> bool {
+        self.state() == PromiseState::Rejected
+    }
+
+    /// Get the result value of a settled promise.
+    ///
+    /// For a fulfilled promise this is the fulfillment value; for a rejected
+    /// promise this is the rejection reason. On a pending promise this returns
+    /// `undefined`.
+    pub fn result<'a>(&self, scope: &'a Scope<'_>) -> HandleValue<'a> {
+        let mut val = scope.root_value_mut(mozjs::jsval::UndefinedValue());
+        // SAFETY: self is a rooted handle to a valid Promise object.
+        unsafe { mozjs::glue::JS_GetPromiseResult(self.handle().into(), val.reborrow().into()) };
+        val.handle()
     }
 
     /// Get the unique ID of this promise (for debugging/tracking).
