@@ -1,0 +1,15 @@
+[package]
+name = "wpt-support"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+libstarling.workspace = true
+core-runtime.workspace = true
+js.workspace = true
+
+[lints]
+workspace = true

@@ -14,7 +14,6 @@
 pub mod base64;
 // pub mod console;
 pub mod dom_exception;
-pub mod wpt_support;
 
 pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
     unsafe {

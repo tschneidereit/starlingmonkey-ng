@@ -18,6 +18,9 @@ fn main() {
         }
     };
 
+    if config.wpt_mode {
+        register_wpt_builtins();
+    }
     let _ = libstarling::run(config).map_err(|e| println!("{e}"));
 }
 
@@ -30,4 +33,11 @@ fn cli_runs() {
     libstarling::run(config)
         .map_err(|e| println!("{e}"))
         .expect("Run failed");
+}
+
+/// Register WPT (Web Platform Tests) support globals (`evalScript`, etc.).
+///
+/// This must be called before `Runtime::init()` when running in WPT mode.
+pub fn register_wpt_builtins() {
+    libstarling::runtime::register_global_initializer(wpt_support::add_to_global);
 }

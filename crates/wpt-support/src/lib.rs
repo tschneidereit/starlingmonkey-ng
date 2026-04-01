@@ -9,6 +9,7 @@
 
 use js::conversion::ConversionError;
 use js::error::throw_error;
+use js::exception::check_fn_return;
 use js::gc::scope::Scope;
 use js::native::{Handle, RawJSContext};
 use js::prelude::FromJSVal;
@@ -22,7 +23,7 @@ use js::Object;
 /// # Safety
 ///
 /// Must be called with a valid scope and global object.
-pub unsafe fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
+pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
     js::Function::define(
         scope,
         global.handle(),
@@ -65,8 +66,8 @@ unsafe extern "C" fn eval_script_native(
             true
         }
         Err(_) => {
-            // Exception is already pending on the context.
-            false
+            println!("Eval failed");
+            check_fn_return(&scope, false, "evalScript")
         }
     }
 }
@@ -80,7 +81,7 @@ mod tests {
             eval_with_setup(
                 || {
                     libstarling::register_builtins();
-                    libstarling::register_wpt_builtins();
+                    libstarling::runtime::register_global_initializer(crate::add_to_global);
                 },
                 code,
             )

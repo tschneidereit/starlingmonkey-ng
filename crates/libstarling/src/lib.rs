@@ -14,22 +14,12 @@ pub fn register_builtins() {
     });
 }
 
-/// Register WPT (Web Platform Tests) support globals (`evalScript`, etc.).
-///
-/// This must be called before `Runtime::init()` when running in WPT mode.
-pub fn register_wpt_builtins() {
-    runtime::register_global_initializer(web_globals::wpt_support::add_to_global);
-}
-
 /// Run a JavaScript script or module based on the provided configuration.
 ///
 /// This registers all builtin globals (btoa, atob, etc.) and then delegates
 /// to [`core_runtime::run()`]. When `config.wpt_mode` is true, WPT-specific
 /// globals like `evalScript` are also installed.
-pub fn run(config: config::RuntimeConfig) {
+pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
     register_builtins();
-    if config.wpt_mode {
-        register_wpt_builtins();
-    }
-    core_runtime::run(config);
+    core_runtime::run(config)
 }

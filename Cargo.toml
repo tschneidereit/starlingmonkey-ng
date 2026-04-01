@@ -28,6 +28,7 @@ oxc_resolver = "11.19.1"
 oxc_span = "0.116.0"
 starling-macro = { path = "crates/starling-macro" }
 wasip3 = { version = "0.4", features = ["http-compat"] }
+wpt-support = { path = "crates/wpt-support" }
 # wit-bindgen = { version = "0.51", features = ["async", "async-spawn"] }
 
 # bindgen = { version = "0.72", default-features = false, features = [

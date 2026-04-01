@@ -22,6 +22,7 @@ core-runtime.workspace = true
 js.workspace = true
 libstarling.workspace = true
 wasip3.workspace = true
+wpt-support.workspace = true
 
 [lints]
 workspace = true
