@@ -28,13 +28,8 @@ use js::{
 
 /// Callback type for installing additional globals on a newly created global object.
 ///
-/// Registered initializers are called during `Runtime::new_global()` after
-/// the built-in timer globals have been installed.
-///
-/// # Safety
-///
-/// The callback must only perform safe JS operations within the provided scope.
-type GlobalInitFn = unsafe fn(&Scope<'_>, Object<'_>);
+/// Registered initializers are called during `Runtime::new_global()`.
+type GlobalInitFn = for<'a> fn(&'a Scope<'a>, Object<'a>);
 
 thread_local! {
     static GLOBAL_INITIALIZERS: RefCell<Vec<GlobalInitFn>> = const { RefCell::new(Vec::new()) };
@@ -266,7 +261,7 @@ impl Runtime {
         // Call any registered global initializers (e.g., web-globals, WPT builtins).
         GLOBAL_INITIALIZERS.with(|inits| {
             for init in inits.borrow().iter() {
-                unsafe { init(&scope, scope.global()) };
+                init(&scope, scope.global());
             }
         });
 

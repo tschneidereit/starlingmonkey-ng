@@ -305,7 +305,7 @@ mod jsnamespace_tests {
         eval_with_setup(
             || {
                 core_runtime::runtime::register_global_initializer(|scope, global| {
-                    unsafe { math_ns::add_to_global(scope, global) };
+                    math_ns::add_to_global(scope, global);
                 });
             },
             code,
@@ -365,7 +365,7 @@ mod webidl_namespace_tests {
         eval_with_setup(
             || {
                 core_runtime::runtime::register_global_initializer(|scope, global| {
-                    unsafe { css_ns::add_to_global(scope, global) };
+                    css_ns::add_to_global(scope, global);
                 });
             },
             code,

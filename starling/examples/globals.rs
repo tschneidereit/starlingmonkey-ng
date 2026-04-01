@@ -47,7 +47,7 @@ fn main() {
     let global = scope.global();
 
     // Install globals
-    unsafe { my_globals::add_to_global(&scope, global) };
+    my_globals::add_to_global(&scope, global);
 
     // ====================================================================
     // Test 1: Rust-side calls still work

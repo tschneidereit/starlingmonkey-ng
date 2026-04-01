@@ -297,7 +297,7 @@ fn main() {
 
     // Register classes and install globals — classes are registered via
     // `pub use ClassName;` inside the #[jsglobals] block.
-    unsafe { app_globals::add_to_global(&scope, global) };
+    app_globals::add_to_global(&scope, global);
 
     // Register native module.
     assert!(
