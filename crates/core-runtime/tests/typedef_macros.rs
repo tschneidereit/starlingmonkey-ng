@@ -509,3 +509,200 @@ mod setup_style_inheritance {
         );
     }
 }
+
+/// Tests for `#[webidl_dictionary]` — WebIDL dictionary conversion.
+mod webidl_dictionary_tests {
+    use core_runtime::test_util::{eval_with_setup, throws_with_setup};
+    use core_runtime::{jsmethods, webidl_dictionary, webidl_interface};
+    use js::Object;
+
+    // A dictionary with all required members.
+    #[webidl_dictionary]
+    pub struct PersonInit {
+        pub name: String,
+        pub age: f64,
+    }
+
+    // A dictionary with optional members.
+    #[webidl_dictionary]
+    pub struct GreetingOptions {
+        pub prefix: Option<String>,
+        pub excited: Option<bool>,
+    }
+
+    // A dictionary with a default value.
+    #[webidl_dictionary]
+    pub struct ConfigInit {
+        #[webidl(default = 10.0)]
+        pub timeout: f64,
+        pub label: Option<String>,
+    }
+
+    // A lifetimed dictionary with scope-rooted types.
+    #[webidl_dictionary]
+    pub struct StreamOptions<'a> {
+        pub high_water_mark: f64,
+        pub source: Option<Object<'a>>,
+    }
+
+    // A dictionary with a custom JS name on a field.
+    #[webidl_dictionary]
+    pub struct CustomNamed {
+        #[webidl(name = "mySpecialField")]
+        pub special: String,
+    }
+
+    // A class that uses dictionary parameters.
+    #[webidl_interface]
+    struct Greeter {
+        greeting: String,
+    }
+
+    #[jsmethods]
+    impl Greeter {
+        #[constructor]
+        fn new(person: PersonInit, options: Option<GreetingOptions>) -> Self {
+            let prefix = options
+                .as_ref()
+                .and_then(|o| o.prefix.clone())
+                .unwrap_or_else(|| "Hello".to_string());
+            let excited = options.as_ref().and_then(|o| o.excited).unwrap_or(false);
+            let suffix = if excited { "!" } else { "." };
+            Self {
+                greeting: format!("{}, {} (age {}){}", prefix, person.name, person.age, suffix),
+            }
+        }
+
+        #[getter]
+        fn greeting(&self) -> String {
+            self.data().greeting.clone()
+        }
+    }
+
+    // A class testing default values.
+    #[webidl_interface]
+    struct Config {
+        timeout: f64,
+        label: String,
+    }
+
+    #[jsmethods]
+    impl Config {
+        #[constructor]
+        fn new(init: ConfigInit) -> Self {
+            Self {
+                timeout: init.timeout,
+                label: init.label.unwrap_or_else(|| "default".to_string()),
+            }
+        }
+
+        #[getter]
+        fn timeout(&self) -> f64 {
+            self.data().timeout
+        }
+
+        #[getter]
+        fn label(&self) -> String {
+            self.data().label.clone()
+        }
+    }
+
+    fn setup() {
+        core_runtime::runtime::register_global_initializer(|scope, global| {
+            Greeter::add_to_global(scope, global);
+            Config::add_to_global(scope, global);
+        });
+    }
+
+    fn eval(code: &str) -> String {
+        eval_with_setup(setup, code)
+    }
+
+    fn throws(code: &str) -> bool {
+        throws_with_setup(setup, code)
+    }
+
+    // Required members
+
+    #[test]
+    fn required_members_extracted() {
+        assert_eq!(
+            eval("new Greeter({ name: 'Alice', age: 30 }).greeting"),
+            "Hello, Alice (age 30)."
+        );
+    }
+
+    #[test]
+    fn required_member_missing_throws() {
+        // Missing 'age' should throw.
+        assert!(throws("new Greeter({ name: 'Alice' })"));
+    }
+
+    #[test]
+    fn required_member_all_missing_throws() {
+        assert!(throws("new Greeter({})"));
+    }
+
+    #[test]
+    fn non_object_dict_throws() {
+        assert!(throws("new Greeter(42)"));
+    }
+
+    // Optional members
+
+    #[test]
+    fn optional_members_present() {
+        assert_eq!(
+            eval("new Greeter({ name: 'Bob', age: 25 }, { prefix: 'Hi', excited: true }).greeting"),
+            "Hi, Bob (age 25)!"
+        );
+    }
+
+    #[test]
+    fn optional_members_absent() {
+        assert_eq!(
+            eval("new Greeter({ name: 'Charlie', age: 20 }).greeting"),
+            "Hello, Charlie (age 20)."
+        );
+    }
+
+    #[test]
+    fn optional_dict_param_null() {
+        // Second param (GreetingOptions) is optional and null → treated as None.
+        assert_eq!(
+            eval("new Greeter({ name: 'Dana', age: 18 }, null).greeting"),
+            "Hello, Dana (age 18)."
+        );
+    }
+
+    // Default values
+
+    #[test]
+    fn default_value_used_when_missing() {
+        assert_eq!(eval("new Config({}).timeout"), "10");
+    }
+
+    #[test]
+    fn default_value_overridden() {
+        assert_eq!(eval("new Config({ timeout: 42 }).timeout"), "42");
+    }
+
+    #[test]
+    fn default_and_optional_combined() {
+        assert_eq!(eval("new Config({}).label"), "default");
+        assert_eq!(eval("new Config({ label: 'custom' }).label"), "custom");
+    }
+
+    // Empty/null/undefined dictionaries
+
+    #[test]
+    fn null_dict_uses_defaults() {
+        // null → all members get their defaults.
+        assert_eq!(eval("new Config(null).timeout"), "10");
+    }
+
+    #[test]
+    fn undefined_dict_uses_defaults() {
+        assert_eq!(eval("new Config(undefined).timeout"), "10");
+    }
+}

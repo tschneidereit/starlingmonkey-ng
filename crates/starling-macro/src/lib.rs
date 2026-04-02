@@ -3352,6 +3352,398 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
     output.into()
 }
 
+// ============================================================================
+// #[webidl_dictionary] attribute macro
+// ============================================================================
+
+/// Attribute macro that makes a struct usable as a WebIDL dictionary.
+///
+/// Generates a `FromJSVal` implementation that extracts named properties from
+/// a JS object, following the [WebIDL dictionary conversion semantics]
+/// (https://webidl.spec.whatwg.org/#es-dictionary).
+///
+/// # Field mapping
+///
+/// Each field's Rust `snake_case` name is converted to `camelCase` for the
+/// JS property lookup. Override the JS name with `#[webidl(name = "...")]`.
+///
+/// # Lifetimes
+///
+/// If the struct contains GC references, it must carry a lifetime parameter
+/// (e.g. `'a`) that is tied to the scope. Any field types that borrow from
+/// the JS engine (`HandleValue<'a>`, `Object<'a>`, stack newtypes) use this
+/// lifetime.
+///
+/// # Default values
+///
+/// Annotate a field with `#[webidl(default = <expr>)]` to provide a default
+/// value used when the property is missing or `undefined`. Only valid on
+/// non-`Option` fields (use `Option<T>` for "absent means `None`").
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// #[webidl_dictionary]
+/// pub struct QueuingStrategyInit<'a> {
+///     pub high_water_mark: f64,
+///     pub size: Option<Object<'a>>,
+/// }
+/// ```
+///
+/// Then use as a parameter in a `#[jsmethods]` method:
+///
+/// ```rust,ignore
+/// #[constructor]
+/// fn new(init: QueuingStrategyInit<'_>) -> Self {
+///     Self { high_water_mark: init.high_water_mark }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemStruct);
+    process_webidl_dictionary(input)
+}
+
+/// Shared implementation for `#[webidl_dictionary]`.
+fn process_webidl_dictionary(input: ItemStruct) -> TokenStream {
+    let struct_name = &input.ident;
+    let vis = &input.vis;
+    let attrs = &input.attrs;
+    let generics = &input.generics;
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+
+    // Determine the lifetime parameter. WebIDL dictionaries that contain
+    // scope-rooted types must have exactly one lifetime parameter.
+    let lifetime = generics.lifetimes().next().map(|lt| &lt.lifetime);
+
+    let fields = match &input.fields {
+        Fields::Named(f) => &f.named,
+        _ => {
+            return syn::Error::new_spanned(
+                &input,
+                "#[webidl_dictionary] requires a struct with named fields",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    // Parse each field into a DictionaryMember.
+    let mut members: Vec<DictMember> = Vec::new();
+    for field in fields {
+        let ident = field.ident.as_ref().unwrap().clone();
+        let ty = field.ty.clone();
+
+        // Parse #[webidl(...)] attributes on this field.
+        let mut js_name_override: Option<String> = None;
+        let mut default_expr: Option<syn::Expr> = None;
+        for attr in &field.attrs {
+            if attr.path().is_ident("webidl") {
+                let _ = attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("name") {
+                        let value = meta.value()?;
+                        let lit: LitStr = value.parse()?;
+                        js_name_override = Some(lit.value());
+                    } else if meta.path.is_ident("default") {
+                        let value = meta.value()?;
+                        let expr: syn::Expr = value.parse()?;
+                        default_expr = Some(expr);
+                    }
+                    Ok(())
+                });
+            }
+        }
+
+        let js_name = js_name_override.unwrap_or_else(|| ident.to_string().to_lower_camel_case());
+        let optional = is_option_type(&ty);
+        let inner_ty = if optional {
+            extract_option_inner_type(&ty)
+        } else {
+            None
+        };
+
+        members.push(DictMember {
+            ident,
+            ty,
+            inner_ty,
+            js_name,
+            optional,
+            default_expr,
+        });
+    }
+
+    // Sort members alphabetically by JS name (per WebIDL spec §3.2.17).
+    members.sort_by(|a, b| a.js_name.cmp(&b.js_name));
+
+    // Generate the property extraction code for each member.
+    let member_extractions: Vec<proc_macro2::TokenStream> =
+        members.iter().map(gen_dict_member_extraction).collect();
+
+    // Generate field initializers in struct declaration order (not sorted).
+    let field_idents: Vec<&Ident> = members.iter().map(|m| &m.ident).collect();
+
+    // The scope parameter in FromJSVal. If the struct has a lifetime, bind it.
+    let scope_lifetime = if let Some(lt) = lifetime {
+        quote! { #lt }
+    } else {
+        quote! { 's }
+    };
+
+    // For structs with a lifetime, the FromJSVal impl binds the struct's
+    // lifetime to the scope's lifetime. For structs without a lifetime,
+    // we use a fresh 's.
+    let from_jsval_impl = if lifetime.is_some() {
+        quote! {
+            impl<#scope_lifetime> ::js::conversion::FromJSVal<#scope_lifetime> for #struct_name<#scope_lifetime> {
+                type Config = ();
+
+                fn from_jsval(
+                    scope: &#scope_lifetime ::js::prelude::Scope<#scope_lifetime>,
+                    val: ::js::prelude::HandleValue<#scope_lifetime>,
+                    _option: (),
+                ) -> Result<Self, ::js::conversion::ConversionError> {
+                    // WebIDL §3.2.17: If V is undefined or null, treat as empty dict.
+                    // If V is not an object, throw TypeError.
+                    let __obj = if val.get().is_null_or_undefined() {
+                        None
+                    } else if val.is_object() {
+                        Some(
+                            ::js::Object::from_value(scope, *val)
+                                .map_err(|_| ::js::conversion::ConversionError::Failure(
+                                    ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
+                                ))?
+                        )
+                    } else {
+                        return Err(::js::conversion::ConversionError::Failure(
+                            ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
+                        ));
+                    };
+
+                    #(#member_extractions)*
+
+                    Ok(#struct_name {
+                        #(#field_idents),*
+                    })
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl ::js::conversion::FromJSVal<'_> for #struct_name {
+                type Config = ();
+
+                fn from_jsval(
+                    scope: &::js::prelude::Scope<'_>,
+                    val: ::js::prelude::HandleValue<'_>,
+                    _option: (),
+                ) -> Result<Self, ::js::conversion::ConversionError> {
+                    let __obj = if val.get().is_null_or_undefined() {
+                        None
+                    } else if val.is_object() {
+                        Some(
+                            ::js::Object::from_value(scope, *val)
+                                .map_err(|_| ::js::conversion::ConversionError::Failure(
+                                    ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
+                                ))?
+                        )
+                    } else {
+                        return Err(::js::conversion::ConversionError::Failure(
+                            ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
+                        ));
+                    };
+
+                    #(#member_extractions)*
+
+                    Ok(#struct_name {
+                        #(#field_idents),*
+                    })
+                }
+            }
+        }
+    };
+
+    // Strip #[webidl(...)] attributes from the output struct's fields.
+    let mut output_struct = input.clone();
+    if let Fields::Named(ref mut named) = output_struct.fields {
+        for field in &mut named.named {
+            field.attrs.retain(|a| !a.path().is_ident("webidl"));
+        }
+    }
+
+    let cleaned_fields = if let Fields::Named(ref named) = output_struct.fields {
+        let field_tokens: Vec<_> = named
+            .named
+            .iter()
+            .map(|f| {
+                let field_attrs: Vec<_> = f
+                    .attrs
+                    .iter()
+                    .filter(|a| !a.path().is_ident("webidl"))
+                    .collect();
+                let field_vis = &f.vis;
+                let field_ident = &f.ident;
+                let field_ty = &f.ty;
+                quote! {
+                    #(#field_attrs)*
+                    #field_vis #field_ident: #field_ty
+                }
+            })
+            .collect();
+        field_tokens
+    } else {
+        vec![]
+    };
+
+    let output = quote! {
+        #(#attrs)*
+        #vis struct #struct_name #impl_generics #where_clause {
+            #(#cleaned_fields),*
+        }
+
+        #from_jsval_impl
+    };
+
+    output.into()
+}
+
+/// Information about a single dictionary member.
+struct DictMember {
+    ident: Ident,
+    ty: Type,
+    /// The inner type if this is `Option<T>`.
+    inner_ty: Option<Type>,
+    /// The JS property name (camelCase).
+    js_name: String,
+    /// Whether this is an `Option<T>` field (optional member).
+    optional: bool,
+    /// Default expression, if any (from `#[webidl(default = ...)]`).
+    default_expr: Option<syn::Expr>,
+}
+
+/// Generate the extraction code for a single dictionary member.
+fn gen_dict_member_extraction(member: &DictMember) -> proc_macro2::TokenStream {
+    let ident = &member.ident;
+    let js_name = &member.js_name;
+    let js_name_cstr = std::ffi::CString::new(js_name.as_str()).unwrap();
+    let js_name_cstr_lit = proc_macro2::Literal::c_string(&js_name_cstr);
+
+    if member.optional {
+        // Optional member (Option<T>): None when property is missing/undefined.
+        let inner_ty = member.inner_ty.as_ref().unwrap_or(&member.ty);
+
+        if is_integer_type(inner_ty) {
+            quote! {
+                let #ident = if let Some(ref __obj) = __obj {
+                    let __prop = __obj.get_property(scope, #js_name_cstr_lit)
+                        .map_err(|_| ::js::conversion::ConversionError::ExnPending)?;
+                    if __prop.get().is_undefined() {
+                        None
+                    } else {
+                        Some(<#inner_ty as ::js::conversion::FromJSVal<'_>>::from_jsval(
+                            scope, __prop, ::js::conversion::ConversionBehavior::Default,
+                        )?)
+                    }
+                } else {
+                    None
+                };
+            }
+        } else {
+            quote! {
+                let #ident = if let Some(ref __obj) = __obj {
+                    let __prop = __obj.get_property(scope, #js_name_cstr_lit)
+                        .map_err(|_| ::js::conversion::ConversionError::ExnPending)?;
+                    if __prop.get().is_undefined() {
+                        None
+                    } else {
+                        Some(::js::conversion::FromJSVal::from_jsval(scope, __prop, ())?)
+                    }
+                } else {
+                    None
+                };
+            }
+        }
+    } else if let Some(ref default_expr) = member.default_expr {
+        // Required member with a default: use default when missing/undefined.
+        let ty = &member.ty;
+
+        if is_integer_type(ty) {
+            quote! {
+                let #ident: #ty = if let Some(ref __obj) = __obj {
+                    let __prop = __obj.get_property(scope, #js_name_cstr_lit)
+                        .map_err(|_| ::js::conversion::ConversionError::ExnPending)?;
+                    if __prop.get().is_undefined() {
+                        #default_expr
+                    } else {
+                        <#ty as ::js::conversion::FromJSVal<'_>>::from_jsval(
+                            scope, __prop, ::js::conversion::ConversionBehavior::Default,
+                        )?
+                    }
+                } else {
+                    #default_expr
+                };
+            }
+        } else {
+            quote! {
+                let #ident: #ty = if let Some(ref __obj) = __obj {
+                    let __prop = __obj.get_property(scope, #js_name_cstr_lit)
+                        .map_err(|_| ::js::conversion::ConversionError::ExnPending)?;
+                    if __prop.get().is_undefined() {
+                        #default_expr
+                    } else {
+                        ::js::conversion::FromJSVal::from_jsval(scope, __prop, ())?
+                    }
+                } else {
+                    #default_expr
+                };
+            }
+        }
+    } else {
+        // Required member without a default: TypeError when missing.
+        let ty = &member.ty;
+        let err_msg = format!("Missing required dictionary member '{}'", js_name);
+        let err_cstr = std::ffi::CString::new(err_msg.as_str()).unwrap();
+        let err_lit = proc_macro2::Literal::c_string(&err_cstr);
+
+        if is_integer_type(ty) {
+            quote! {
+                let #ident: #ty = if let Some(ref __obj) = __obj {
+                    let __prop = __obj.get_property(scope, #js_name_cstr_lit)
+                        .map_err(|_| ::js::conversion::ConversionError::ExnPending)?;
+                    if __prop.get().is_undefined() {
+                        return Err(::js::conversion::ConversionError::Failure(
+                            ::std::borrow::Cow::Borrowed(#err_lit),
+                        ));
+                    }
+                    <#ty as ::js::conversion::FromJSVal<'_>>::from_jsval(
+                        scope, __prop, ::js::conversion::ConversionBehavior::Default,
+                    )?
+                } else {
+                    return Err(::js::conversion::ConversionError::Failure(
+                        ::std::borrow::Cow::Borrowed(#err_lit),
+                    ));
+                };
+            }
+        } else {
+            quote! {
+                let #ident: #ty = if let Some(ref __obj) = __obj {
+                    let __prop = __obj.get_property(scope, #js_name_cstr_lit)
+                        .map_err(|_| ::js::conversion::ConversionError::ExnPending)?;
+                    if __prop.get().is_undefined() {
+                        return Err(::js::conversion::ConversionError::Failure(
+                            ::std::borrow::Cow::Borrowed(#err_lit),
+                        ));
+                    }
+                    ::js::conversion::FromJSVal::from_jsval(scope, __prop, ())?
+                } else {
+                    return Err(::js::conversion::ConversionError::Failure(
+                        ::std::borrow::Cow::Borrowed(#err_lit),
+                    ));
+                };
+            }
+        }
+    }
+}
+
 #[proc_macro_attribute]
 pub fn must_root(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item: proc_macro2::TokenStream = item.into();
