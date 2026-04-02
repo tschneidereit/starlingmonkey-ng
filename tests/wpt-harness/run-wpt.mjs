@@ -293,9 +293,9 @@ function assembleTestScript(testPath) {
 }
 
 function toEvalScriptCall(source, url) {
-  let escaped = source.split("`").join("\\`");
+  let escaped = source.split("\\").join("\\\\");
+  escaped = escaped.split("`").join("\\`");
   escaped = escaped.split("${").join("\\${");
-  escaped = escaped.split("\'").join("\\'");
   return `// ${url}\nevalScript(\`${escaped}\`, ${JSON.stringify(url)});\n\n`;
 }
 
