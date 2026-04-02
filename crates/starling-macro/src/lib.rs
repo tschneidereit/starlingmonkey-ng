@@ -34,6 +34,11 @@ struct AttrOpts {
     /// `@@toStringTag` property to the given string value (non-writable,
     /// non-enumerable, configurable — per WebIDL §3.7.6).
     to_string_tag: Option<String>,
+    /// When `true`, define the namespace property on the global as
+    /// non-enumerable (using `DefineProperty` with `attrs = 0`).
+    non_enumerable: Option<bool>,
+    /// when `true`, generate an empty intermediate prototype
+    empty_intermediate_prototype: Option<bool>,
 }
 
 impl Parse for AttrOpts {
@@ -43,6 +48,8 @@ impl Parse for AttrOpts {
             extends: None,
             js_proto: None,
             to_string_tag: None,
+            non_enumerable: None,
+            empty_intermediate_prototype: None,
         };
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -52,6 +59,14 @@ impl Parse for AttrOpts {
                 "extends" => opts.extends = Some(input.parse()?),
                 "js_proto" => opts.js_proto = Some(input.parse::<LitStr>()?.value()),
                 "to_string_tag" => opts.to_string_tag = Some(input.parse::<LitStr>()?.value()),
+                "non_enumerable" => {
+                    let val: syn::LitBool = input.parse()?;
+                    opts.non_enumerable = Some(val.value());
+                }
+                "empty_intermediate_prototype" => {
+                    let val: syn::LitBool = input.parse()?;
+                    opts.empty_intermediate_prototype = Some(val.value());
+                }
                 _ => return Err(syn::Error::new(key.span(), "unknown option")),
             }
             if !input.is_empty() {
@@ -3151,6 +3166,8 @@ pub fn webidl_namespace(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfig) -> TokenStream {
     let mod_name = &input.ident;
     let mod_vis = &input.vis;
+    let non_enumerable = opts.non_enumerable.unwrap_or(false);
+    let empty_intermediate_prototype = opts.empty_intermediate_prototype.unwrap_or(false);
     let js_ns_name = opts
         .name
         .unwrap_or_else(|| mod_name.to_string().to_lower_camel_case());
@@ -3314,6 +3331,38 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
     let js_ns_name_bytes = format!("{js_ns_name}\0");
     let js_ns_name_cstr = proc_macro2::Literal::byte_string(js_ns_name_bytes.as_bytes());
 
+    // Generate global property installation: non-enumerable uses define_property,
+    // otherwise uses set_property (default enumerable behavior).
+    let global_install = if non_enumerable {
+        // attrs = 0 → writable, non-enumerable, configurable
+        // define_property roots the value, so we can pass the raw ns_val without rooting it here.
+        quote! {
+            global.define_property(scope, ns_name, &ns_val, 0)
+                .expect("failed to define namespace on global");
+        }
+    } else {
+        quote! {
+            let ns_val_handle = scope.root_value(ns_val);
+            global.set_property(scope, ns_name, ns_val_handle)
+                .expect("failed to set namespace on global");
+        }
+    };
+
+    // Generate intermediate prototype chain if explicitly requested.
+   
+    let prototype_setup = if empty_intermediate_prototype {
+        // This inserts an empty object between the namespace and Object.prototype:
+        // ns → emptyProto → Object.prototype
+        quote! {
+            let empty_proto = ::js::Object::new_plain(scope)
+                .expect("failed to create namespace intermediate proto");
+            ns_obj.set_prototype(scope, empty_proto.handle())
+                .expect("failed to set namespace prototype");
+        }
+    } else {
+        quote! {}
+    };
+
     let output = quote! {
         #[allow(unused_imports)]
         #mod_vis mod #mod_name {
@@ -3337,14 +3386,15 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
                 // Install Symbol.toStringTag if applicable.
                 #to_string_tag_install
 
+                // Set up intermediate prototype if applicable.
+                #prototype_setup
+
                 // Set the namespace on the global.
                 let ns_name = unsafe {
                     ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_ns_name_cstr)
                 };
                 let ns_val = unsafe { ::js::value::from_object(ns_obj.as_raw()) };
-                let ns_val_handle = scope.root_value(ns_val);
-                global.set_property(scope, ns_name, ns_val_handle)
-                    .expect("failed to set namespace on global");
+                #global_install
             }
         }
     };
