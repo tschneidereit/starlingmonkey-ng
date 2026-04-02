@@ -131,32 +131,28 @@ fn is_unrooted_ty<'tcx>(
                         ) => !has_attr(ty.def_id, sym.allow_unrooted_in_rc),
                         _ => true,
                     }
-                } else if match_def_path(cx, did.did(), &[sym::core, sym.cell, sym.Ref]) ||
-                    match_def_path(cx, did.did(), &[sym::core, sym.cell, sym.RefMut]) ||
-                    match_def_path(cx, did.did(), &[sym::core, sym::slice, sym::iter, sym.Iter]) ||
-                    match_def_path(
+                } else if match_def_path(cx, did.did(), &[sym::core, sym.cell, sym.Ref])
+                    || match_def_path(cx, did.did(), &[sym::core, sym.cell, sym.RefMut])
+                    || match_def_path(cx, did.did(), &[sym::core, sym::slice, sym::iter, sym.Iter])
+                    || match_def_path(
                         cx,
                         did.did(),
                         &[sym::core, sym::slice, sym::iter, sym.IterMut],
-                    ) ||
-                    match_def_path(cx, did.did(), &[sym.accountable_refcell, sym.Ref]) ||
-                    match_def_path(cx, did.did(), &[sym.accountable_refcell, sym.RefMut]) ||
-                    match_def_path(
-                        cx,
-                        did.did(),
-                        &[sym.mozjs, sym.gc, sym.root, sym.Handle],
-                    ) ||
-                    match_def_path(
+                    )
+                    || match_def_path(cx, did.did(), &[sym.accountable_refcell, sym.Ref])
+                    || match_def_path(cx, did.did(), &[sym.accountable_refcell, sym.RefMut])
+                    || match_def_path(cx, did.did(), &[sym.mozjs, sym.gc, sym.root, sym.Handle])
+                    || match_def_path(
                         cx,
                         did.did(),
                         &[sym.mozjs_sys, sym.generated, sym.root, sym.JS, sym.Handle],
-                    ) ||
-                    match_def_path(
+                    )
+                    || match_def_path(
                         cx,
                         did.did(),
                         &[sym::std, sym.collections, sym.hash, sym.map, sym.Entry],
-                    ) ||
-                    match_def_path(
+                    )
+                    || match_def_path(
                         cx,
                         did.did(),
                         &[
@@ -166,8 +162,8 @@ fn is_unrooted_ty<'tcx>(
                             sym.map,
                             sym.OccupiedEntry,
                         ],
-                    ) ||
-                    match_def_path(
+                    )
+                    || match_def_path(
                         cx,
                         did.did(),
                         &[
@@ -177,13 +173,13 @@ fn is_unrooted_ty<'tcx>(
                             sym.map,
                             sym.VacantEntry,
                         ],
-                    ) ||
-                    match_def_path(
+                    )
+                    || match_def_path(
                         cx,
                         did.did(),
                         &[sym::std, sym.collections, sym.hash, sym.map, sym.Iter],
-                    ) ||
-                    match_def_path(
+                    )
+                    || match_def_path(
                         cx,
                         did.did(),
                         &[sym::std, sym.collections, sym.hash, sym.set, sym.Iter],
@@ -198,7 +194,7 @@ fn is_unrooted_ty<'tcx>(
                     true
                 }
             },
-            ty::Ref(..) => false,    // don't recurse down &ptrs
+            ty::Ref(..) => false, // don't recurse down &ptrs
             ty::RawPtr(inner_ty, _) => {
                 // Flag *mut JSObject / *const JSObject as unrooted GC
                 // pointers in downstream crates. The `js` crate and
@@ -217,9 +213,9 @@ fn is_unrooted_ty<'tcx>(
             },
             ty::FnDef(..) | ty::FnPtr(..) => false,
             ty::Alias(
-                kind @ ty::AliasTyKind::Projection |
-                kind @ ty::AliasTyKind::Inherent |
-                kind @ ty::AliasTyKind::Free,
+                kind @ ty::AliasTyKind::Projection
+                | kind @ ty::AliasTyKind::Inherent
+                | kind @ ty::AliasTyKind::Free,
                 ty,
             ) => {
                 if has_attr(ty.def_id, sym.must_root) {
@@ -272,12 +268,12 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
                 let field_type = cx.tcx.type_of(field.def_id);
                 if is_unrooted_ty(&self.symbols, cx, field_type.skip_binder(), false) {
                     cx.lint(UNROOTED_MUST_ROOT, |lint| {
-                          lint.primary_message(
-                              "Type must be rooted, use #[js::must_root] \
-                               on the struct definition to propagate."
-                              );
-                          lint.span(field.span);
-                      })
+                        lint.primary_message(
+                            "Type must be rooted, use #[js::must_root] \
+                               on the struct definition to propagate.",
+                        );
+                        lint.span(field.span);
+                    })
                 }
             }
         }
@@ -420,13 +416,13 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
     ) {
         let in_new_function = match kind {
             visit::FnKind::ItemFn(n, _, _) | visit::FnKind::Method(n, _) => {
-                n.as_str() == "new" ||
-                    n.as_str().starts_with("new_") ||
-                    n.as_str() == "from" ||
-                    n.as_str().starts_with("from_") ||
-                    n.as_str() == "default" ||
-                    n.as_str() == "Wrap" ||
-                    n.as_str() == "constructor"
+                n.as_str() == "new"
+                    || n.as_str().starts_with("new_")
+                    || n.as_str() == "from"
+                    || n.as_str().starts_with("from_")
+                    || n.as_str() == "default"
+                    || n.as_str() == "Wrap"
+                    || n.as_str() == "constructor"
             },
             visit::FnKind::Closure => false,
         };
@@ -443,8 +439,8 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
                 }
             }
 
-            if !in_new_function &&
-                is_unrooted_ty(&self.symbols, cx, sig.output().skip_binder(), false)
+            if !in_new_function
+                && is_unrooted_ty(&self.symbols, cx, sig.output().skip_binder(), false)
             {
                 cx.lint(UNROOTED_MUST_ROOT, |lint| {
                     lint.primary_message("Type must be rooted.");
@@ -521,8 +517,8 @@ impl<'a, 'tcx> visit::Visitor<'tcx> for FnDefVisitor<'a, 'tcx> {
         // are implemented, the `Unannotated` case could cause false-positives.
         // These should be fixable by adding an explicit `ref`.
         match pat.kind {
-            hir::PatKind::Binding(hir::BindingMode::NONE, ..) |
-            hir::PatKind::Binding(hir::BindingMode::MUT, ..) => {
+            hir::PatKind::Binding(hir::BindingMode::NONE, ..)
+            | hir::PatKind::Binding(hir::BindingMode::MUT, ..) => {
                 let ty = cx.typeck_results().pat_ty(pat);
                 if is_unrooted_ty(self.symbols, cx, ty, self.in_new_function) {
                     cx.lint(UNROOTED_MUST_ROOT, |lint| {

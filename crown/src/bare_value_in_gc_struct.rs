@@ -9,7 +9,7 @@
 //! `TraceNullableRoot`, which only works during the `NotActive`/`MarkRoots` GC
 //! phases. Since these structs live inside SpiderMonkey reserved slots and are
 //! traced during the full marking phase, the bare `Value` must be wrapped in
-//! `Heap<Value>` (= `mozjs::jsapi::Heap<Value>` / `js::heap::Heap<Value>`)
+//! `Heap<Value>` (= `mozjs::jsapi::Heap<Value>` / `js::gc::handle::MozHeap<Value>`)
 //! which traces via `TraceEdge` — the correct function for heap-resident GC
 //! pointers.
 //!
@@ -143,7 +143,7 @@ impl<'tcx> LateLintPass<'tcx> for BareValuePass {
                     cx.lint(BARE_VALUE_IN_GC_STRUCT, |lint| {
                         lint.primary_message(
                             "bare JS::Value in a GC-traced struct must be wrapped in \
-                             Heap<Value> (js::heap::Heap<Value>). A bare Value is traced \
+                             Heap<Value> (js::gc::handle::MozHeap<Value>). A bare Value is traced \
                              via TraceNullableRoot (stack-only), which asserts during GC \
                              marking. Heap<Value> uses TraceEdge, which is correct for \
                              heap-resident pointers.",
