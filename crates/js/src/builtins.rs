@@ -102,7 +102,7 @@ pub unsafe fn get_class_tag(obj: *mut JSObject) -> usize {
 /// Returns `true` if `concrete_tag == target_tag`, or if the concrete type
 /// has the target in its ancestor set. Also returns `true` if `target_tag`
 /// is Object's JSClass tag, since every JS object is-an Object.
-pub(crate) fn is_derived_from_type(concrete_tag: usize, target_tag: usize) -> bool {
+pub fn is_derived_from_type(concrete_tag: usize, target_tag: usize) -> bool {
     if concrete_tag == target_tag {
         return true;
     }

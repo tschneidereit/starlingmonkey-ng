@@ -46,18 +46,19 @@ impl Vec2 {
 
     #[getter]
     fn x(&self) -> f64 {
-        self.x
+        self.data().x
     }
 
     #[getter]
     fn y(&self) -> f64 {
-        self.y
+        self.data().y
     }
 
     /// Returns the Euclidean length.
     #[method]
     fn length(&self) -> f64 {
-        (self.x * self.x + self.y * self.y).sqrt()
+        let d = self.data();
+        (d.x * d.x + d.y * d.y).sqrt()
     }
 
     /// Returns a new Vec2 scaled by `factor`.
@@ -72,7 +73,8 @@ impl Vec2 {
     /// A method whose JS name differs from its Rust name.
     #[method(name = "toString")]
     fn to_display(&self) -> String {
-        format!("Vec2({}, {})", self.x, self.y)
+        let d = self.data();
+        format!("Vec2({}, {})", d.x, d.y)
     }
 
     /// Static factory method — available as `Vec2.origin()` in JS.
@@ -116,17 +118,17 @@ impl Shape {
 
     #[getter]
     fn color(&self) -> String {
-        self.color.clone()
+        self.data().color.clone()
     }
 
     #[setter]
     fn set_color(&mut self, color: String) {
-        self.color = color;
+        self.data_mut().color = color;
     }
 
     #[method]
     fn describe(&self) -> String {
-        format!("Shape(color={})", self.color)
+        format!("Shape(color={})", self.data().color)
     }
 }
 
@@ -149,21 +151,23 @@ impl Circle {
 
     #[getter]
     fn radius(&self) -> f64 {
-        self.radius
+        self.data().radius
     }
 
     #[method]
     fn area(&self) -> f64 {
-        std::f64::consts::PI * self.radius * self.radius
+        let r = self.data().radius;
+        std::f64::consts::PI * r * r
     }
 
     #[method]
     fn describe(&self) -> String {
+        let d = self.data();
         format!(
             "Circle(color={}, radius={}, area={:.2})",
-            self.parent.color,
-            self.radius,
-            std::f64::consts::PI * self.radius * self.radius,
+            d.parent.color,
+            d.radius,
+            std::f64::consts::PI * d.radius * d.radius,
         )
     }
 }
@@ -189,17 +193,19 @@ impl Rect {
 
     #[method]
     fn area(&self) -> f64 {
-        self.width * self.height
+        let d = self.data();
+        d.width * d.height
     }
 
     #[method]
     fn describe(&self) -> String {
+        let d = self.data();
         format!(
             "Rect(color={}, {}x{}, area={})",
-            self.parent.color,
-            self.width,
-            self.height,
-            self.width * self.height,
+            d.parent.color,
+            d.width,
+            d.height,
+            d.width * d.height,
         )
     }
 }
@@ -368,7 +374,7 @@ fn main() {
     println!("  Circle::new(\"blue\", 5) => radius={}", circle.radius());
 
     // Upcast Circle -> Shape
-    let as_shape: Shape = *circle;
+    let mut as_shape: Shape = *circle;
     assert_eq!(as_shape.color(), "blue");
     println!("  (*circle).color() = {}", as_shape.color());
 

@@ -34,12 +34,12 @@ impl Animal {
 
     #[method]
     fn describe(&self) -> String {
-        format!("Animal({})", self.name)
+        format!("Animal({})", self.data().name)
     }
 
     #[getter]
     fn name(&self) -> String {
-        self.name.clone()
+        self.data().name.clone()
     }
 }
 
@@ -67,12 +67,12 @@ impl Dog {
 
     #[method]
     fn fetch(&self) -> String {
-        format!("{} fetches the ball!", self.parent.name)
+        format!("{} fetches the ball!", self.data().parent.name)
     }
 
     #[getter]
     fn breed(&self) -> String {
-        self.breed.clone()
+        self.data().breed.clone()
     }
 }
 
@@ -94,14 +94,15 @@ impl Puppy {
 
     #[getter]
     fn age_months(&self) -> i32 {
-        self.age_months
+        self.data().age_months
     }
 
     #[method]
     fn describe(&self) -> String {
+        let d = self.data();
         format!(
             "Puppy({}, {}, {} months)",
-            self.parent.parent.name, self.parent.breed, self.age_months
+            d.parent.parent.name, d.parent.breed, d.age_months
         )
     }
 }

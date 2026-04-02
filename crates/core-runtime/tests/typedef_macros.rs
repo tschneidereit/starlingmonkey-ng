@@ -26,7 +26,7 @@ mod js_proto_tests {
 
         #[getter]
         pub fn detail(&self) -> String {
-            self.detail.clone()
+            self.data().detail.clone()
         }
     }
 
@@ -408,14 +408,14 @@ mod setup_style_inheritance {
     impl Pet {
         #[constructor]
         fn new(&self, kind: String) -> Result<(), String> {
-            let data = unsafe { self.data_mut().unwrap() };
+            let data = self.data_mut();
             data.kind = kind;
             Ok(())
         }
 
         #[getter]
         fn kind(&self) -> String {
-            self.kind.clone()
+            self.data().kind.clone()
         }
 
         #[method]
@@ -434,7 +434,7 @@ mod setup_style_inheritance {
     impl Lily {
         #[constructor]
         fn new(&self, cuteness: f64) -> Result<(), String> {
-            let data = unsafe { self.data_mut().unwrap() };
+            let data = self.data_mut();
             data.parent = PetImpl {
                 kind: "The very cutest".to_string(),
             };
@@ -444,7 +444,7 @@ mod setup_style_inheritance {
 
         #[getter]
         fn cuteness(&self) -> f64 {
-            self.cuteness
+            self.data().cuteness
         }
 
         #[method]
@@ -454,7 +454,8 @@ mod setup_style_inheritance {
 
         #[method]
         fn describe(&self) -> String {
-            format!("{} Lily, cuteness: {}/5", self.parent.kind, self.cuteness)
+            let d = self.data();
+            format!("{} Lily, cuteness: {}/5", d.parent.kind, d.cuteness)
         }
     }
 

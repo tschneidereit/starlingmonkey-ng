@@ -11,6 +11,7 @@
 //!
 //! [`DOMException`]: https://webidl.spec.whatwg.org/#idl-DOMException
 
+use core_runtime::{jsmethods, webidl_interface};
 use js::error::{ExnThrown, ThrowException};
 use js::gc::scope::Scope;
 use js::native::{ExceptionStackBehavior, HandleValueArray};
@@ -71,13 +72,13 @@ fn legacy_code_for_name(name: &str) -> u16 {
 ///
 /// Stores the exception name and message as Rust `String`s. The legacy
 /// error code is computed from the name on demand via `legacy_code_for_name`.
-#[core_runtime::webidl_interface(js_proto = "Error")]
+#[webidl_interface(js_proto = "Error")]
 pub struct DOMException {
     name: String,
     message: String,
 }
 
-#[core_runtime::jsmethods]
+#[jsmethods]
 impl DOMException {
     // -----------------------------------------------------------------------
     // Legacy error code constants (WebIDL §2.8.1)
@@ -130,13 +131,13 @@ impl DOMException {
     /// https://webidl.spec.whatwg.org/#dom-domexception-name
     #[getter]
     fn name(&self) -> String {
-        self.name.clone()
+        self.data().name.clone()
     }
 
     /// https://webidl.spec.whatwg.org/#dom-domexception-message
     #[getter]
     fn message(&self) -> String {
-        self.message.clone()
+        self.data().message.clone()
     }
 
     /// https://webidl.spec.whatwg.org/#dom-domexception-code
@@ -145,7 +146,7 @@ impl DOMException {
     /// DOMException object's name, or 0 if no such entry exists.
     #[getter]
     fn code(&self) -> i32 {
-        legacy_code_for_name(&self.name) as i32
+        legacy_code_for_name(&self.data().name) as i32
     }
 }
 
@@ -257,10 +258,19 @@ impl ThrowException for DOMExceptionError {
 
 #[cfg(test)]
 mod dom_exception_integration {
-    use core_runtime::test_util::eval_with_setup;
+    use core_runtime::{
+        config::RuntimeConfig,
+        runtime::{self, Runtime},
+        test_util::eval_with_setup,
+    };
 
     fn eval(code: &str) -> String {
-        eval_with_setup(libstarling::register_builtins, code)
+        eval_with_setup(
+            || {
+                runtime::register_global_initializer(super::DOMException::add_to_global);
+            },
+            code,
+        )
     }
 
     #[test]
@@ -268,6 +278,17 @@ mod dom_exception_integration {
         assert_eq!(eval("let e = new DOMException(); e.name"), "Error");
         assert_eq!(eval("let e = new DOMException(); e.message"), "");
         assert_eq!(eval("let e = new DOMException(); e.code"), "0");
+    }
+
+    #[test]
+    fn rust_new() {
+        runtime::register_global_initializer(super::DOMException::add_to_global);
+        let rt = Runtime::init(&RuntimeConfig::default());
+        let scope = rt.default_global();
+        let e = super::DOMException::new(&scope, None, None);
+        assert_eq!(e.name(), "Error");
+        assert_eq!(e.message(), "");
+        assert_eq!(e.code(), 0);
     }
 
     #[test]
@@ -422,10 +443,12 @@ mod throw_exception_integration {
     fn eval(code: &str) -> String {
         eval_with_setup(
             || {
-                libstarling::register_builtins();
-                core_runtime::runtime::register_global_initializer(|scope, global| unsafe {
-                    test_error_globals::add_to_global(scope, global);
-                });
+                core_runtime::runtime::register_global_initializer(
+                    crate::dom_exception::DOMException::add_to_global,
+                );
+                core_runtime::runtime::register_global_initializer(
+                    test_error_globals::add_to_global,
+                );
             },
             code,
         )

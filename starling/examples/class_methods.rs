@@ -36,12 +36,12 @@ impl MyClass {
 
     #[method]
     fn to_string(&self) -> String {
-        format!("MyClass({})", self.data)
+        format!("MyClass({})", self.data().data)
     }
 
     #[method(name = "toJSON")]
     fn to_json(&self) -> Result<String, ExnThrown> {
-        Ok(self.data.clone())
+        Ok(self.data().data.clone())
     }
 }
 

@@ -296,11 +296,21 @@ mod tests {
         use core_runtime::test_util::{eval_with_setup, throws_with_setup};
 
         fn eval(code: &str) -> String {
-            eval_with_setup(libstarling::register_builtins, code)
+            eval_with_setup(
+                || {
+                    core_runtime::runtime::register_global_initializer(crate::add_to_global);
+                },
+                code,
+            )
         }
 
         fn eval_throws(code: &str) -> bool {
-            throws_with_setup(libstarling::register_builtins, code)
+            throws_with_setup(
+                || {
+                    core_runtime::runtime::register_global_initializer(crate::add_to_global);
+                },
+                code,
+            )
         }
 
         #[test]

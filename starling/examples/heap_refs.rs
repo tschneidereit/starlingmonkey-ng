@@ -41,17 +41,18 @@ impl Item {
 
     #[getter]
     fn label(&self) -> String {
-        self.label.clone()
+        self.data().label.clone()
     }
 
     #[getter]
     fn value(&self) -> i32 {
-        self.value
+        self.data().value
     }
 
     #[method]
     fn describe(&self) -> String {
-        format!("Item({}, {})", self.label, self.value)
+        let d = self.data();
+        format!("Item({}, {})", d.label, d.value)
     }
 }
 
@@ -79,33 +80,33 @@ impl Container {
 
     #[getter]
     fn item<'a>(&self, scope: &'a Scope<'_>) -> Item<'a> {
-        self.item.get(scope)
+        self.data().item.get(scope)
     }
 
     #[getter]
     fn name(&self) -> String {
-        self.name.clone()
+        self.data().name.clone()
     }
 
     /// Read the stored Item's value through the heap reference.
     #[method]
     fn item_value(&self, scope: &Scope<'_>) -> i32 {
-        let item: Item<'_> = self.item.get(scope);
+        let item: Item<'_> = self.data().item.get(scope);
         item.value()
     }
 
     /// Read the stored Item's label through the heap reference.
     #[method]
     fn item_label(&self, scope: &Scope<'_>) -> String {
-        let item: Item<'_> = self.item.get(scope);
+        let item: Item<'_> = self.data().item.get(scope);
         item.label()
     }
 
     #[method]
     fn describe(&self, scope: &Scope<'_>) -> String {
-        let item: Item<'_> = self.item.get(scope);
+        let item: Item<'_> = self.data().item.get(scope);
         let item_desc = format!("Item({}, {})", item.label(), item.value());
-        format!("Container({}, {})", self.name, item_desc)
+        format!("Container({}, {})", self.data().name, item_desc)
     }
 }
 

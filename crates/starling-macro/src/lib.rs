@@ -166,9 +166,8 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
     // Generate identifiers for the static JSClass and JSClassOps
     let class_ops_static = format_ident!("__{}_CLASS_OPS", struct_name.to_string().to_uppercase());
     let class_static = format_ident!("__{}_CLASS", struct_name.to_string().to_uppercase());
-    // Null-terminated byte string for the C class name
-    let js_name_bytes = format!("{js_name}\0");
-    let js_name_cstr_literal = proc_macro2::Literal::byte_string(js_name_bytes.as_bytes());
+    let js_name_cstr = std::ffi::CString::new(js_name.as_str()).unwrap();
+    let js_name_cstr_lit = proc_macro2::Literal::c_string(&js_name_cstr);
 
     // If extends is set, compute the inner parent name and rewrite the parent field type
     let opts_extends_ident = opts.extends.clone();
@@ -315,6 +314,21 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         }
     };
 
+    let cast_error_msg =
+        std::ffi::CString::new(format!("Value is not an instance of {}", struct_name)).unwrap();
+    let cast_error_lit = proc_macro2::Literal::c_string(&cast_error_msg);
+
+    let not_type_error_msg =
+        std::ffi::CString::new(format!("'this' is not of type {}", js_name)).unwrap();
+    let not_type_error_lit = proc_macro2::Literal::c_string(&not_type_error_msg);
+
+    let prototype_call_error_msg = std::ffi::CString::new(format!(
+        "\"{}\" getter/method called on prototype or uninitialized object",
+        js_name
+    ))
+    .unwrap();
+    let prototype_call_error_lit = proc_macro2::Literal::c_string(&prototype_call_error_msg);
+
     let output = quote! {
         #[doc(hidden)]
         #[derive(Default, ::core_runtime::Traceable)]
@@ -349,7 +363,7 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
             };
 
             ::js::class_spec::JSClass {
-                name: #js_name_cstr_literal as *const u8 as *const ::std::ffi::c_char,
+                name: #js_name_cstr_lit.as_ptr(),
                 flags: ::js::class_spec::JSCLASS_FOREGROUND_FINALIZE
                     | ((SLOTS & ::js::class_spec::JSCLASS_RESERVED_SLOTS_MASK)
                         << ::js::class_spec::JSCLASS_RESERVED_SLOTS_SHIFT),
@@ -366,6 +380,9 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
         #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl ::js::class::ClassDef for #inner_name {
             const NAME: &'static str = #js_name;
+            const NAME_CSTR: &'static ::core::ffi::CStr = #js_name_cstr_lit;
+            const NOT_TYPE_ERROR: &'static ::core::ffi::CStr = #not_type_error_lit;
+            const PROTOTYPE_CALL_ERROR: &'static ::core::ffi::CStr = #prototype_call_error_lit;
 
             fn class() -> &'static ::js::class_spec::JSClass {
                 &#class_static
@@ -412,7 +429,7 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
 
             fn post_init(
                 scope: &::js::gc::scope::Scope<'_>,
-                obj: *mut ::js::native::JSObject,
+                obj: ::js::Object<'_>,
                 args: &::js::native::CallArgs,
             ) -> Result<(), ::js::error::ExnThrown> {
                 use ::js::class::__PostInitRegistrar;
@@ -481,14 +498,15 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
                 self.0.as_raw()
             }
 
+            /// Get a shared reference to the private Rust data.
+            pub fn data(&self) -> &#inner_name {
+                unsafe { self.0.data().unwrap_unchecked() }
+            }
+
             /// Get a mutable reference to the private Rust data.
-            ///
-            /// # Safety
-            ///
-            /// No other references to the data may exist simultaneously.
             #[allow(clippy::mut_from_ref)]
-            pub unsafe fn data_mut(&self) -> ::std::option::Option<&mut #inner_name> {
-                unsafe { self.0.data_mut() }
+            pub fn data_mut(&self) -> &mut #inner_name {
+                unsafe { self.0.data_mut().unwrap_unchecked() }
             }
         }
 
@@ -499,6 +517,21 @@ fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig)
             }
         }
 
+        // #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+        impl<'s> ::js::conversion::FromJSVal<'s> for #struct_name<'s> {
+            type Config = ();
+
+            fn from_jsval(
+                scope: &'s ::js::prelude::Scope<'s>,
+                val: ::js::prelude::HandleValue<'s>,
+                _option: (),
+            ) -> Result<Self, ::js::conversion::ConversionError> {
+                let obj = ::js::Object::from_jsval(scope, val, ())?;
+                obj.cast::<#struct_name<'s>>().map_err(|_| ::js::conversion::ConversionError::Failure(::std::borrow::Cow::Borrowed(#cast_error_lit)))
+            }
+        }
+
+        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s> ::std::convert::From<::js::gc::handle::Stack<'s, #inner_name>> for #struct_name<'s> {
             fn from(stack: ::js::gc::handle::Stack<'s, #inner_name>) -> Self {
                 #struct_name(stack)
@@ -841,6 +874,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     for (i, method) in methods.iter().enumerate() {
+        let on_newtype = is_method_on_newtype(method);
         match &method.kind {
             MethodKind::Constructor => {
                 if method.has_self || method.has_mut_self {
@@ -862,18 +896,19 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
             MethodKind::Method { js_name, nargs } => {
                 let (native_fn, builder_call) =
-                    gen_method_native(method, &inner_name, js_name, *nargs);
+                    gen_method_native(method, &inner_name, &type_name, js_name, *nargs, on_newtype);
                 native_fns.push(native_fn);
                 builder_calls.push(builder_call);
             }
             MethodKind::StaticMethod { js_name, nargs } => {
                 let (native_fn, builder_call) =
-                    gen_method_native(method, &inner_name, js_name, *nargs);
+                    gen_method_native(method, &inner_name, &type_name, js_name, *nargs, false);
                 native_fns.push(native_fn);
                 static_builder_calls.push(builder_call);
             }
             MethodKind::Getter { js_name } => {
-                let native_fn = gen_accessor_native(method, &inner_name, js_name, true);
+                let native_fn =
+                    gen_accessor_native(method, &inner_name, &type_name, js_name, true, on_newtype);
                 let native_name =
                     format_ident!("__getter_{inner_name}_{}", method.fn_item.sig.ident);
                 native_fns.push(native_fn);
@@ -881,7 +916,14 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                 entry.getter_native = Some(native_name);
             }
             MethodKind::Setter { js_name } => {
-                let native_fn = gen_accessor_native(method, &inner_name, js_name, false);
+                let native_fn = gen_accessor_native(
+                    method,
+                    &inner_name,
+                    &type_name,
+                    js_name,
+                    false,
+                    on_newtype,
+                );
                 let native_name =
                     format_ident!("__setter_{inner_name}_{}", method.fn_item.sig.ident);
                 native_fns.push(native_fn);
@@ -891,7 +933,8 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
             MethodKind::Property { js_name } => {
                 // A #[property] annotation means this is a getter; look for a
                 // matching setter (`set_<name>`) method in the impl block.
-                let native_fn = gen_accessor_native(method, &inner_name, js_name, true);
+                let native_fn =
+                    gen_accessor_native(method, &inner_name, &type_name, js_name, true, on_newtype);
                 let native_name =
                     format_ident!("__getter_{inner_name}_{}", method.fn_item.sig.ident);
                 native_fns.push(native_fn);
@@ -904,8 +947,8 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate .property() builder calls for all accessor entries
     for entry in &property_map {
         let js_name = &entry.js_name;
-        let js_name_bytes = format!("{js_name}\0");
-        let js_name_cstr = proc_macro2::Literal::byte_string(js_name_bytes.as_bytes());
+        let js_name_cstr = std::ffi::CString::new(js_name.as_str()).unwrap();
+        let js_name_cstr_lit = proc_macro2::Literal::c_string(&js_name_cstr);
 
         let getter = match &entry.getter_native {
             Some(name) => quote! { Some(#name) },
@@ -918,7 +961,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         builder_calls.push(quote! {
             .property(
-                unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_name_cstr) },
+                #js_name_cstr_lit,
                 #getter,
                 #setter,
             )
@@ -926,25 +969,41 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     // ================================================================
-    // Remove setup-style ctor and new-style post_init from impl FooImpl.
-    // These methods operate on the stack newtype, not on FooImpl directly.
+    // Remove setup-style ctor, new-style post_init, and stack newtype methods from impl FooImpl.
     // ================================================================
     let setup_ctor_fn_name = setup_ctor_info.map(|i| methods[i].fn_item.sig.ident.clone());
     let new_post_init_fn_name = new_post_init_info.map(|i| methods[i].fn_item.sig.ident.clone());
+
+    // Collect names of methods that go on the newtype.
+    let newtype_method_names: Vec<Ident> = methods
+        .iter()
+        .filter(|m| is_method_on_newtype(m))
+        .map(|m| m.fn_item.sig.ident.clone())
+        .collect();
+
+    // Remove setup ctor, post_init, and stack newtype methods from the FooImpl impl block.
+    let mut newtype_items: Vec<ImplItem> = Vec::new();
     {
-        let remove_names: Vec<_> = [&setup_ctor_fn_name, &new_post_init_fn_name]
+        let remove_names: Vec<&Ident> = [&setup_ctor_fn_name, &new_post_init_fn_name]
             .iter()
             .filter_map(|n| n.as_ref())
             .collect();
-        if !remove_names.is_empty() {
-            input.items.retain(|item| {
-                if let ImplItem::Fn(fn_item) = item {
-                    !remove_names.iter().any(|n| fn_item.sig.ident == **n)
-                } else {
-                    true
+
+        let mut retained = Vec::new();
+        for item in input.items.drain(..) {
+            if let ImplItem::Fn(ref fn_item) = item {
+                let ident = &fn_item.sig.ident;
+                if remove_names.iter().any(|n| *ident == **n) {
+                    continue; // setup ctor / post_init — dropped entirely
                 }
-            });
+                if newtype_method_names.contains(ident) {
+                    newtype_items.push(item); // Stack newtype methods — moved to newtype impl
+                    continue;
+                }
+            }
+            retained.push(item);
         }
+        input.items = retained;
     }
 
     // Generate the ConstructorRegistrar impl (on FooImpl)
@@ -1053,13 +1112,8 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
     //   3. No post_init at all (no-op, handled by autoref fallback)
     let post_init_impl = if setup_ctor_info.is_some() || new_post_init_info.is_some() {
         // Root the object and create the stack newtype for both ctor setup and post_init.
-        let root_and_cast = quote! {
-            let __nn = unsafe {
-                ::std::ptr::NonNull::new(obj).expect("null object in post_init")
-            };
-            let __typed = unsafe {
-                #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn)))
-            };
+        let cast = quote! {
+            let __typed = obj.cast::<#type_name>().unwrap();
         };
 
         // Generate the setup-style constructor call (if present).
@@ -1117,10 +1171,10 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                 fn post_init(
                     &self,
                     scope: &::js::gc::scope::Scope<'_>,
-                    obj: *mut ::js::native::JSObject,
+                    obj: ::js::Object<'_>,
                     args: &::js::native::CallArgs,
                 ) -> Result<(), ::js::error::ExnThrown> {
-                    #root_and_cast
+                    #cast
                     #setup_call
                     #post_init_call
                     Ok(())
@@ -1244,7 +1298,10 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 /// Register this class on a global object, making it available
                 /// as a constructor in JavaScript.
-                pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::Object<'s>) {
+                pub fn add_to_global<'scope>(
+                    scope: &'scope ::js::gc::scope::Scope<'_>,
+                    global: ::js::Object<'scope>,
+                ) {
                     unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
                 }
 
@@ -1279,7 +1336,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     impl<'s> #type_name<'s> {
                         /// Register this class on a global object, making it available
                         /// as a constructor in JavaScript.
-                        pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::Object<'s>) {
+                        pub fn add_to_global<'scope>(scope: &'scope ::js::gc::scope::Scope<'_>, global: ::js::Object<'scope>) {
                             unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
                         }
                         #pi_fn_tokens
@@ -1363,7 +1420,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                         /// Register this class on a global object, making it available
                         /// as a constructor in JavaScript.
-                        pub fn add_to_global(scope: &'s ::js::gc::scope::Scope<'_>, global: ::js::Object<'s>) {
+                        pub fn add_to_global<'scope>(scope: &'scope ::js::gc::scope::Scope<'_>, global: ::js::Object<'scope>) {
                             unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
                         }
                         #pi_fn_tokens
@@ -1377,155 +1434,21 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    // Generate forwarding methods on Foo<'s> for pub instance methods
-    let mut newtype_methods: Vec<proc_macro2::TokenStream> = Vec::new();
+    // Generate forwarding methods on Foo<'s> for InstanceValue methods
+    // (which stay on FooImpl). All other instance methods are now directly
+    // on the newtype via `newtype_items`.
+    let mut forwarding_methods: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for method in &methods {
         match &method.kind {
-            MethodKind::Constructor
-            | MethodKind::Destructor
-            | MethodKind::PostInit
-            | MethodKind::StaticMethod { .. } => {
-                continue;
-            }
-            MethodKind::Getter { .. } | MethodKind::Property { .. } => {
-                // Getters are forwarded as simple methods. They always have &self.
-                // Skip raw getters — they access CallArgs directly and can't
-                // be forwarded through the stack newtype.
-                if method.is_raw {
-                    continue;
-                }
-                let fn_name = &method.fn_item.sig.ident;
-                let name_str = fn_name.to_string();
-                if matches!(
-                    name_str.as_str(),
-                    "data"
-                        | "data_mut"
-                        | "handle"
-                        | "as_raw"
-                        | "from_handle"
-                        | "from_raw"
-                        | "from_object"
-                ) {
-                    continue;
-                }
-                let ret_ty = &method.fn_item.sig.output;
-                let fn_generics = &method.fn_item.sig.generics;
-                let get_inner =
-                    quote! { let inner = self.0.data().expect("missing private data"); };
-                // When the method has lifetime generics (e.g. `<'a>`), bind
-                // the scope reference to the first lifetime so return types
-                // like `Item<'a>` are properly connected.
-                let cx_param = if method.has_cx {
-                    let first_lt = fn_generics.lifetimes().next();
-                    if let Some(lt) = first_lt {
-                        let lt = &lt.lifetime;
-                        quote! { scope: &#lt ::js::gc::scope::Scope<'_>, }
-                    } else {
-                        quote! { scope: &::js::gc::scope::Scope<'_>, }
-                    }
-                } else {
-                    quote! {}
-                };
-                let cx_arg = if method.has_cx {
-                    quote! { scope, }
-                } else {
-                    quote! {}
-                };
-                newtype_methods.push(quote! {
-                    pub fn #fn_name #fn_generics (&self, #cx_param) #ret_ty {
-                        #get_inner
-                        #inner_name::#fn_name(inner, #cx_arg)
-                    }
-                });
-                continue;
-            }
-            MethodKind::Setter { .. } => {
-                // Setters are forwarded with &mut self + the value parameter.
-                // Skip raw setters — they access CallArgs directly.
-                if method.is_raw {
-                    continue;
-                }
-                let fn_name = &method.fn_item.sig.ident;
-                let name_str = fn_name.to_string();
-                if matches!(
-                    name_str.as_str(),
-                    "data"
-                        | "data_mut"
-                        | "handle"
-                        | "as_raw"
-                        | "from_handle"
-                        | "from_raw"
-                        | "from_object"
-                ) {
-                    continue;
-                }
-                let ret_ty = &method.fn_item.sig.output;
-                let fn_generics = &method.fn_item.sig.generics;
-                let param_decls: Vec<_> = method
-                    .params
-                    .iter()
-                    .map(|(name, ty)| quote! { #name: #ty })
-                    .collect();
-                let param_names: Vec<_> = method
-                    .params
-                    .iter()
-                    .map(|(name, _)| quote! { #name })
-                    .collect();
-                let get_inner = quote! { let inner = unsafe { self.0.data_mut() }.expect("missing private data"); };
-                let cx_param = if method.has_cx {
-                    let first_lt = fn_generics.lifetimes().next();
-                    if let Some(lt) = first_lt {
-                        let lt = &lt.lifetime;
-                        quote! { scope: &#lt ::js::gc::scope::Scope<'_>, }
-                    } else {
-                        quote! { scope: &::js::gc::scope::Scope<'_>, }
-                    }
-                } else {
-                    quote! {}
-                };
-                let cx_arg = if method.has_cx {
-                    quote! { scope, }
-                } else {
-                    quote! {}
-                };
-                newtype_methods.push(quote! {
-                    pub fn #fn_name #fn_generics (&self, #cx_param #(#param_decls),*) #ret_ty {
-                        #get_inner
-                        #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
-                    }
-                });
-                continue;
-            }
-            MethodKind::Method { .. } => {
-                // Skip raw, rest, and promise methods — they can't be forwarded simply
-                if method.is_raw
-                    || method.has_rest_args
-                    || matches!(method.return_style, ReturnStyle::Promise)
-                {
-                    continue;
-                }
+            MethodKind::Method { .. }
+                if matches!(method.return_style, ReturnStyle::InstanceValue) =>
+            {
                 if !method.has_self && !method.has_mut_self {
                     continue;
                 }
 
                 let fn_name = &method.fn_item.sig.ident;
-
-                // Skip methods that conflict with built-in stack newtype methods
-                let name_str = fn_name.to_string();
-                if matches!(
-                    name_str.as_str(),
-                    "data"
-                        | "data_mut"
-                        | "handle"
-                        | "as_raw"
-                        | "from_handle"
-                        | "from_raw"
-                        | "from_object"
-                ) {
-                    continue;
-                }
-                let ret_ty = &method.fn_item.sig.output;
                 let fn_generics = &method.fn_item.sig.generics;
                 let param_decls: Vec<_> = method
                     .params
@@ -1539,70 +1462,54 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     .collect();
 
                 let get_inner = if method.has_mut_self {
-                    quote! { let inner = unsafe { self.0.data_mut() }.expect("missing private data"); }
+                    quote! { let inner = self.data_mut(); }
                 } else {
-                    quote! { let inner = self.0.data().expect("missing private data"); }
+                    quote! { let inner = self.data(); }
                 };
 
-                // InstanceValue methods return Self wrapped in a new JS object —
-                // they need a scope parameter and custom return handling.
-                if matches!(method.return_style, ReturnStyle::InstanceValue) {
-                    // Always needs a scope to create the JS object
-                    let cx_param = quote! { scope: &'s ::js::gc::scope::Scope<'_>, };
-                    let cx_arg = if method.has_cx {
-                        quote! { scope, }
-                    } else {
-                        quote! {}
-                    };
-
-                    newtype_methods.push(quote! {
-                        pub fn #fn_name(&self, #cx_param #(#param_decls),*) -> #type_name<'s> {
-                            #get_inner
-                            unsafe {
-                                let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
-                                    #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
-                                })
-                                    .expect(concat!("Class ", stringify!(#type_name), " not registered"));
-                                let __nn = ::std::ptr::NonNull::new(__obj.as_raw()).unwrap();
-                                #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn)))
-                            }
-                        }
-                    });
-                    continue;
-                }
-
-                // If the method takes a Scope parameter, forward it
-                let cx_param = if method.has_cx {
-                    let first_lt = fn_generics.lifetimes().next();
-                    if let Some(lt) = first_lt {
-                        let lt = &lt.lifetime;
-                        quote! { scope: &#lt ::js::gc::scope::Scope<'_>, }
-                    } else {
-                        quote! { scope: &::js::gc::scope::Scope<'_>, }
-                    }
-                } else {
-                    quote! {}
-                };
+                // InstanceValue: always needs a scope to create the JS object.
+                let cx_param = quote! { scope: &'s ::js::gc::scope::Scope<'_>, };
                 let cx_arg = if method.has_cx {
                     quote! { scope, }
                 } else {
                     quote! {}
                 };
 
-                newtype_methods.push(quote! {
-                    pub fn #fn_name #fn_generics (&self, #cx_param #(#param_decls),*) #ret_ty {
+                forwarding_methods.push(quote! {
+                    pub fn #fn_name #fn_generics (&self, #cx_param #(#param_decls),*) -> #type_name<'s> {
                         #get_inner
-                        #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
+                        unsafe {
+                            let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                                #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
+                            })
+                                .expect(concat!("Class ", stringify!(#type_name), " not registered"));
+                            let __nn = ::std::ptr::NonNull::new(__obj.as_raw()).unwrap();
+                            #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn)))
+                        }
                     }
                 });
             }
+            _ => continue,
         }
     }
 
-    let newtype_impl = if !newtype_methods.is_empty() {
+    // Emit stack newtype methods in a separate `impl<'s> Foo<'s>` block.
+    // These methods receive `self` as the stack newtype, giving direct
+    // access to the rooted JS object handle.
+    let newtype_impl = if !newtype_items.is_empty() || !forwarding_methods.is_empty() {
         quote! {
+            #[allow(clippy::inherent_to_string)]
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             impl<'s> #type_name<'s> {
-                #(#newtype_methods)*
+                #(#newtype_items)*
+                #(#forwarding_methods)*
+            }
+        }
+    } else if !forwarding_methods.is_empty() {
+        quote! {
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+            impl<'s> #type_name<'s> {
+                #(#forwarding_methods)*
             }
         }
     } else {
@@ -1636,7 +1543,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Generated inherent new() constructor + add_to_global on stack newtype
         #ctor_new_impl
 
-        // Generated forwarding methods on stack newtype
+        // Generated newtype instance methods + forwarding methods
         #newtype_impl
     };
 
@@ -1762,6 +1669,37 @@ fn parse_method_info(
     }
 }
 
+/// Whether a method should live on the stack newtype (`Foo<'s>`) rather than
+/// on `FooImpl`. Methods on the newtype receive `self` as the rooted stack
+/// newtype, giving access to both the JS object and the private data.
+fn is_method_on_newtype(method: &MethodInfo) -> bool {
+    // Constructors, destructors, post-init, and static methods stay on FooImpl.
+    if matches!(
+        method.kind,
+        MethodKind::Constructor
+            | MethodKind::Destructor
+            | MethodKind::PostInit
+            | MethodKind::StaticMethod { .. }
+    ) {
+        return false;
+    }
+    // Must be an instance method (has self receiver).
+    if !method.has_self && !method.has_mut_self {
+        return false;
+    }
+    // InstanceValue methods return Self (= FooImpl), so they stay on FooImpl.
+    if matches!(method.return_style, ReturnStyle::InstanceValue) {
+        return false;
+    }
+    // Methods named data/data_mut would conflict with the generated accessors
+    // on the newtype.
+    let name = method.fn_item.sig.ident.to_string();
+    if matches!(name.as_str(), "data" | "data_mut") {
+        return false;
+    }
+    true
+}
+
 fn is_cx_param_type(ty: &Type) -> bool {
     let s = quote!(#ty).to_string();
     s.contains("JSContext") || s.contains("Scope")
@@ -1842,9 +1780,13 @@ fn is_option_type(ty: &Type) -> bool {
 /// Check whether a type is a none-optional `Heap<T>`.
 fn is_bare_heap_type(ty: &Type) -> bool {
     if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            return seg.ident == "Heap"
-                && matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+        // Only match single-segment `Heap<T>` (our js::gc::handle::Heap),
+        // not multi-segment paths like `js::gc::handle::MozHeap<Value>` (mozjs Heap).
+        if tp.path.segments.len() == 1 {
+            if let Some(seg) = tp.path.segments.last() {
+                return seg.ident == "Heap"
+                    && matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+            }
         }
     }
     false
@@ -1886,37 +1828,6 @@ fn extract_result_error_type(output: &ReturnType) -> Option<Type> {
 /// Detect stack newtype types like `Item<'_>` or `Item<'s>`.
 ///
 /// Stack newtypes are generated by `#[jsclass]` and always carry a single
-/// lifetime parameter. This heuristic checks for `Ident<'lifetime>` patterns,
-/// excluding known non-newtype types.
-fn is_stack_newtype_type(ty: &Type) -> bool {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
-                // A single lifetime argument like Foo<'_> or Foo<'s>
-                return args.args.len() == 1
-                    && matches!(args.args.first(), Some(syn::GenericArgument::Lifetime(_)));
-            }
-        }
-    }
-    false
-}
-
-/// Strip the lifetime parameter from a stack newtype type.
-///
-/// Converts `Item<'_>` → `Item` for use in turbofish syntax like
-/// `get_stack_arg::<Item>(...)`.
-fn strip_lifetime(ty: &Type) -> Type {
-    if let Type::Path(tp) = ty {
-        let mut tp = tp.clone();
-        if let Some(seg) = tp.path.segments.last_mut() {
-            seg.arguments = syn::PathArguments::None;
-        }
-        Type::Path(tp)
-    } else {
-        ty.clone()
-    }
-}
-
 /// Check if a type string is exactly `Result < () , ::js::error::ExnThrown >`
 fn is_result_unit_jserror(ty_str: &str) -> bool {
     let normalized: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1949,6 +1860,27 @@ fn is_result_type(ty_str: &str) -> Option<bool> {
     None
 }
 
+/// Check if a type string is exactly `Self` or the class name (with optional
+/// lifetime). Matches `Self`, `Foo`, `Foo<'s>`, `Foo<'_>` but not types where
+/// the class name is nested inside wrappers like `Result<Option<Foo<'s>>, E>`.
+fn is_self_or_instance_type(ty_str: &str, type_name: &str) -> bool {
+    let normalized: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
+    if normalized == "Self" {
+        return true;
+    }
+    // Match `TypeName` or `TypeName<'lifetime>`
+    if normalized == type_name {
+        return true;
+    }
+    if let Some(rest) = normalized.strip_prefix(type_name) {
+        // Must be followed by `<'...>` and nothing else
+        if rest.starts_with("<'") && rest.ends_with('>') && rest.matches('<').count() == 1 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Classify the return type of a function into a `ReturnStyle`.
 /// If `type_name` is provided and `is_constructor` is true, `Self` returns become `Void`
 /// (constructors handle object creation separately). For non-constructor methods,
@@ -1963,7 +1895,7 @@ fn classify_return_style(
         ReturnType::Type(_, ty) => {
             let ty_str = quote!(#ty).to_string();
             if let Some(tn) = type_name {
-                if ty_str == "Self" || ty_str.contains(&tn.to_string()) {
+                if is_self_or_instance_type(&ty_str, &tn.to_string()) {
                     if is_constructor {
                         return ReturnStyle::Void;
                     }
@@ -2009,10 +1941,7 @@ fn gen_arg_extractions(
             // Handle Option<T> — extract the inner type and make it conditional.
             if is_option_type(ty) {
                 let inner = extract_option_inner_type(ty).expect("Option<T> must have inner type");
-                let inner_extract = if is_stack_newtype_type(&inner) {
-                    let bare = strip_lifetime(&inner);
-                    quote! { unsafe { ::js::class::get_stack_arg::<#bare>(#scope_expr, #args_expr, #idx) } }
-                } else if is_integer_type(&inner) {
+                let inner_extract = if is_integer_type(&inner) {
                     quote! {
                         unsafe { ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
                             ::js::conversion::ConversionBehavior::Default) }
@@ -2038,14 +1967,7 @@ fn gen_arg_extractions(
                 };
             }
 
-            let extract = if is_stack_newtype_type(ty) {
-                // Strip the lifetime to get the bare type name for
-                // `get_stack_arg::<Foo>()`.
-                let bare = strip_lifetime(ty);
-                quote! {
-                    unsafe { ::js::class::get_stack_arg::<#bare>(#scope_expr, #args_expr, #idx) }
-                }
-            } else if is_integer_type(ty) {
+            let extract = if is_integer_type(ty) {
                 quote! {
                     unsafe { ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
                         ::js::conversion::ConversionBehavior::Default) }
@@ -2110,33 +2032,64 @@ fn gen_constructor_body(info: &MethodInfo, type_name: &Ident) -> proc_macro2::To
 }
 
 /// Generate a JSNative wrapper function and the corresponding ClassBuilder call.
+///
+/// When `on_newtype` is true, the method lives on the stack newtype `Foo<'s>`.
+/// The wrapper extracts `this` as the rooted newtype and calls the method
+/// via method-call syntax.
 fn gen_method_native(
     info: &MethodInfo,
     type_name: &Ident,
+    struct_name: &Ident,
     js_name: &str,
     nargs: usize,
+    on_newtype: bool,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
     let fn_name = &info.fn_item.sig.ident;
     let native_name = format_ident!("__native_{type_name}_{fn_name}");
+    let name_str = format!("{}::{}", struct_name, fn_name);
     let nargs_u32 = nargs as u32;
 
     // Create the C string literal for the JS name
-    let js_name_bytes = format!("{js_name}\0");
-    let js_name_cstr = proc_macro2::Literal::byte_string(js_name_bytes.as_bytes());
+    let js_name_cstr = std::ffi::CString::new(js_name).unwrap();
+    let js_name_cstr_lit = proc_macro2::Literal::c_string(&js_name_cstr);
 
     // Use __args internally to avoid shadowing user's rest param names
-    let this_extraction = if info.has_self {
+    let this_extraction = if on_newtype && (info.has_self || info.has_mut_self) {
+        if info.has_mut_self {
+            quote! {
+                let mut __self = match ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) {
+                    Ok(v) => v,
+                    Err(::js::error::ExnThrown) => {
+                        return js::exception::check_fn_return(&scope, false, #name_str);
+                    },
+                };
+            }
+        } else {
+            quote! {
+                let __self = match ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) {
+                    Ok(v) => v,
+                    Err(::js::error::ExnThrown) => {
+                        return js::exception::check_fn_return(&scope, false, #name_str);
+                    },
+                };
+            }
+        }
+    } else if info.has_self {
         quote! {
-            let __self = match ::js::class::get_this::<#type_name>(&scope, &__args) {
+            let __self = match ::js::class::get_this_data::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(::js::error::ExnThrown) => return false,
+                Err(::js::error::ExnThrown) => {
+                    return js::exception::check_fn_return(&scope, false, #name_str);
+                },
             };
         }
     } else if info.has_mut_self {
         quote! {
-            let __self = match ::js::class::get_this_mut::<#type_name>(&scope, &__args) {
+            let __self = match ::js::class::get_this_data_mut::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(::js::error::ExnThrown) => return false,
+                Err(::js::error::ExnThrown) => {
+                    return js::exception::check_fn_return(&scope, false, #name_str);
+                },
             };
         }
     } else {
@@ -2192,7 +2145,18 @@ fn gen_method_native(
         vec![]
     };
 
-    let call = if info.has_self || info.has_mut_self {
+    let call = if on_newtype && (info.has_self || info.has_mut_self) {
+        // Method lives on the stack newtype — use method-call syntax.
+        if info.is_raw {
+            quote! { __self.#fn_name(&scope, &__args) }
+        } else if info.has_cx {
+            let all_args: Vec<_> = call_args.iter().chain(rest_arg_expr.iter()).collect();
+            quote! { __self.#fn_name(&scope, #(#all_args),*) }
+        } else {
+            let all_args: Vec<_> = call_args.iter().chain(rest_arg_expr.iter()).collect();
+            quote! { __self.#fn_name(#(#all_args),*) }
+        }
+    } else if info.has_self || info.has_mut_self {
         if info.is_raw {
             quote! { #type_name::#fn_name(__self, &scope, &__args) }
         } else if info.has_cx {
@@ -2300,7 +2264,7 @@ fn gen_method_native(
     // We need a &'static CStr. Use an unsafe trick with a byte string literal.
     let builder_call = quote! {
         .method(
-            unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_name_cstr) },
+            #js_name_cstr_lit,
             #nargs_u32,
             Some(#native_name),
         )
@@ -2313,11 +2277,16 @@ fn gen_method_native(
 ///
 /// - Getter: `fn name(&self) -> T` — reads `this`, calls method, sets return value.
 /// - Setter: `fn set_name(&mut self, val: T)` — reads `this` mutably, reads `args[0]`, calls method.
+///
+/// When `on_newtype` is true, the accessor lives on the stack newtype and the
+/// wrapper extracts `this` as the rooted newtype rather than raw private data.
 fn gen_accessor_native(
     info: &MethodInfo,
     type_name: &Ident,
+    struct_name: &Ident,
     _js_name: &str,
     is_getter: bool,
+    on_newtype: bool,
 ) -> proc_macro2::TokenStream {
     let fn_name = &info.fn_item.sig.ident;
     let native_name = if is_getter {
@@ -2325,28 +2294,61 @@ fn gen_accessor_native(
     } else {
         format_ident!("__setter_{type_name}_{fn_name}")
     };
+    let name_str = format!("{}::{}", struct_name, fn_name);
 
-    let this_extraction = if is_getter {
+    let this_extraction = if on_newtype {
+        if is_getter {
+            quote! {
+                let __self = match ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) {
+                    Ok(v) => v,
+                    Err(::js::error::ExnThrown) => {
+                        return js::exception::check_fn_return(&scope, false, #name_str);
+                    },
+                };
+            }
+        } else {
+            quote! {
+                let mut __self = match ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) {
+                    Ok(v) => v,
+                    Err(::js::error::ExnThrown) => {
+                        return js::exception::check_fn_return(&scope, false, #name_str);
+                    },
+                };
+            }
+        }
+    } else if is_getter {
         // Getter: &self
         quote! {
-            let __self = match ::js::class::get_this::<#type_name>(&scope, &__args) {
+            let __self = match ::js::class::get_this_data::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(::js::error::ExnThrown) => return false,
+                Err(::js::error::ExnThrown) => {
+                    return js::exception::check_fn_return(&scope, false, #name_str);
+                },
             };
         }
     } else {
         // Setter: &mut self
         quote! {
-            let __self = match ::js::class::get_this_mut::<#type_name>(&scope, &__args) {
+            let __self = match ::js::class::get_this_data_mut::<#type_name>(&scope, &__args) {
                 Ok(v) => v,
-                Err(::js::error::ExnThrown) => return js::exception::check_fn_return(&scope, false, &#name_str),
+                Err(::js::error::ExnThrown) => {
+                    return js::exception::check_fn_return(&scope, false, #name_str);
+                },
             };
         }
     };
 
     let body = if is_getter {
         // Getter: call method, set return value
-        let call = if info.is_raw {
+        let call = if on_newtype {
+            if info.is_raw {
+                quote! { __self.#fn_name(&scope, &__args) }
+            } else if info.has_cx {
+                quote! { __self.#fn_name(&scope) }
+            } else {
+                quote! { __self.#fn_name() }
+            }
+        } else if info.is_raw {
             quote! { #type_name::#fn_name(__self, &scope, &__args) }
         } else if info.has_cx {
             quote! { #type_name::#fn_name(__self, &scope) }
@@ -2390,7 +2392,15 @@ fn gen_accessor_native(
             gen_arg_extractions(&info.params, quote!(&__args), false, quote!(&scope));
 
         let call_args: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
-        let call = if info.is_raw {
+        let call = if on_newtype {
+            if info.is_raw {
+                quote! { __self.#fn_name(&scope, &__args) }
+            } else if info.has_cx {
+                quote! { __self.#fn_name(&scope, #(#call_args),*) }
+            } else {
+                quote! { __self.#fn_name(#(#call_args),*) }
+            }
+        } else if info.is_raw {
             quote! { #type_name::#fn_name(__self, &scope, &__args) }
         } else if info.has_cx {
             quote! { #type_name::#fn_name(__self, &scope, #(#call_args),*) }
@@ -2400,6 +2410,7 @@ fn gen_accessor_native(
 
         match &info.return_style {
             ReturnStyle::Raw => quote! {
+                #(#arg_extractions)*
                 match #call {
                     Ok(()) => js::exception::check_fn_return(&scope, true, &#name_str),
                     Err(::js::error::ExnThrown) => js::exception::check_fn_return(&scope, false, &#name_str),
@@ -2993,14 +3004,14 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         });
 
-        let js_name_bytes = format!("{js_name}\0");
-        let js_name_cstr = proc_macro2::Literal::byte_string(js_name_bytes.as_bytes());
+        let js_name_cstr = std::ffi::CString::new(js_name.as_str()).unwrap();
+        let js_name_cstr_lit = proc_macro2::Literal::c_string(&js_name_cstr);
 
         install_calls.push(quote! {
             ::js::Function::define(
                 scope,
                 global.handle(),
-                unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_name_cstr) },
+                #js_name_cstr_lit,
                 Some(#native_name),
                 #nargs,
                 ::js::class_spec::JSPROP_ENUMERATE as u32
@@ -3012,8 +3023,8 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
     for exp in &const_exports {
         let const_name = &exp.const_name;
         let js_name = &exp.js_name;
-        let js_name_bytes = format!("{js_name}\0");
-        let js_name_cstr = proc_macro2::Literal::byte_string(js_name_bytes.as_bytes());
+        let js_name_cstr = std::ffi::CString::new(js_name.as_str()).unwrap();
+        let js_name_cstr_lit = proc_macro2::Literal::c_string(&js_name_cstr);
 
         // For reference-type constants (e.g. `&str`), pass the value directly
         // since it's already a reference. For value types, add `&`.
@@ -3026,7 +3037,7 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
         install_calls.push(quote! {
             global.define_property(
                 scope,
-                unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_name_cstr) },
+                #js_name_cstr_lit,
                 #value_expr,
                 ::js::class_spec::JSPROP_ENUMERATE as u32
             ).unwrap();
@@ -3052,9 +3063,9 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#native_fns)*
 
             /// Install all global functions, constants, and classes onto the given global object.
-            pub unsafe fn add_to_global<'s>(
-                scope: &'s ::js::gc::scope::Scope<'_>,
-                global: ::js::Object<'s>,
+            pub fn add_to_global<'scope>(
+                scope: &'scope ::js::gc::scope::Scope<'_>,
+                global: ::js::Object<'scope>,
             ) {
                 #(#class_install_calls)*
                 #(#install_calls)*
@@ -3276,14 +3287,14 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
             }
         });
 
-        let js_name_bytes = format!("{js_name}\0");
-        let js_name_cstr = proc_macro2::Literal::byte_string(js_name_bytes.as_bytes());
+        let js_name_cstr = std::ffi::CString::new(js_name.as_str()).unwrap();
+        let js_name_cstr_lit = proc_macro2::Literal::c_string(&js_name_cstr);
 
         install_calls.push(quote! {
             ::js::Function::define(
                 scope,
                 ns_handle,
-                unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#js_name_cstr) },
+                #js_name_cstr_lit,
                 Some(#native_name),
                 #nargs,
                 ::js::class_spec::JSPROP_ENUMERATE as u32
@@ -3311,9 +3322,9 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
             #(#native_fns)*
 
             /// Install this namespace onto the given global object.
-            pub unsafe fn add_to_global<'s>(
-                scope: &'s ::js::gc::scope::Scope<'_>,
-                global: ::js::Object<'s>,
+            pub fn add_to_global<'scope>(
+                scope: &'scope ::js::gc::scope::Scope<'_>,
+                global: ::js::Object<'scope>,
             ) {
                 // Create a plain object for the namespace.
                 let ns_obj = ::js::Object::new_plain(scope)
@@ -3379,4 +3390,33 @@ pub fn allow_unrooted_interior_in_rc(_attr: TokenStream, item: TokenStream) -> T
         #item
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_self_or_instance_type_matches_bare_name() {
+        assert!(is_self_or_instance_type("Self", "URL"));
+        assert!(is_self_or_instance_type("URL", "URL"));
+        assert!(is_self_or_instance_type("URL<'s>", "URL"));
+        assert!(is_self_or_instance_type("URL<'_>", "URL"));
+    }
+
+    #[test]
+    fn is_self_or_instance_type_rejects_nested() {
+        assert!(!is_self_or_instance_type("Option<URL<'s>>", "URL"));
+        assert!(!is_self_or_instance_type(
+            "Result<Option<URL<'s>>,ExnThrown>",
+            "URL"
+        ));
+        assert!(!is_self_or_instance_type("Vec<URL<'s>>", "URL"));
+    }
+
+    #[test]
+    fn is_self_or_instance_type_rejects_substring_match() {
+        assert!(!is_self_or_instance_type("URLSearchParams", "URL"));
+        assert!(!is_self_or_instance_type("URLSearchParams<'s>", "URL"));
+    }
 }
