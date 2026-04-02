@@ -40,6 +40,7 @@ use std::ptr::NonNull;
 
 use super::error::{report_error_ascii, ExnThrown};
 use crate::builtins::JSType;
+use crate::conversion::{ConversionError, FromJSVal, ToJSVal};
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
 use crate::Object;
@@ -321,6 +322,20 @@ impl<'s> std::ops::Deref for Stack<'s, Function> {
     }
 }
 
+impl<'s> FromJSVal<'s> for Stack<'s, Function> {
+    type Config = ();
+
+    fn from_jsval(
+        scope: &'s Scope<'s>,
+        val: HandleValue<'s>,
+        _option: Self::Config,
+    ) -> Result<Self, ConversionError> {
+        Object::from_value(scope, *val)?
+            .cast::<Self>()
+            .map_err(|_| ConversionError::Failure(Cow::Borrowed(c"Value isn't a Function")))
+    }
+}
+
 pub enum ReservedSlot {
     Slot0 = 0,
     Slot1 = 1,
@@ -410,8 +425,8 @@ impl<'a> CallbackArgs<'a> {
     ///
     /// Returns `undefined` if `i` is out of range.
     #[inline]
-    pub fn get(&self, i: u32) -> Value {
-        self.args.get(i).get()
+    pub fn get(&'a self, i: u32) -> HandleValue<'a> {
+        unsafe { HandleValue::from_raw(self.args.get(i)) }
     }
 
     /// Get argument `i` as an `i32`, or `None` if it isn't an int32.

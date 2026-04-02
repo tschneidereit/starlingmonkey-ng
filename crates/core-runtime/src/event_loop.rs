@@ -386,6 +386,5 @@ impl Default for EventLoop {
 /// then clears the weak-reference set for the current "turn".
 pub fn run_microtasks(scope: &Scope<'_>) {
     jobs::run_jobs(scope);
-    // TODO: when should this run? After microtasks, or only after full turns?
-    jobs::clear_kept_objects(scope);
+    // Weak-ref set is cleared by run_jobs.
 }

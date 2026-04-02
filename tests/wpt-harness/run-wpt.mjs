@@ -280,16 +280,23 @@ function assembleTestScript(testPath) {
       continue;
     }
     const metaSource = readFileSync(resolvedPath, "utf-8");
-    script += `evalScript(${JSON.stringify(metaSource + "\n//# sourceURL=" + metaPath)});\n`;
+    script += toEvalScriptCall(metaSource, metaPath);
   }
 
   // Load the test source via evalScript.
-  script += `evalScript(${JSON.stringify(testSource + "\n//# sourceURL=" + testPath)});\n`;
+  script += toEvalScriptCall(testSource, testPath);
 
   // Signal test completion.
   script += `done();\n`;
 
   return script;
+}
+
+function toEvalScriptCall(source, url) {
+  let escaped = source.split("`").join("\\`");
+  escaped = escaped.split("${").join("\\${");
+  escaped = escaped.split("\'").join("\\'");
+  return `// ${url}\nevalScript(\`${escaped}\`, ${JSON.stringify(url)});\n\n`;
 }
 
 // ---------------------------------------------------------------------------
