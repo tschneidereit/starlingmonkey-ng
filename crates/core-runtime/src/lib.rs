@@ -60,8 +60,6 @@ pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
         })
     };
 
-    println!("Res: {eval_result:?}");
-
     if eval_result.is_err() {
         let exn = ExnThrown::capture(&scope);
         println!("exn: {exn}");

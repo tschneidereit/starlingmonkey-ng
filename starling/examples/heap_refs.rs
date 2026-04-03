@@ -180,9 +180,11 @@ item.describe()
     // Test 4: Create objects from Rust, using the generated Foo::new()
     // ====================================================================
     println!("Test 4: Create objects from Rust side");
-    let item = Item::new(&scope, "gadget".to_string(), 99);
+    let item =
+        Item::new(&scope, "gadget".to_string(), 99).expect("Can only fail if GC allocation fails.");
 
-    let container = Container::new(&scope, "crate".to_string(), item);
+    let container = Container::new(&scope, "crate".to_string(), item)
+        .expect("Can only fail if GC allocation fails.");
 
     // Read back through the stack newtype's forwarded methods
     let desc = container.describe(&scope);

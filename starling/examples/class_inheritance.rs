@@ -221,7 +221,8 @@ r.join(", ")
     // Test 6: Rust-side stack newtype deref upcast
     // ====================================================================
     println!("Test 6: Deref upcast");
-    let dog = Dog::new(&scope, "Fido".to_string(), "Poodle".to_string());
+    let dog = Dog::new(&scope, "Fido".to_string(), "Poodle".to_string())
+        .expect("Can only fail if GC allocation fails");
     let animal: Animal = *dog;
     let animal_name = animal.name();
     assert_eq!(animal_name, "Fido");
@@ -248,7 +249,8 @@ r.join(", ")
     // Test 8: Multi-level upcast/downcast
     // ====================================================================
     println!("Test 8: Multi-level upcast/downcast");
-    let puppy = Puppy::new(&scope, "Tiny".to_string(), "Chihuahua".to_string(), 3);
+    let puppy = Puppy::new(&scope, "Tiny".to_string(), "Chihuahua".to_string(), 3)
+        .expect("Can only fail if GC allocation fails");
     // Upcast to Dog
     let as_dog: Dog = *puppy;
     let dog_breed = as_dog.breed();

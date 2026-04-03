@@ -285,7 +285,7 @@ mod dom_exception_integration {
         runtime::register_global_initializer(super::DOMException::add_to_global);
         let rt = Runtime::init(&RuntimeConfig::default());
         let scope = rt.default_global();
-        let e = super::DOMException::new(&scope, None, None);
+        let e = super::DOMException::new(&scope, None, None).unwrap();
         assert_eq!(e.name(), "Error");
         assert_eq!(e.message(), "");
         assert_eq!(e.code(), 0);

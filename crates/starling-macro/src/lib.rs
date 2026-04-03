@@ -1205,24 +1205,22 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
             .map(|(name, _)| quote! { #name })
             .collect();
 
-        // Determine the return type for new(). If the constructor returns
-        // Result<(), E>, new() returns Result<Foo<'s>, E>. Otherwise it
-        // returns the newtype directly.
+        // new() always returns Result<Foo<'s>, ExnThrown> because
+        // create_instance_with allocates a JS object, which is fallible.
         let err_ty = extract_result_error_type(&method.fn_item.sig.output);
-        let (new_ret_ty, new_ok_wrap) = if let Some(ref e) = err_ty {
-            (
-                quote! { -> ::std::result::Result<#type_name<'s>, #e> },
-                quote! { Ok(__typed) },
-            )
-        } else {
-            (quote! { -> #type_name<'s> }, quote! { __typed })
-        };
+        let new_ret_ty =
+            quote! { -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown> };
+        let new_ok_wrap = quote! { Ok(__typed) };
 
         let setup_call_in_new = if err_ty.is_some() {
             if method.has_cx {
-                quote! { #type_name::#setup_fn_ident(&__typed, scope, #(#param_names),*)?; }
+                quote! { #type_name::#setup_fn_ident(&__typed, scope, #(#param_names),*).map_err(|e| {
+                    ::js::error::ThrowException::throw(e, scope)
+                })?; }
             } else {
-                quote! { #type_name::#setup_fn_ident(&__typed, #(#param_names),*)?; }
+                quote! { #type_name::#setup_fn_ident(&__typed, #(#param_names),*).map_err(|e| {
+                    ::js::error::ThrowException::throw(e, scope)
+                })?; }
             }
         } else if method.has_cx {
             quote! { #type_name::#setup_fn_ident(&__typed, scope, #(#param_names),*); }
@@ -1234,15 +1232,14 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
         let pi_fn_ident = format_ident!("__post_init");
         let new_post_init_call = if let Some(pi_idx) = new_post_init_info {
             let pi_info = &methods[pi_idx];
-            let pi_err_propagate = if err_ty.is_some() {
-                quote! { ? }
-            } else {
-                quote! {}
-            };
             if pi_info.has_cx {
-                quote! { #type_name::#pi_fn_ident(&__typed, scope)#pi_err_propagate; }
+                quote! { #type_name::#pi_fn_ident(&__typed, scope).map_err(|e| {
+                    ::js::error::ThrowException::throw(e, scope)
+                })?; }
             } else {
-                quote! { #type_name::#pi_fn_ident(&__typed)#pi_err_propagate; }
+                quote! { #type_name::#pi_fn_ident(&__typed).map_err(|e| {
+                    ::js::error::ThrowException::throw(e, scope)
+                })?; }
             }
         } else {
             quote! {}
@@ -1280,8 +1277,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     unsafe {
                         let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
                             #inner_name::default()
-                        })
-                            .expect(concat!("Class ", stringify!(#type_name), " not registered"));
+                        })?;
                         let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
                         let __typed = #type_name(::js::gc::handle::Stack::from_handle_unchecked(
                             scope.root_object(__nn),
@@ -1400,19 +1396,18 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                     impl<'s> #type_name<'s> {
                         /// Construct a new instance and return the stack newtype.
                         pub fn new(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
-                            -> #type_name<'s>
+                            -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown>
                         {
                             unsafe {
                                 let obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
                                     #call
-                                })
-                                    .expect(concat!("Class ", stringify!(#type_name), " not registered"));
+                                })?;
                                 #[cfg(debug_assertions)]
                                 if let Some(__data) = ::js::class::get_private::<#inner_name>(obj.as_raw()) {
                                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
                                 }
                                 let nn = ::std::ptr::NonNull::new_unchecked(obj.as_raw());
-                                #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(nn)))
+                                Ok(#type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(nn))))
                             }
                         }
 
@@ -1476,15 +1471,16 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
                 };
 
                 forwarding_methods.push(quote! {
-                    pub fn #fn_name #fn_generics (&self, #cx_param #(#param_decls),*) -> #type_name<'s> {
+                    pub fn #fn_name #fn_generics (&self, #cx_param #(#param_decls),*)
+                        -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown>
+                    {
                         #get_inner
                         unsafe {
                             let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
                                 #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
-                            })
-                                .expect(concat!("Class ", stringify!(#type_name), " not registered"));
-                            let __nn = ::std::ptr::NonNull::new(__obj.as_raw()).unwrap();
-                            #type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn)))
+                            })?;
+                            let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
+                            Ok(#type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn))))
                         }
                     }
                 });

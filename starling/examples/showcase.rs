@@ -350,7 +350,7 @@ fn main() {
 
     // --- #[jsclass] construction from Rust via stack newtype ---
     println!("Class construction (Rust-side):");
-    let v = Vec2::new(&scope, 3.0, 4.0);
+    let v = Vec2::new(&scope, 3.0, 4.0).expect("Can only fail if GC allocation fails");
     // Forwarded getters work from Rust via the stack newtype:
     assert_eq!(v.x(), 3.0);
     assert_eq!(v.y(), 4.0);
@@ -361,7 +361,9 @@ fn main() {
     println!("  length() = {}", len);
 
     // Self-returning method — creates a new JS-backed Vec2 object:
-    let scaled = v.scale(&scope, 2.0);
+    let scaled = v
+        .scale(&scope, 2.0)
+        .expect("Can only fail if GC allocation fails");
     assert_eq!(scaled.x(), 6.0);
     assert_eq!(scaled.y(), 8.0);
     println!("  scale(2) => x={}, y={}", scaled.x(), scaled.y());
@@ -369,7 +371,8 @@ fn main() {
 
     // --- Inheritance: construction and upcast ---
     println!("Inheritance & upcast (Rust-side):");
-    let circle = Circle::new(&scope, "blue".to_string(), 5.0);
+    let circle =
+        Circle::new(&scope, "blue".to_string(), 5.0).expect("Can only fail if GC allocation fails");
     assert_eq!(circle.radius(), 5.0);
     println!("  Circle::new(\"blue\", 5) => radius={}", circle.radius());
 
