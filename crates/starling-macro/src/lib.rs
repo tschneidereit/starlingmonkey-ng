@@ -3546,7 +3546,12 @@ fn process_webidl_dictionary(input: ItemStruct) -> TokenStream {
             }
         }
 
-        let js_name = js_name_override.unwrap_or_else(|| ident.to_string().to_lower_camel_case());
+        let js_name = js_name_override.unwrap_or_else(|| {
+            let name = ident.to_string();
+            // Strip raw identifier prefix (e.g. `r#type` → `type`).
+            let name = name.strip_prefix("r#").unwrap_or(&name);
+            name.to_lower_camel_case()
+        });
         let optional = is_option_type(&ty);
         let inner_ty = if optional {
             extract_option_inner_type(&ty)
