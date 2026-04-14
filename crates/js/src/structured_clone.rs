@@ -4,9 +4,11 @@
 //!
 //! Structured cloning serializes and deserializes JavaScript values in a
 //! format that preserves object graphs, typed arrays, and other complex types.
-//! This is the mechanism behind `postMessage` and `IndexedDB` serialization.
+//! This is the mechanism behind `postMessage`, `structuredClone`, and
+//! `IndexedDB` serialization.
 
 use crate::gc::scope::Scope;
+use mozjs::glue::{DeleteJSAutoStructuredCloneBuffer, NewJSAutoStructuredCloneBuffer};
 use mozjs::jsapi::{
     CloneDataPolicy, JSStructuredCloneCallbacks, JSStructuredCloneData, StructuredCloneScope,
 };
@@ -91,4 +93,59 @@ pub unsafe fn read<'r>(
     );
     ExnThrown::check(ok)?;
     Ok(rval.handle())
+}
+
+/// Structured clone with transfer support.
+///
+/// Serializes `value` into a buffer (optionally transferring objects in
+/// `transferable`) and immediately deserializes the result back into the
+/// current realm. This implements the full `StructuredSerializeWithTransfer` +
+/// `StructuredDeserializeWithTransfer` round-trip used by `structuredClone()`.
+///
+/// `transferable` should be a JS Array of transferable objects, or undefined
+/// if no transfers are needed.
+pub fn clone_with_transfer<'r>(
+    scope: &'r Scope<'_>,
+    value: HandleValue,
+    transferable: HandleValue,
+) -> Result<HandleValue<'r>, ExnThrown> {
+    unsafe {
+        let clone_scope = StructuredCloneScope::SameProcess;
+        let buf = NewJSAutoStructuredCloneBuffer(clone_scope, std::ptr::null());
+        assert!(!buf.is_null(), "failed to allocate structured clone buffer");
+
+        let policy: CloneDataPolicy = std::mem::zeroed();
+        let data: *mut JSStructuredCloneData = &raw mut (*buf).data_;
+
+        let write_ok = wrappers2::JS_WriteStructuredClone(
+            scope.cx_mut(),
+            value,
+            data,
+            clone_scope,
+            &policy,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            transferable,
+        );
+        if !write_ok {
+            DeleteJSAutoStructuredCloneBuffer(buf);
+            ExnThrown::check(false)?;
+        }
+
+        let version = (*buf).version_;
+        let mut rval = scope.root_value_mut(UndefinedValue());
+        let read_ok = wrappers2::JS_ReadStructuredClone(
+            scope.cx_mut(),
+            data,
+            version,
+            clone_scope,
+            rval.reborrow(),
+            &policy,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        );
+        DeleteJSAutoStructuredCloneBuffer(buf);
+        ExnThrown::check(read_ok)?;
+        Ok(rval.handle())
+    }
 }

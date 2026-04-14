@@ -139,4 +139,89 @@ pub unsafe fn new_array_buffer_with_user_owned_contents<'s>(
         .ok_or(ExnThrown)
 }
 
+/// Create a new `ArrayBuffer` with the given data copied into it.
+pub fn new_array_buffer_with_data<'s>(
+    scope: &'s Scope<'_>,
+    data: &[u8],
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
+    let obj = unsafe { wrappers2::NewArrayBuffer(scope.cx_mut(), data.len()) };
+    let nn = NonNull::new(obj).ok_or(ExnThrown)?;
+    if !data.is_empty() {
+        unsafe {
+            let mut is_shared = false;
+            let nogc = mozjs::jsapi::JS::AutoRequireNoGC { _address: 0 };
+            let buf = mozjs::jsapi::JS::GetArrayBufferData(nn.as_ptr(), &mut is_shared, &nogc);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+        }
+    }
+    Ok(scope.root_object(nn))
+}
+
+/// Copy the bytes held by any `BufferSource` (ArrayBuffer or ArrayBufferView)
+/// into a new `Vec<u8>`.
+///
+/// Returns `None` if `obj` is neither an ArrayBuffer nor an ArrayBufferView.
+///
+/// # Safety
+///
+/// `obj` must be a valid, non-null JS object pointer. No GC may occur during
+/// the lifetime of this call (the caller must ensure no JS operations happen
+/// concurrently).
+pub unsafe fn copy_buffer_source_bytes(obj: *mut JSObject) -> Option<Vec<u8>> {
+    if mozjs::jsapi::JS::IsArrayBufferObject(obj) {
+        let mut length = 0usize;
+        let mut is_shared = false;
+        let mut data: *mut u8 = std::ptr::null_mut();
+        mozjs::jsapi::JS::GetArrayBufferLengthAndData(obj, &mut length, &mut is_shared, &mut data);
+        if data.is_null() || length == 0 {
+            return Some(Vec::new());
+        }
+        return Some(std::slice::from_raw_parts(data, length).to_vec());
+    }
+
+    if mozjs::jsapi::JS_IsArrayBufferViewObject(obj) {
+        let length = mozjs::jsapi::JS_GetArrayBufferViewByteLength(obj);
+        if length == 0 {
+            return Some(Vec::new());
+        }
+        let mut is_shared = false;
+        let nogc = mozjs::jsapi::JS::AutoRequireNoGC { _address: 0 };
+        let data = mozjs::jsapi::JS_GetArrayBufferViewData(obj, &mut is_shared, &nogc);
+        if data.is_null() {
+            return Some(Vec::new());
+        }
+        return Some(std::slice::from_raw_parts(data as *const u8, length).to_vec());
+    }
+
+    None
+}
+
+/// Get a mutable slice into a typed array's data buffer.
+///
+/// Returns `Some(&mut [u8])` if `obj` is a `Uint8Array` (or any typed array
+/// view whose element size is 1 byte), or `None` if it is not a typed array
+/// view.
+///
+/// # Safety
+///
+/// `obj` must be a valid, non-null JS object pointer. The returned slice
+/// borrows the typed array's inline data buffer — no GC or detach operations
+/// may occur while the slice is live.
+pub unsafe fn typed_array_data_mut(obj: *mut JSObject) -> Option<&'static mut [u8]> {
+    if !mozjs::jsapi::JS_IsArrayBufferViewObject(obj) {
+        return None;
+    }
+    let length = mozjs::jsapi::JS_GetArrayBufferViewByteLength(obj);
+    if length == 0 {
+        return Some(&mut []);
+    }
+    let mut is_shared = false;
+    let nogc = mozjs::jsapi::JS::AutoRequireNoGC { _address: 0 };
+    let data = mozjs::jsapi::JS_GetArrayBufferViewData(obj, &mut is_shared, &nogc);
+    if data.is_null() {
+        return None;
+    }
+    Some(std::slice::from_raw_parts_mut(data as *mut u8, length))
+}
+
 // TODO: add the full typed array API, potentially as a generic builtin, taking the element type as a type parameter. This would include functions for getting/setting elements, getting the length, etc. Use JS_IsTypedArrayObject, JS_IsArrayBufferViewObject, and various other functions available on mozjs_sys::jsapi. DO NOT REMOVE THIS TODO WITHOUT ADDRESSING OR BY JUST CHANGING THIS COMMENT.
