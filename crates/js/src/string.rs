@@ -31,11 +31,12 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr::NonNull;
 
+use crate::conversion::Utf8Chars;
 use crate::gc::scope::Scope;
 use mozjs::gc::Handle;
 use mozjs::jsapi::{JSLinearString, JSString};
 use mozjs::jsval::StringValue;
-use mozjs::rust::wrappers2;
+use mozjs::rust::wrappers2::{self, JS_NewStringCopyUTF8N};
 
 use super::error::ExnThrown;
 
@@ -88,14 +89,15 @@ impl<'s> Str<'s> {
     // String creation
     // ---------------------------------------------------------------------------
 
-    /// Create a new JS string from a UTF-8 Rust `&str`.
+    /// Create a new JS string from a Rust `&str`.
     pub fn from_str(scope: &'s Scope<'_>, s: &str) -> Result<Self, ExnThrown> {
-        let js_str = unsafe {
-            wrappers2::JS_NewStringCopyN(scope.cx_mut(), s.as_ptr() as *const c_char, s.len())
-        };
-        NonNull::new(js_str)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        let s = Utf8Chars::from(s);
+        let jsstr = unsafe { JS_NewStringCopyUTF8N(scope.cx_mut(), &*s as *const _) };
+        if jsstr.is_null() {
+            return Err(ExnThrown);
+        }
+        let rooted = scope.root_string(NonNull::new(jsstr).unwrap());
+        Ok(Str::from_handle(rooted))
     }
 
     /// Create a new JS string from a null-terminated C string.

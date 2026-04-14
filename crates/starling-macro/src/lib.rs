@@ -1829,9 +1829,9 @@ fn extract_record_inner_type(ty: &Type) -> Option<Type> {
 /// inner type, requiring `ConversionBehavior` config instead of `()`.
 fn is_int_container_type(ty: &Type) -> bool {
     if is_vec_type(ty) {
-        extract_vec_inner_type(ty).map_or(false, |inner| is_integer_type(&inner))
+        extract_vec_inner_type(ty).is_some_and(|inner| is_integer_type(&inner))
     } else if is_record_type(ty) {
-        extract_record_inner_type(ty).map_or(false, |inner| is_integer_type(&inner))
+        extract_record_inner_type(ty).is_some_and(|inner| is_integer_type(&inner))
     } else {
         false
     }

@@ -27,7 +27,7 @@ use crate::builtins::JSType;
 use crate::conversion::ConversionError;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
-use crate::prelude::FromJSVal;
+use crate::prelude::{FromJSVal, ToJSVal};
 
 use mozjs::conversions::ToJSValConvertible;
 use mozjs::gc::{Handle, HandleId, HandleObject, HandleValue, MutableHandle};
@@ -211,14 +211,19 @@ impl<'s> Stack<'s, Object> {
 
     /// Set a property by name.
     #[inline]
-    pub fn set_property(
+    pub fn set_property<'v>(
         &self,
-        scope: &Scope<'_>,
+        scope: &'v Scope<'_>,
         name: &CStr,
-        value: HandleValue,
+        value: impl ToJSVal<'v>,
     ) -> Result<(), ExnThrown> {
         let ok = unsafe {
-            wrappers2::JS_SetProperty(scope.cx_mut(), self.handle(), name.as_ptr(), value)
+            wrappers2::JS_SetProperty(
+                scope.cx_mut(),
+                self.handle(),
+                name.as_ptr(),
+                value.to_jsval(scope).map_err(|e| e.throw(scope))?,
+            )
         };
         ExnThrown::check(ok)
     }

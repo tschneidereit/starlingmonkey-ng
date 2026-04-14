@@ -156,6 +156,12 @@ impl ConversionError {
     }
 }
 
+impl From<ExnThrown> for ConversionError {
+    fn from(_: ExnThrown) -> Self {
+        ConversionError::ExnPending
+    }
+}
+
 impl ThrowException for ConversionError {
     fn throw(self, scope: &Scope<'_>) -> ExnThrown {
         ConversionError::throw(&self, scope)
@@ -631,7 +637,7 @@ impl<'s> ToJSVal<'s> for str {
         let s = Utf8Chars::from(self);
         let jsstr = unsafe { JS_NewStringCopyUTF8N(scope.cx_mut().raw_cx(), &*s as *const _) };
         if jsstr.is_null() {
-            panic!("JS String copy routine failed");
+            return Err(ConversionError::ExnPending);
         }
         Ok(scope.root_value(StringValue(unsafe { &*jsstr })))
     }
@@ -1034,7 +1040,7 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Record<T> {
                     scope.cx_mut(),
                     obj.handle(),
                     c_key.as_ptr(),
-                    val.into(),
+                    val,
                 )
             };
             if !ok {
