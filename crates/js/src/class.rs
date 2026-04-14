@@ -1344,6 +1344,37 @@ pub unsafe fn get_int_arg<'s, T: FromJSVal<'s, Config = ConversionBehavior>>(
     })
 }
 
+/// Extract an argument with an explicit conversion config.
+///
+/// Used for container types like `Vec<T>` and `Record<V>` whose
+/// `FromJSVal::Config` forwards the inner type's config. When the inner
+/// type is an integer, the config is `ConversionBehavior`; for other
+/// inner types it is `()`.
+///
+/// # Safety
+///
+/// - `scope` must be in a valid realm.
+/// - `args` must be from a valid JSNative call.
+#[doc(hidden)]
+pub unsafe fn get_arg_with_config<'s, T: FromJSVal<'s>>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    index: u32,
+    config: T::Config,
+) -> Result<T, ExnThrown> {
+    if index >= args.argc_ {
+        return Err(crate::error::report_error_ascii(
+            scope,
+            c"Not enough arguments",
+        ));
+    }
+    let val = crate::native::Handle::from_raw(args.get(index));
+    T::from_jsval(scope, val, config).map_err(|e| match e {
+        ConversionError::ExnPending => ExnThrown,
+        ConversionError::Failure(msg) => crate::error::report_error_ascii(scope, &msg),
+    })
+}
+
 /// Extract a stack newtype argument from CallArgs.
 ///
 /// Verifies that the argument is an object with the correct class, roots it,

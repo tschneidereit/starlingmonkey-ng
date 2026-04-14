@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 encoding_rs.workspace = true
+indexmap = "2.13"
 mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" } #, default-features = false, features = ["jit", "libz-sys"] }
 mozjs_sys = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" }
 num-traits = "0.2"

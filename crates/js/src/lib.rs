@@ -210,6 +210,9 @@ pub mod module_raw {
 
 pub use macros::{allow_unrooted, allow_unrooted_interior, must_root};
 
+pub use conversion::AsyncSequence;
+pub use conversion::Record;
+
 use crate::gc::handle::Stack;
 
 // ---------------------------------------------------------------------------

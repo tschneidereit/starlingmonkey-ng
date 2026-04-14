@@ -34,10 +34,11 @@ use mozjs::jsapi::JS_GetTwoByteStringCharsAndLength;
 use mozjs::jsapi::JS;
 use mozjs::jsapi::{ForOfIterator, ForOfIterator_NonIterableBehavior};
 use mozjs::jsapi::{Heap, JS_DefineElement, JS_GetLatin1StringCharsAndLength};
-use mozjs::jsapi::{JSContext, JSObject, JSString, RootedObject, RootedValue};
+use mozjs::jsapi::{JSContext, JSObject, JSString, PropertyDescriptor, RootedObject, RootedValue};
 use mozjs::jsapi::{JS_DeprecatedStringHasLatin1Chars, JS_NewStringCopyUTF8N, JSPROP_ENUMERATE};
 use mozjs::jsval::{BooleanValue, DoubleValue, Int32Value, UInt32Value, UndefinedValue};
 use mozjs::jsval::{JSVal, ObjectOrNullValue, ObjectValue, StringValue, SymbolValue};
+use mozjs::rooted;
 use mozjs::rust::HandleValue;
 use mozjs::rust::{maybe_wrap_object_or_null_value, maybe_wrap_object_value, ToString};
 use mozjs::rust::{ToBoolean, ToInt32, ToInt64, ToNumber, ToUint16, ToUint32, ToUint64};
@@ -50,7 +51,10 @@ use std::rc::Rc;
 use std::{ptr, slice};
 
 use crate::error::{throw_type_error, ExnThrown, ThrowException};
+use crate::heap::Trace;
 use crate::prelude::Scope;
+
+pub use indexmap::IndexMap;
 
 trait As<O>: Copy {
     fn cast(self) -> O;
@@ -817,6 +821,334 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Vec<T
         }
 
         Ok(ret)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WebIDL record<DOMString, V>
+// https://webidl.spec.whatwg.org/#es-record
+// ---------------------------------------------------------------------------
+
+/// WebIDL `record<DOMString, V>` — an ordered map with string keys.
+///
+/// Wraps `IndexMap<String, V>` to preserve insertion order as required by
+/// the spec.  `Deref` and `IntoIterator` delegate to the inner map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Record<V>(pub IndexMap<String, V>);
+
+// SAFETY: Traces each key and value in the map. Keys are Strings (no-op
+// trace), values trace via V: Traceable.
+unsafe impl<V: Trace> Trace for Record<V> {
+    #[inline]
+    unsafe fn trace(&self, trc: *mut mozjs::jsapi::JSTracer) {
+        for (k, v) in &self.0 {
+            k.trace(trc);
+            v.trace(trc);
+        }
+    }
+}
+
+impl<V> Record<V> {
+    /// Create an empty record.
+    pub fn new() -> Self {
+        Record(IndexMap::new())
+    }
+}
+
+impl<V> Default for Record<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V> std::ops::Deref for Record<V> {
+    type Target = IndexMap<String, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<V> std::ops::DerefMut for Record<V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<V> IntoIterator for Record<V> {
+    type Item = (String, V);
+    type IntoIter = indexmap::map::IntoIter<String, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a, V> IntoIterator for &'a Record<V> {
+    type Item = (&'a String, &'a V);
+    type IntoIter = indexmap::map::Iter<'a, String, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+// https://webidl.spec.whatwg.org/#es-record
+impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Record<T> {
+    type Config = C;
+
+    fn from_jsval(
+        scope: &'s Scope<'s>,
+        val: HandleValue<'s>,
+        option: C,
+    ) -> Result<Record<T>, ConversionError> {
+        // Step 1: If Type(V) is not Object, throw a TypeError.
+        if !val.is_object() {
+            return Err(ConversionError::Failure(
+                c"Value is not an object (expected record)".into(),
+            ));
+        }
+
+        let obj = unsafe {
+            crate::Object::from_raw(scope, val.to_object()).ok_or(ConversionError::ExnPending)?
+        };
+
+        // Step 2: Let result be a new empty instance of record<K, V>.
+        let mut result = IndexMap::new();
+
+        // Step 3: Let keys be ? O.[[OwnPropertyKeys]]().
+        // Use JSITER_OWNONLY | JSITER_HIDDEN | JSITER_SYMBOLS to get the full
+        // [[OwnPropertyKeys]] set, then manually filter out symbols and
+        // non-enumerable properties (per spec step 4).
+        unsafe {
+            let cx = scope.cx_mut().raw_cx();
+            let id_vector = mozjs_sys::glue::CreateRootedIdVector(cx);
+            if id_vector.is_null() {
+                return Err(ConversionError::ExnPending);
+            }
+
+            // Use JSITER_OWNONLY | JSITER_HIDDEN | JSITER_SYMBOLS to match
+            // [[OwnPropertyKeys]] ordering.
+            let flags = mozjs::jsapi::JSITER_OWNONLY
+                | mozjs::jsapi::JSITER_HIDDEN
+                | mozjs::jsapi::JSITER_SYMBOLS;
+
+            let props = mozjs_sys::glue::GetIdVectorAddress(id_vector);
+            if !mozjs::rust::wrappers2::GetPropertyKeys(
+                scope.cx_mut(),
+                obj.handle(),
+                flags,
+                mozjs::jsapi::MutableHandleIdVector { ptr: props },
+            ) {
+                mozjs_sys::glue::DestroyRootedIdVector(id_vector);
+                return Err(ConversionError::ExnPending);
+            }
+
+            let mut len = 0usize;
+            let ids_ptr = mozjs_sys::glue::SliceRootedIdVector(id_vector, &mut len);
+
+            for i in 0..len {
+                let id = *ids_ptr.add(i);
+                // Root the id for use with SpiderMonkey APIs.
+                rooted!(in(scope.raw_cx_no_gc()) let id_rooted = id);
+
+                // Step 4.1: If Type(key) is not Symbol...
+                // Skip symbol and integer keys — records only have string keys.
+                if !mozjs_sys::glue::RUST_JSID_IS_STRING(id_rooted.handle().into()) {
+                    continue;
+                }
+
+                // Step 4.2: Let desc be ? O.GetOwnPropertyDescriptor(key).
+                // Step 4.3: If desc is not undefined and desc.[[Enumerable]] is true...
+                let mut is_none = true;
+                rooted!(in(scope.raw_cx_no_gc()) let mut desc = PropertyDescriptor {
+                    _bitfield_align_1: [0; 0],
+                    _bitfield_1: PropertyDescriptor::new_bitfield_1(
+                        false, false, false, false, false, false,
+                        false, false, false, false,
+                    ),
+                    getter_: ptr::null_mut(),
+                    setter_: ptr::null_mut(),
+                    value_: UndefinedValue(),
+                });
+                if !mozjs::rust::wrappers2::JS_GetOwnPropertyDescriptorById(
+                    scope.cx_mut(),
+                    obj.handle(),
+                    id_rooted.handle(),
+                    desc.handle_mut(),
+                    &mut is_none,
+                ) {
+                    mozjs_sys::glue::DestroyRootedIdVector(id_vector);
+                    return Err(ConversionError::ExnPending);
+                }
+
+                if is_none || !desc.get().enumerable_() {
+                    continue;
+                }
+
+                // Step 4.4: Let typedKey be key converted to an IDL value of type K.
+                let key_str = mozjs_sys::glue::RUST_JSID_TO_STRING(id_rooted.handle().into());
+                let key = jsstr_to_string(scope, NonNull::new_unchecked(key_str));
+
+                // Step 4.5: Let value be ? Get(O, key).
+                let mut val_rooted = scope.root_value_mut(UndefinedValue());
+                if !mozjs::rust::wrappers2::JS_GetPropertyById(
+                    scope.cx_mut(),
+                    obj.handle(),
+                    id_rooted.handle(),
+                    val_rooted.reborrow(),
+                ) {
+                    mozjs_sys::glue::DestroyRootedIdVector(id_vector);
+                    return Err(ConversionError::ExnPending);
+                }
+
+                // Step 4.6: Let typedValue be the result of converting value
+                // to an IDL value of type V.
+                let typed_value = match T::from_jsval(scope, val_rooted.handle(), option.clone()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        mozjs_sys::glue::DestroyRootedIdVector(id_vector);
+                        return Err(e);
+                    }
+                };
+
+                // Step 4.7: Set result[typedKey] to typedValue.
+                result.insert(key, typed_value);
+            }
+
+            mozjs_sys::glue::DestroyRootedIdVector(id_vector);
+        }
+
+        Ok(Record(result))
+    }
+}
+
+// https://webidl.spec.whatwg.org/#es-record
+impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Record<T> {
+    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+        let obj = crate::Object::new(scope, None).map_err(|_| ConversionError::ExnPending)?;
+
+        for (key, value) in &self.0 {
+            let val = value.to_jsval(scope)?;
+            let ok = unsafe {
+                let c_key = std::ffi::CString::new(key.as_bytes())
+                    .map_err(|_| ConversionError::ExnPending)?;
+                mozjs::rust::wrappers2::JS_SetProperty(
+                    scope.cx_mut(),
+                    obj.handle(),
+                    c_key.as_ptr(),
+                    val.into(),
+                )
+            };
+            if !ok {
+                return Err(ConversionError::ExnPending);
+            }
+        }
+
+        obj.to_jsval(scope)
+    }
+}
+
+// ============================================================================
+// Async Sequence — WebIDL §3.2.22
+// ============================================================================
+
+/// An async iterable reference captured from a JS value.
+///
+/// Per WebIDL §3.2.22, an async sequence captures a reference to a JS
+/// iterable (either async or sync) for lazy iteration. The type parameter
+/// is irrelevant at capture time — values are converted during iteration.
+///
+/// Created via `FromJSVal` when used as a method parameter:
+/// ```rust,ignore
+/// #[method]
+/// fn process(&self, scope: &Scope<'_>, items: AsyncSequence) -> Promise { ... }
+/// ```
+#[crate::allow_unrooted_interior]
+pub struct AsyncSequence {
+    /// The iterable object.
+    object: crate::gc::handle::MozHeap<JSVal>,
+    /// The iterator factory method (Symbol.asyncIterator or Symbol.iterator).
+    method: crate::gc::handle::MozHeap<JSVal>,
+    /// `true` if the method came from `Symbol.asyncIterator`; `false` for
+    /// `Symbol.iterator` (sync, needs wrapping via `CreateAsyncFromSyncIterator`).
+    is_async: bool,
+}
+
+// SAFETY: Both MozHeap<JSVal> fields maintain GC write barriers.
+unsafe impl Trace for AsyncSequence {
+    unsafe fn trace(&self, trc: *mut crate::native::JSTracer) {
+        self.object.trace(trc);
+        self.method.trace(trc);
+    }
+}
+
+impl AsyncSequence {
+    /// Whether the captured iterator factory is an async iterator.
+    pub fn is_async(&self) -> bool {
+        self.is_async
+    }
+}
+
+// https://webidl.spec.whatwg.org/#es-async-iterable
+impl FromJSVal<'_> for AsyncSequence {
+    type Config = ();
+    #[crate::allow_unrooted]
+    fn from_jsval(scope: &Scope<'_>, val: HandleValue, _: ()) -> Result<Self, ConversionError> {
+        if !val.is_object() {
+            return Err(ConversionError::Failure(
+                c"Value is not an object (expected async iterable)".into(),
+            ));
+        }
+
+        let obj = unsafe {
+            crate::Object::from_raw(scope, val.to_object()).ok_or(ConversionError::ExnPending)?
+        };
+
+        // Try Symbol.asyncIterator first.
+        let async_iter_key =
+            crate::symbol::get_well_known_key(scope, crate::native::SymbolCode::asyncIterator);
+        let async_iter_id = scope.root_id(async_iter_key);
+
+        if let Ok(true) = obj.has_property_by_id(scope, async_iter_id) {
+            let method_val = obj
+                .get_property_by_id(scope, async_iter_id)
+                .map_err(|_| ConversionError::ExnPending)?;
+            if !method_val.is_null_or_undefined() {
+                let object = crate::gc::handle::MozHeap::default();
+                object.set(val.get());
+                let method = crate::gc::handle::MozHeap::default();
+                method.set(method_val.get());
+                return Ok(AsyncSequence {
+                    object,
+                    method,
+                    is_async: true,
+                });
+            }
+        }
+
+        // Fall back to Symbol.iterator (sync iterable).
+        let iter_key =
+            crate::symbol::get_well_known_key(scope, crate::native::SymbolCode::iterator);
+        let iter_id = scope.root_id(iter_key);
+
+        if let Ok(true) = obj.has_property_by_id(scope, iter_id) {
+            let method_val = obj
+                .get_property_by_id(scope, iter_id)
+                .map_err(|_| ConversionError::ExnPending)?;
+            if !method_val.is_null_or_undefined() {
+                let object = crate::gc::handle::MozHeap::default();
+                object.set(val.get());
+                let method = crate::gc::handle::MozHeap::default();
+                method.set(method_val.get());
+                return Ok(AsyncSequence {
+                    object,
+                    method,
+                    is_async: false,
+                });
+            }
+        }
+
+        Err(ConversionError::Failure(
+            c"Object is not iterable (no Symbol.asyncIterator or Symbol.iterator)".into(),
+        ))
     }
 }
 

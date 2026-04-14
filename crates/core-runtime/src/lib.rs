@@ -10,7 +10,7 @@ pub mod test_util;
 use js::error::ExnThrown;
 pub use js::macros::{
     jsclass, jsglobals, jsmethods, jsmodule, jsnamespace, webidl_dictionary, webidl_interface,
-    webidl_namespace, Traceable,
+    webidl_namespace, webidl_union, Traceable,
 };
 
 use crate::runtime::Runtime;

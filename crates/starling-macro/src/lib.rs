@@ -10,8 +10,8 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::{
-    parse_macro_input, Data, DeriveInput, Fields, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl,
-    ItemStruct, LitStr, Pat, ReturnType, Token, Type, Visibility,
+    parse_macro_input, Data, DeriveInput, Fields, FnArg, Ident, ImplItem, ImplItemFn, ItemEnum,
+    ItemImpl, ItemStruct, LitStr, Pat, ReturnType, Token, Type, Visibility,
 };
 
 // ============================================================================
@@ -1762,6 +1762,81 @@ fn is_integer_type(ty: &Type) -> bool {
     )
 }
 
+/// Whether a type is a primitive WebIDL type whose `null` value should be
+/// converted through the normal path rather than treated as absent.
+///
+/// For `optional DOMString`, `null` converts to `"null"` via ToString.
+/// For `optional long long`, `null` converts to `0` via ToNumber.
+/// For `optional boolean`, `null` converts to `false` via ToBoolean.
+fn is_primitive_webidl_type(ty: &Type) -> bool {
+    let s = quote!(#ty).to_string();
+    is_integer_type(ty) || matches!(s.as_str(), "String" | "bool" | "f32" | "f64")
+}
+
+/// Detect `Vec<T>` types (WebIDL sequence parameters).
+fn is_vec_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return seg.ident == "Vec"
+                && matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+        }
+    }
+    false
+}
+
+/// Extract the inner type from `Vec<T>`.
+fn extract_vec_inner_type(ty: &Type) -> Option<Type> {
+    if let Type::Path(type_path) = ty {
+        let last_seg = type_path.path.segments.last()?;
+        if last_seg.ident == "Vec" {
+            if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                    return Some(inner.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect `Record<V>` types (WebIDL record parameters).
+fn is_record_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return seg.ident == "Record"
+                && matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+        }
+    }
+    false
+}
+
+/// Extract the inner type from `Record<V>`.
+fn extract_record_inner_type(ty: &Type) -> Option<Type> {
+    if let Type::Path(type_path) = ty {
+        let last_seg = type_path.path.segments.last()?;
+        if last_seg.ident == "Record" {
+            if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                    return Some(inner.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check whether a container type (`Vec<T>` or `Record<T>`) has an integer
+/// inner type, requiring `ConversionBehavior` config instead of `()`.
+fn is_int_container_type(ty: &Type) -> bool {
+    if is_vec_type(ty) {
+        extract_vec_inner_type(ty).map_or(false, |inner| is_integer_type(&inner))
+    } else if is_record_type(ty) {
+        extract_record_inner_type(ty).map_or(false, |inner| is_integer_type(&inner))
+    } else {
+        false
+    }
+}
+
 /// Detect `Option<T>` types for optional parameter handling.
 fn is_option_type(ty: &Type) -> bool {
     if let Type::Path(tp) = ty {
@@ -1942,6 +2017,11 @@ fn gen_arg_extractions(
                         unsafe { ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
                             ::js::conversion::ConversionBehavior::Default) }
                     }
+                } else if is_int_container_type(&inner) {
+                    quote! {
+                        unsafe { ::js::class::get_arg_with_config::<#inner>(#scope_expr, #args_expr, #idx,
+                            ::js::conversion::ConversionBehavior::Default) }
+                    }
                 } else {
                     quote! { unsafe { ::js::class::get_arg(#scope_expr, #args_expr, #idx) } }
                 };
@@ -1950,9 +2030,20 @@ fn gen_arg_extractions(
                 } else {
                     quote! { return false; }
                 };
+
+                // Per WebIDL, only `undefined` (or a missing argument) maps to
+                // None for `optional` non-nullable primitive types.  `null`
+                // should be converted through the normal path (e.g. null →
+                // "null" for strings, null → 0 for integers).  For other types
+                // (dictionaries, objects), null is treated as absent.
+                let absent_check = if is_primitive_webidl_type(&inner) {
+                    quote! { __val.is_undefined() }
+                } else {
+                    quote! { __val.is_undefined() || __val.is_null() }
+                };
                 return quote! {
                     let __val = unsafe { *#args_expr.get(#idx) };
-                    let #name = if __val.is_undefined() {
+                    let #name = if #absent_check {
                         None
                     } else {
                         match #inner_extract {
@@ -1966,6 +2057,11 @@ fn gen_arg_extractions(
             let extract = if is_integer_type(ty) {
                 quote! {
                     unsafe { ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
+                        ::js::conversion::ConversionBehavior::Default) }
+                }
+            } else if is_int_container_type(ty) {
+                quote! {
+                    unsafe { ::js::class::get_arg_with_config::<#ty>(#scope_expr, #args_expr, #idx,
                         ::js::conversion::ConversionBehavior::Default) }
                 }
             } else {
@@ -3778,6 +3874,275 @@ pub fn allow_unrooted_interior_in_rc(_attr: TokenStream, item: TokenStream) -> T
         #item
     }
     .into()
+}
+
+// ============================================================================
+// WebIDL Union types — `#[webidl_union]`
+// ============================================================================
+
+/// Attribute macro for WebIDL union type definitions.
+///
+/// Applied to a Rust `enum` where each variant has exactly one unnamed field.
+/// Generates `FromJSVal` and `ToJSVal` implementations following the WebIDL
+/// §3.2.25 union type conversion algorithm.
+///
+/// Variant inner types are classified automatically:
+/// - `bool` → boolean branch
+/// - integer types (`i8`..`u64`) → numeric branch
+/// - `f32`, `f64` → numeric branch
+/// - `String` → string branch
+/// - `Vec<T>` → sequence branch (checks `Symbol.iterator`)
+/// - Other types → object/interface branch (uses `FromJSVal`)
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[webidl_union]
+/// pub enum StringOrUnsignedLong {
+///     String(String),
+///     UnsignedLong(u32),
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn webidl_union(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemEnum);
+    process_webidl_union(input)
+}
+
+/// Classification of a union variant's inner type for conversion priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnionCategory {
+    Boolean,
+    Numeric,
+    String,
+    Sequence,
+    Object,
+}
+
+fn classify_union_variant(ty: &Type) -> UnionCategory {
+    let s = quote!(#ty).to_string();
+    if s == "bool" {
+        return UnionCategory::Boolean;
+    }
+    if is_integer_type(ty) || matches!(s.as_str(), "f32" | "f64") {
+        return UnionCategory::Numeric;
+    }
+    if s == "String" {
+        return UnionCategory::String;
+    }
+    if is_vec_type(ty) {
+        return UnionCategory::Sequence;
+    }
+    UnionCategory::Object
+}
+
+fn process_webidl_union(input: ItemEnum) -> TokenStream {
+    let enum_name = &input.ident;
+    let vis = &input.vis;
+    let attrs = &input.attrs;
+
+    // Collect variant info: (variant_ident, inner_type, category).
+    let mut variants_info = Vec::new();
+    for variant in &input.variants {
+        let fields = match &variant.fields {
+            Fields::Unnamed(f) if f.unnamed.len() == 1 => f,
+            _ => {
+                return syn::Error::new_spanned(
+                    variant,
+                    "#[webidl_union] variants must have exactly one unnamed field",
+                )
+                .to_compile_error()
+                .into();
+            }
+        };
+        let inner_ty = &fields.unnamed[0].ty;
+        let category = classify_union_variant(inner_ty);
+        variants_info.push((&variant.ident, inner_ty, category));
+    }
+
+    // Build the conversion branches in WebIDL §3.2.25 priority order.
+    // Priority within an object value:
+    //   1. Sequence types (check Symbol.iterator)
+    //   2. Interface/object types (try FromJSVal)
+    // Priority for primitives:
+    //   3. Boolean
+    //   4. Numeric
+    //   5. String (fallback — any value can be stringified)
+
+    let mut object_branches = Vec::new();
+    let mut boolean_branch = None;
+    let mut numeric_branch = None;
+    let mut string_branch = None;
+
+    for (ident, inner_ty, category) in &variants_info {
+        match category {
+            UnionCategory::Boolean => {
+                boolean_branch = Some((ident, inner_ty));
+            }
+            UnionCategory::Numeric => {
+                numeric_branch = Some((ident, inner_ty));
+            }
+            UnionCategory::String => {
+                string_branch = Some((ident, inner_ty));
+            }
+            UnionCategory::Sequence | UnionCategory::Object => {
+                object_branches.push((ident, inner_ty, category));
+            }
+        }
+    }
+
+    // Generate the FromJSVal body.
+    // The algorithm checks object branches first (when value is an object),
+    // then primitive branches.
+    let mut from_body = Vec::new();
+
+    // Object branches: only attempted when val.is_object().
+    if !object_branches.is_empty() {
+        let mut obj_checks = Vec::new();
+
+        // Sequence types first (check Symbol.iterator).
+        for (ident, inner_ty, cat) in &object_branches {
+            if **cat == UnionCategory::Sequence {
+                obj_checks.push(quote! {
+                    // Sequence type: try Vec conversion (uses iterable protocol).
+                    if let Ok(v) = <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
+                        scope, val, Default::default(),
+                    ) {
+                        return Ok(#enum_name::#ident(v));
+                    }
+                });
+            }
+        }
+
+        // Interface/object types.
+        for (ident, inner_ty, cat) in &object_branches {
+            if **cat == UnionCategory::Object {
+                obj_checks.push(quote! {
+                    // Object/interface type: try FromJSVal conversion.
+                    if let Ok(v) = <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
+                        scope, val, Default::default(),
+                    ) {
+                        return Ok(#enum_name::#ident(v));
+                    }
+                });
+            }
+        }
+
+        from_body.push(quote! {
+            if val.get().is_object() {
+                #(#obj_checks)*
+            }
+        });
+    }
+
+    // Boolean branch.
+    if let Some((ident, _inner_ty)) = &boolean_branch {
+        from_body.push(quote! {
+            if val.get().is_boolean() {
+                return Ok(#enum_name::#ident(val.get().to_boolean()));
+            }
+        });
+    }
+
+    // Numeric branch.
+    if let Some((ident, inner_ty)) = &numeric_branch {
+        let numeric_conversion = if is_integer_type(inner_ty) {
+            quote! {
+                <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
+                    scope, val, ::js::conversion::ConversionBehavior::Default,
+                )
+            }
+        } else {
+            quote! {
+                <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
+                    scope, val, Default::default(),
+                )
+            }
+        };
+        from_body.push(quote! {
+            if val.get().is_number() || val.get().is_int32() {
+                match #numeric_conversion {
+                    Ok(v) => return Ok(#enum_name::#ident(v)),
+                    Err(::js::conversion::ConversionError::ExnPending) => {
+                        return Err(::js::conversion::ConversionError::ExnPending);
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
+    }
+
+    // String branch (fallback — any value can be converted to string).
+    if let Some((ident, inner_ty)) = &string_branch {
+        from_body.push(quote! {
+            match <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
+                scope, val, Default::default(),
+            ) {
+                Ok(v) => return Ok(#enum_name::#ident(v)),
+                Err(::js::conversion::ConversionError::ExnPending) => {
+                    return Err(::js::conversion::ConversionError::ExnPending);
+                }
+                Err(_) => {}
+            }
+        });
+    }
+
+    // Generate ToJSVal arms.
+    let to_arms: Vec<_> = variants_info
+        .iter()
+        .map(|(ident, _inner_ty, _cat)| {
+            quote! {
+                #enum_name::#ident(inner) => inner.to_jsval(scope),
+            }
+        })
+        .collect();
+
+    // Rebuild the enum variants for the output.
+    let variant_defs: Vec<_> = input
+        .variants
+        .iter()
+        .map(|v| {
+            let id = &v.ident;
+            let fields = &v.fields;
+            let attrs = &v.attrs;
+            quote! { #(#attrs)* #id #fields }
+        })
+        .collect();
+
+    let output = quote! {
+        #(#attrs)*
+        #vis enum #enum_name {
+            #(#variant_defs,)*
+        }
+
+        impl<'s> ::js::conversion::FromJSVal<'s> for #enum_name {
+            type Config = ();
+            fn from_jsval(
+                scope: &'s ::js::prelude::Scope<'s>,
+                val: ::js::prelude::HandleValue<'s>,
+                _: (),
+            ) -> Result<Self, ::js::conversion::ConversionError> {
+                #(#from_body)*
+
+                Err(::js::conversion::ConversionError::Failure(
+                    c"Value cannot be converted to the expected union type".into(),
+                ))
+            }
+        }
+
+        impl<'s> ::js::conversion::ToJSVal<'s> for #enum_name {
+            fn to_jsval(
+                &self,
+                scope: &'s ::js::prelude::Scope<'s>,
+            ) -> Result<::js::prelude::HandleValue<'s>, ::js::conversion::ConversionError> {
+                match self {
+                    #(#to_arms)*
+                }
+            }
+        }
+    };
+
+    output.into()
 }
 
 #[cfg(test)]
