@@ -10,10 +10,8 @@
 //!
 //! Call [`install_timer_globals`] to add `setTimeout`, `setInterval`,
 //! `clearTimeout`, and `clearInterval` to a global object. These functions
-//! interact with the event loop via the [`CURRENT_EVENT_LOOP`] thread-local
-//! set by the platform driver.
+//! interact with the event loop via [`with_active_event_loop`].
 
-use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use js::error::throw_error;
@@ -22,7 +20,7 @@ use js::native::{JSObject, JSTracer};
 
 use js::gc::scope::Scope;
 
-use super::{EventLoop, Task, TaskId};
+use super::{with_active_event_loop, Task, TaskId};
 
 /// A timer task that calls a JS function when it fires.
 ///
@@ -94,17 +92,11 @@ impl Task for TimerTask {
         // For setInterval: re-queue ourselves with the same delay and ID.
         if let Some(interval) = self.interval {
             let new_task = unsafe { TimerTask::repeating(cb, interval) };
-            CURRENT_EVENT_LOOP.with(|el| {
-                if let Some(el_ptr) = &mut *el.borrow_mut() {
-                    // SAFETY: We still have the scope active, so the
-                    // callback object is still valid. The new
-                    // RootedTraceableBox roots it immediately.
-                    let el_ref = unsafe { &mut **el_ptr };
-                    // Use the same TaskId for re-queuing. If the ID was
-                    // cancelled during the callback (via clearInterval),
-                    // requeue_timer will skip the re-queue.
-                    el_ref.requeue_timer(id, Box::new(new_task), Instant::now() + interval);
-                }
+            // Use the same TaskId for re-queuing. If the ID was cancelled
+            // during the callback (via clearInterval), requeue_timer will
+            // skip the re-queue.
+            with_active_event_loop(|el| {
+                el.requeue_timer(id, Box::new(new_task), Instant::now() + interval);
             });
         }
 
@@ -117,48 +109,6 @@ impl Task for TimerTask {
             self.callback.trace(trc);
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Thread-local event loop pointer for timer globals
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// Temporary reference to the current `EventLoop`, set by the platform
-    /// driver while it is actively running the loop. This allows
-    /// `setTimeout` and friends (which are `JSNative` callbacks without
-    /// access to Rust state) to queue tasks.
-    ///
-    /// The `*mut EventLoop` is valid only while the driver holds a
-    /// `&mut EventLoop` — the driver sets this before calling any JS and
-    /// clears it after.
-    pub(crate) static CURRENT_EVENT_LOOP: RefCell<Option<*mut EventLoop>> = const { RefCell::new(None) };
-}
-
-/// Set the current event loop pointer for the duration of a closure.
-///
-/// # Safety
-///
-/// The caller must ensure that `event_loop` remains valid (not dropped
-/// or moved) for the entire duration of `f`.
-// TODO: consider tying the current event loop to the Scope to make this safe.
-pub unsafe fn with_current_event_loop<R>(event_loop: &mut EventLoop, f: impl FnOnce() -> R) -> R {
-    let ptr = event_loop as *mut EventLoop;
-    CURRENT_EVENT_LOOP.with(|el| {
-        let prev = *el.borrow();
-        *el.borrow_mut() = Some(ptr);
-        let result = f();
-        *el.borrow_mut() = prev;
-        result
-    })
-}
-
-/// Access the current event loop from a `JSNative` callback.
-///
-/// Returns `None` if no event loop is currently active (i.e. we're not
-/// inside a platform driver's run loop).
-pub fn current_event_loop() -> Option<*mut EventLoop> {
-    CURRENT_EVENT_LOOP.with(|el| *el.borrow())
 }
 
 // ---------------------------------------------------------------------------
@@ -281,20 +231,13 @@ unsafe fn queue_timer_from_js(
     let deadline = Instant::now() + delay;
 
     // Queue on the current event loop.
-    let task_id = CURRENT_EVENT_LOOP.with(|el| {
-        if let Some(el_ptr) = &mut *el.borrow_mut() {
-            // SAFETY: The event loop pointer is valid for the duration
-            // of the platform driver's run loop.
-            let el_ref = unsafe { &mut **el_ptr };
-            let task: Box<dyn Task> = if repeating {
-                Box::new(TimerTask::repeating(callback, delay))
-            } else {
-                Box::new(TimerTask::one_shot(callback))
-            };
-            Some(el_ref.queue_timer(task, deadline))
+    let task_id = with_active_event_loop(|el| {
+        let task: Box<dyn Task> = if repeating {
+            Box::new(TimerTask::repeating(callback, delay))
         } else {
-            None
-        }
+            Box::new(TimerTask::one_shot(callback))
+        };
+        el.queue_timer(task, deadline)
     });
 
     match task_id {
@@ -350,14 +293,7 @@ unsafe fn clear_timer_from_js(
         return true;
     };
 
-    CURRENT_EVENT_LOOP.with(|el| {
-        if let Some(el_ptr) = &mut *el.borrow_mut() {
-            // SAFETY: The event loop pointer is valid for the duration
-            // of the platform driver's run loop.
-            let el_ref = unsafe { &mut **el_ptr };
-            el_ref.cancel(TaskId(id));
-        }
-    });
+    with_active_event_loop(|el| el.cancel(TaskId(id)));
 
     args.rval().set(value::undefined());
     true

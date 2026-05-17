@@ -19,6 +19,7 @@ resolver = "2"
 clap = { version = "4.5.60", features = ["derive"] }
 core-runtime = { path = "crates/core-runtime" }
 encoding_rs = "0.8"
+futures-lite = "2"
 js = { path = "crates/js" }
 libstarling = { path = "crates/libstarling" }
 oxc_allocator = "0.116.0"
@@ -27,7 +28,8 @@ oxc_parser = "0.116.0"
 oxc_resolver = "11.19.1"
 oxc_span = "0.116.0"
 starling-macro = { path = "crates/starling-macro" }
-wasip3 = { version = "0.4", features = ["http-compat"] }
+tokio = { version = "1", features = ["rt", "time"] }
+wasip3 = { version = "0.5", features = ["http-compat"] }
 wpt-support = { path = "crates/wpt-support" }
 # wit-bindgen = { version = "0.51", features = ["async", "async-spawn"] }
 

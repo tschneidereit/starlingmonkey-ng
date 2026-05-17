@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
+use core_runtime::event_loop::run_to_completion;
+
 // Re-export everything from core-runtime.
 pub use core_runtime::*;
 
@@ -17,9 +19,58 @@ pub fn register_builtins() {
 /// Run a JavaScript script or module based on the provided configuration.
 ///
 /// This registers all builtin globals (btoa, atob, etc.) and then delegates
-/// to [`core_runtime::run()`]. When `config.wpt_mode` is true, WPT-specific
-/// globals like `evalScript` are also installed.
+/// to [`core_runtime::run()`] with a platform-appropriate event loop driver.
 pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
     register_builtins();
-    core_runtime::run(config)
+    core_runtime::run(config, drive_event_loop)
+}
+
+/// Drive the event loop on native targets using a tokio current-thread
+/// runtime with async timer support.
+#[cfg(not(target_arch = "wasm32"))]
+fn drive_event_loop(
+    runtime: std::rc::Rc<runtime::Runtime>,
+    mut invocation: invocation::InvocationState,
+) -> Result<(), String> {
+    let tokio_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+
+    let scope = unsafe { runtime.scope() };
+    let el = invocation.event_loop_mut();
+
+    tokio_rt.block_on(async {
+        // SAFETY: the scope (and its Runtime) must outlive this future.
+        // Since the caller owns both and `block_on` runs synchronously on
+        // the same thread, this is guaranteed.
+        let raw_cx = unsafe { scope.raw_cx_no_gc() };
+        unsafe { run_to_completion(raw_cx, el, tokio::time::sleep).await }
+    });
+
+    runtime.unregister_invocation(&invocation);
+    Ok(())
+}
+
+/// Drive the event loop on wasm32 targets by spawning a WASIp3 async task.
+#[cfg(target_arch = "wasm32")]
+fn drive_event_loop(
+    runtime: std::rc::Rc<runtime::Runtime>,
+    mut invocation: invocation::InvocationState,
+) -> Result<(), String> {
+    // SAFETY: the Runtime is alive (held by Rc) and we're single-threaded.
+    let raw_cx = unsafe { runtime.mozjs_rt().cx_no_gc().raw_cx_no_gc() };
+    wasip3::wit_bindgen::spawn(async move {
+        let el = invocation.event_loop_mut();
+        // SAFETY: raw_cx is valid — the runtime is kept alive by the Rc.
+        unsafe {
+            run_to_completion(raw_cx, el, |dur| async move {
+                let nanos = dur.as_nanos().min(u64::MAX as u128) as u64;
+                wasip3::clocks::monotonic_clock::wait_for(nanos).await;
+            })
+            .await;
+        }
+        runtime.unregister_invocation(&invocation);
+    });
+    Ok(())
 }

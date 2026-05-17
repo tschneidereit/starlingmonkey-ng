@@ -11,7 +11,10 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use crate::{config::RuntimeConfig, event_loop, module, report_pending_exception};
+use crate::{
+    config::RuntimeConfig, event_loop, invocation::InvocationRegistry, module,
+    report_pending_exception,
+};
 use js::{
     engine::{JSEngine, JSEngineHandle, MozJSRuntime, RealmOptions},
     gc::scope::Scope,
@@ -134,10 +137,10 @@ pub struct Runtime {
     /// SpiderMonkey context to still be alive.
     default_global: Heap<*mut JSObject>,
     mozjs_rt: UnsafeCell<MozJSRuntime>,
-    /// The event loop task registry. Stores all pending async tasks
-    /// (timers, promise resolutions, I/O completions, etc.) and is
-    /// traced during GC via the runtime's extra-roots-tracer.
-    event_loop: RefCell<crate::event_loop::EventLoop>,
+    /// Registry of live [`InvocationState`](crate::invocation::InvocationState)
+    /// instances. The GC trace callback iterates this to trace all event
+    /// loops across concurrent invocations.
+    invocations: RefCell<InvocationRegistry>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -188,7 +191,7 @@ impl Runtime {
         let rt = Rc::new(Self {
             mozjs_rt: UnsafeCell::new(mozjs_rt),
             default_global: Heap::default(),
-            event_loop: RefCell::new(crate::event_loop::EventLoop::new()),
+            invocations: RefCell::new(InvocationRegistry::new()),
         });
 
         // Register runtime GC tracer, passing a raw pointer to the Rc's
@@ -313,13 +316,28 @@ impl Runtime {
         unsafe { &*self.mozjs_rt.get() }
     }
 
-    /// Returns a reference to the event loop task registry.
+    /// Returns a reference to the invocation registry.
     ///
-    /// The event loop is behind a `RefCell` because the `Runtime` is
-    /// stored behind `Rc` while the event loop needs `&mut` access
-    /// during task execution.
-    pub fn event_loop(&self) -> &RefCell<crate::event_loop::EventLoop> {
-        &self.event_loop
+    /// The registry is behind a `RefCell` because the `Runtime` is
+    /// stored behind `Rc` while the registry needs `&mut` access for
+    /// registration/unregistration.
+    pub fn invocations(&self) -> &RefCell<InvocationRegistry> {
+        &self.invocations
+    }
+
+    /// Register an invocation for GC tracing.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `state` remains valid and at a stable address
+    /// until [`unregister_invocation`](Self::unregister_invocation) is called.
+    pub unsafe fn register_invocation(&self, state: &crate::invocation::InvocationState) {
+        self.invocations.borrow_mut().register(state as *const _);
+    }
+
+    /// Unregister a previously registered invocation.
+    pub fn unregister_invocation(&self, state: &crate::invocation::InvocationState) {
+        self.invocations.borrow_mut().unregister(state as *const _);
     }
 
     /// Re-initialize the module loader.
@@ -385,13 +403,13 @@ unsafe extern "C" fn trace_runtime_cb(trc: *mut JSTracer, data: *mut c_void) {
     if !global.is_null() {
         js::class::trace_class_registry_for_global(trc, global);
     }
-    // Trace all tasks in the event loop (they may hold JS object references).
+    // Trace all event loops across registered invocations.
     //
     // Use `as_ptr()` to bypass `RefCell` borrow tracking. GC tracing runs
-    // with JS execution paused (stop-the-world), so the `&mut EventLoop`
-    // on the caller's stack isn't being actively used — no aliasing hazard.
-    // A normal `borrow()` would panic when the event loop driver already
-    // holds a `borrow_mut()`.
-    let el = unsafe { &*rt.event_loop.as_ptr() };
-    el.trace(trc);
+    // with JS execution paused (stop-the-world), so the `&mut` references
+    // on the caller's stack aren't being actively used — no aliasing hazard.
+    // A normal `borrow()` would panic when the invocation registry is
+    // already borrowed mutably.
+    let invocations = unsafe { &*rt.invocations.as_ptr() };
+    invocations.trace(trc);
 }

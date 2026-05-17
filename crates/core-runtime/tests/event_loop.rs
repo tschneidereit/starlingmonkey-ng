@@ -5,10 +5,10 @@
 //! Tests are grouped in a single test function because `JSEngine` can
 //! only be initialized once per process, and must run with --test-threads=1.
 
-use core_runtime::config::RuntimeConfig;
-use core_runtime::event_loop::native::run_to_completion;
-use core_runtime::event_loop::timer::{install_timer_globals, with_current_event_loop};
-use core_runtime::event_loop::{run_microtasks, EventLoop, Task};
+#[cfg(not(target_arch = "wasm32"))]
+use core_runtime::event_loop::run_to_completion;
+use core_runtime::event_loop::timer::install_timer_globals;
+use core_runtime::event_loop::{run_microtasks, with_event_loop, EventLoop, StepOutcome, Task};
 use core_runtime::runtime::Runtime;
 use js::gc::scope::Scope;
 use js::native::JSTracer;
@@ -16,6 +16,23 @@ use js::native::JSTracer;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+/// Helper: create a tokio current-thread runtime with timer support and
+/// block on `run_to_completion` using `tokio::time::sleep`.
+#[cfg(not(target_arch = "wasm32"))]
+fn block_on_event_loop(scope: &Scope<'_>, el: &mut EventLoop) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        // SAFETY: the scope (and its Runtime) must outlive this future.
+        // Since the caller owns both and `block_on` runs synchronously on
+        // the same thread, this is guaranteed.
+        let raw_cx = unsafe { scope.raw_cx_no_gc() };
+        unsafe { run_to_completion(raw_cx, el, tokio::time::sleep).await }
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Custom task for testing
@@ -51,7 +68,7 @@ impl Task for CounterTask {
 
 #[test]
 fn test_event_loop() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
     let scope = rt.default_global();
 
     // Install timer globals for timer tests.
@@ -203,10 +220,11 @@ fn test_event_loop() {
         assert!(ids.contains(&id3));
     }
 
-    // ---- Test 6: Native driver — run_to_completion with immediate tasks ----
+    // ---- Test 6: run_to_completion with immediate tasks ----
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let counter = Rc::new(Cell::new(0u32));
-        let mut el = rt.event_loop().borrow_mut();
+        let mut el = EventLoop::new();
 
         el.queue_ready(Box::new(CounterTask {
             counter: counter.clone(),
@@ -217,15 +235,16 @@ fn test_event_loop() {
             label: "native2",
         }));
 
-        run_to_completion(&scope, &mut el).unwrap();
+        block_on_event_loop(&scope, &mut el);
         assert_eq!(counter.get(), 2);
         assert!(el.is_empty());
     }
 
-    // ---- Test 7: Native driver — run_to_completion with timer ----
+    // ---- Test 7: run_to_completion with timer ----
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let counter = Rc::new(Cell::new(0u32));
-        let mut el = rt.event_loop().borrow_mut();
+        let mut el = EventLoop::new();
 
         el.queue_timer(
             Box::new(CounterTask {
@@ -235,19 +254,19 @@ fn test_event_loop() {
             Instant::now() + Duration::from_millis(5),
         );
 
-        run_to_completion(&scope, &mut el).unwrap();
+        block_on_event_loop(&scope, &mut el);
         assert_eq!(counter.get(), 1);
         assert!(el.is_empty());
     }
 
     // ---- Test 8: setTimeout from JavaScript ----
+    #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut el = rt.event_loop().borrow_mut();
-        assert!(el.is_empty());
+        let mut el = EventLoop::new();
 
         // Evaluate JS with the event loop thread-local set so setTimeout works.
         unsafe {
-            with_current_event_loop(&mut el, || {
+            with_event_loop(&mut el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._timerFired = false; setTimeout(function() { globalThis._timerFired = true; }, 1);",
@@ -262,7 +281,7 @@ fn test_event_loop() {
         assert!(el.has_pending());
 
         // Run the event loop to fire the timer.
-        run_to_completion(&scope, &mut el).unwrap();
+        block_on_event_loop(&scope, &mut el);
 
         // Verify the timer callback ran.
         let result = js::compile::evaluate_with_filename(
@@ -281,11 +300,10 @@ fn test_event_loop() {
 
     // ---- Test 9: clearTimeout cancels a timer ----
     {
-        let mut el = rt.event_loop().borrow_mut();
-        assert!(el.is_empty());
+        let mut el = EventLoop::new();
 
         unsafe {
-            with_current_event_loop(&mut el, || {
+            with_event_loop(&mut el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._cleared = true; var tid = setTimeout(function() { globalThis._cleared = false; }, 1); clearTimeout(tid);",
@@ -315,12 +333,12 @@ fn test_event_loop() {
     }
 
     // ---- Test 10: setInterval fires multiple times ----
+    #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut el = rt.event_loop().borrow_mut();
-        assert!(el.is_empty());
+        let mut el = EventLoop::new();
 
         unsafe {
-            with_current_event_loop(&mut el, || {
+            with_event_loop(&mut el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     r#"
@@ -341,7 +359,7 @@ fn test_event_loop() {
 
         assert!(el.has_pending());
 
-        run_to_completion(&scope, &mut el).unwrap();
+        block_on_event_loop(&scope, &mut el);
 
         // Verify the interval fired exactly 3 times and then stopped.
         let result = js::compile::evaluate_with_filename(
@@ -362,10 +380,6 @@ fn test_event_loop() {
 
     // ---- Test 11: Event loop with microtasks (promise reactions) ----
     {
-        let el = rt.event_loop().borrow_mut();
-        assert!(el.is_empty());
-        drop(el);
-
         // Evaluate JS that creates a resolved promise — the .then callback
         // should run during run_microtasks.
         let ok = js::compile::evaluate_with_filename(
@@ -393,5 +407,138 @@ fn test_event_loop() {
             val.to_double() as i32
         };
         assert_eq!(n, 42, "Promise.resolve .then should have run");
+    }
+
+    // ---- Test 12: step() returns Done on empty event loop ----
+    {
+        let mut el = EventLoop::new();
+        let outcome = el.step(&scope);
+        assert_eq!(outcome, StepOutcome::Done);
+    }
+
+    // ---- Test 13: step() returns Progressed when tasks run ----
+    {
+        let mut el = EventLoop::new();
+        let counter = Rc::new(Cell::new(0u32));
+
+        el.queue_ready(Box::new(CounterTask {
+            counter: counter.clone(),
+            label: "step-prog",
+        }));
+
+        let outcome = el.step(&scope);
+        assert_eq!(outcome, StepOutcome::Progressed);
+        assert_eq!(counter.get(), 1);
+    }
+
+    // ---- Test 14: step() returns Idle when tasks exist but none ready ----
+    {
+        let mut el = EventLoop::new();
+        let counter = Rc::new(Cell::new(0u32));
+
+        // Queue a task but don't signal it ready.
+        let _id = el.queue(Box::new(CounterTask {
+            counter: counter.clone(),
+            label: "step-idle",
+        }));
+
+        let outcome = el.step(&scope);
+        assert_eq!(outcome, StepOutcome::Idle);
+        assert_eq!(counter.get(), 0);
+    }
+
+    // ---- Test 15: step() returns Idle with interest but no tasks ----
+    {
+        let mut el = EventLoop::new();
+
+        el.acquire_interest();
+        assert!(el.has_interest());
+        assert!(el.is_alive());
+
+        let outcome = el.step(&scope);
+        assert_eq!(outcome, StepOutcome::Idle);
+
+        el.release_interest();
+        assert!(!el.has_interest());
+
+        let outcome = el.step(&scope);
+        assert_eq!(outcome, StepOutcome::Done);
+    }
+
+    // ---- Test 16: is_alive combines interest and pending ----
+    {
+        let mut el = EventLoop::new();
+
+        assert!(!el.is_alive());
+
+        // Interest alone keeps it alive.
+        el.acquire_interest();
+        assert!(el.is_alive());
+        el.release_interest();
+        assert!(!el.is_alive());
+
+        // Pending tasks alone keep it alive.
+        let counter = Rc::new(Cell::new(0u32));
+        el.queue(Box::new(CounterTask {
+            counter: counter.clone(),
+            label: "alive-test",
+        }));
+        assert!(el.is_alive());
+    }
+
+    // ---- Test 17: step() runs timer tasks after advance ----
+    {
+        let mut el = EventLoop::new();
+        let counter = Rc::new(Cell::new(0u32));
+
+        // Queue a timer with deadline in the past.
+        el.queue_timer(
+            Box::new(CounterTask {
+                counter: counter.clone(),
+                label: "step-timer",
+            }),
+            Instant::now(),
+        );
+
+        // step() advances timers internally.
+        let outcome = el.step(&scope);
+        assert_eq!(outcome, StepOutcome::Progressed);
+        assert_eq!(counter.get(), 1);
+        assert!(el.is_empty());
+    }
+
+    // ---- Test 18: run_to_completion respects interest tracking ----
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut el = EventLoop::new();
+
+        // Acquire interest, queue a task that releases it.
+        el.acquire_interest();
+
+        struct ReleaseInterestTask;
+        impl Task for ReleaseInterestTask {
+            fn kind(&self) -> &'static str {
+                "release-interest"
+            }
+            fn run(
+                self: Box<Self>,
+                _scope: &Scope<'_>,
+                _id: core_runtime::event_loop::TaskId,
+            ) -> Result<(), ()> {
+                core_runtime::event_loop::with_active_event_loop(|el| {
+                    el.release_interest();
+                });
+                Ok(())
+            }
+            fn trace(&self, _trc: *mut JSTracer) {}
+        }
+
+        el.queue_ready(Box::new(ReleaseInterestTask));
+
+        // With interest, the native driver should run the task and then
+        // exit once interest drops to zero and no tasks remain.
+        block_on_event_loop(&scope, &mut el);
+        assert!(!el.has_interest());
+        assert!(el.is_empty());
     }
 }

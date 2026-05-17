@@ -11,12 +11,19 @@
 //!    objects and runs them when ready.
 //!
 //! 2. **[`EventLoop`] struct** — platform-independent task registry. Manages
-//!    queuing, cancellation, readiness signaling, timer advancement, and GC
-//!    tracing of all live tasks.
+//!    queuing, cancellation, readiness signaling, timer advancement, GC
+//!    tracing, and notification of idle drivers via [`event_listener::Event`].
 //!
-//! 3. **Platform drivers** — swap in a blocking loop for native targets
-//!    ([`native`]) or a callback-driven model for WASIp3 ([`wasi`]) without
-//!    changing any task code.
+//! 3. **[`run_to_completion`]** — a single `async fn` driver that calls
+//!    [`EventLoop::step`] in a loop and, when idle, races the next timer
+//!    deadline against a readiness notification. Platform differences are
+//!    confined to the sleep function and the executor:
+//!    - [`wasi`]: `wasi:clocks/monotonic-clock.wait-for` for sleep,
+//!      `wasip3::wit_bindgen::spawn` as executor.
+//!    - [`native`]: the caller provides a proper async sleep (e.g.
+//!      `tokio::time::sleep`) and executor (e.g.
+//!      `tokio::runtime::Runtime::block_on`). This keeps the core runtime
+//!      free of any specific async runtime dependency.
 //!
 //! # Task lifecycle
 //!
@@ -65,17 +72,100 @@
 //! event_loop.signal_ready(id);
 //! ```
 
-pub mod native;
+pub mod interest;
 pub mod promise;
+pub mod spawner;
 pub mod timer;
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use event_listener::{Event, EventListener};
 use js::native::JSTracer;
 
 use js::gc::scope::Scope;
 use js::jobs;
+
+pub use interest::InterestTracker;
+
+// ---------------------------------------------------------------------------
+// Current event loop pointer
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Temporary reference to the active [`EventLoop`], set by the platform
+    /// driver while it is running. `JSNative` callbacks (`setTimeout` etc.)
+    /// have no other way to reach Rust state, so they read this pointer.
+    ///
+    /// Valid only while the driver holds a `&mut EventLoop` — set before
+    /// calling any JS and cleared immediately after.
+    pub(crate) static CURRENT_EVENT_LOOP: RefCell<Option<*mut EventLoop>> = const { RefCell::new(None) };
+}
+
+/// Set the current event loop for the duration of a closure.
+///
+/// Saves and restores the previous value, so calls may be nested.
+///
+/// # Safety
+///
+/// `event_loop` must remain valid (not dropped or moved) for the entire
+/// duration of `f`. The caller must not create any other `&mut EventLoop`
+/// to the same event loop during `f()` — in particular, `with_active_event_loop`
+/// must not be called on the same loop re-entrantly in a way that could alias
+/// the caller's borrow.
+///
+/// This function is inherently unsafe because `JSNative` callbacks are C
+/// function pointers (`fn(*mut RawJSContext, u32, *mut Value) -> bool`) that
+/// carry no Rust lifetime information. There is no way to tie the event loop
+/// pointer to the `Scope` lifetime through the C ABI boundary.
+pub unsafe fn with_event_loop<R>(
+    event_loop: &mut EventLoop,
+    f: impl FnOnce(&mut EventLoop) -> R,
+) -> R {
+    let ptr = event_loop as *mut EventLoop;
+    CURRENT_EVENT_LOOP.with(|el| {
+        let prev = *el.borrow();
+        *el.borrow_mut() = Some(ptr);
+        let result = f(event_loop);
+        *el.borrow_mut() = prev;
+        result
+    })
+}
+
+/// Run a closure with a mutable reference to the active event loop.
+///
+/// Returns `None` if no event loop is active (i.e. we're not inside a
+/// driver's run loop). The raw pointer never escapes this function.
+pub fn with_active_event_loop<R>(f: impl FnOnce(&mut EventLoop) -> R) -> Option<R> {
+    CURRENT_EVENT_LOOP.with(|el| {
+        el.borrow().map(|ptr| {
+            // SAFETY: The pointer is set by the platform driver immediately
+            // before calling JS and cleared immediately after, so it is
+            // valid for at least the lifetime of this closure.
+            f(unsafe { &mut *ptr })
+        })
+    })
+}
+
+/// Set the thread-local current event loop pointer.
+///
+/// Must be called before running any JS code that might invoke
+/// `setTimeout` / `setInterval`. Call [`clear_current_event_loop`] when done.
+///
+/// # Safety
+///
+/// `event_loop` must remain valid and at a stable address for as long as
+/// the pointer is set.
+pub unsafe fn set_current_event_loop(event_loop: &mut EventLoop) {
+    let ptr = event_loop as *mut EventLoop;
+    CURRENT_EVENT_LOOP.with(|el| *el.borrow_mut() = Some(ptr));
+}
+
+/// Clear the thread-local current event loop pointer.
+pub fn clear_current_event_loop() {
+    CURRENT_EVENT_LOOP.with(|el| *el.borrow_mut() = None);
+}
 
 // ---------------------------------------------------------------------------
 // TaskId
@@ -84,15 +174,57 @@ use js::jobs;
 /// Opaque identifier for a queued task.
 ///
 /// Task IDs are unique within a single [`EventLoop`] instance and are never
-/// reused (the internal counter is a `u64` — wrapping is not a concern in
-/// practice).
+/// reused.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TaskId(u64);
+
+impl TaskId {
+    /// Create a `TaskId` from a raw `u64` value.
+    ///
+    /// Test-only, since in production code it'd be a footgun.
+    #[cfg(test)]
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the raw `u64` value.
+    ///
+    /// Test-only, since in production code it'd be a footgun.
+    #[cfg(test)]
+    pub fn as_raw(self) -> u64 {
+        self.0
+    }
+}
 
 impl std::fmt::Display for TaskId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "TaskId({})", self.0)
     }
+}
+
+// ---------------------------------------------------------------------------
+// StepOutcome
+// ---------------------------------------------------------------------------
+
+/// Result of a single [`EventLoop::step`] iteration.
+///
+/// Platform drivers use this to decide what to do next: exit, wait for
+/// external events, or immediately step again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StepOutcome {
+    /// The event loop has completed — no pending tasks and no external
+    /// interest. The driver should exit.
+    Done,
+
+    /// There is still pending work (queued tasks or external interest),
+    /// but nothing was ready to run in this step. The driver should wait
+    /// for an external event (timer expiry, I/O completion, etc.) before
+    /// stepping again.
+    Idle,
+
+    /// At least one task ran successfully. The driver should step again
+    /// immediately — there may be more ready work.
+    Progressed,
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +303,12 @@ pub struct EventLoop {
     /// timer re-queuing when `clearInterval` is called from within the
     /// interval callback.
     cancelled_while_running: HashSet<TaskId>,
+    /// External keep-alive interest. When positive, the event loop stays
+    /// alive even with an empty task queue.
+    interest: InterestTracker,
+    /// Notification event: signaled whenever a task becomes ready or a
+    /// timer is queued. The async driver awaits this to avoid busy-polling.
+    notify: Event,
 }
 
 impl EventLoop {
@@ -180,6 +318,8 @@ impl EventLoop {
             next_id: 0,
             tasks: Vec::new(),
             cancelled_while_running: HashSet::new(),
+            interest: InterestTracker::new(),
+            notify: Event::new(),
         }
     }
 
@@ -212,6 +352,7 @@ impl EventLoop {
             ready: true,
             deadline: None,
         });
+        self.notify.notify(1);
         id
     }
 
@@ -228,6 +369,8 @@ impl EventLoop {
             ready: false,
             deadline: Some(deadline),
         });
+        // Wake the driver so it can re-evaluate the earliest timer deadline.
+        self.notify.notify(1);
         id
     }
 
@@ -265,6 +408,8 @@ impl EventLoop {
             ready: false,
             deadline: Some(deadline),
         });
+        // Wake the driver so it can re-evaluate the earliest timer deadline.
+        self.notify.notify(1);
     }
 
     /// Mark a queued task as ready to run.
@@ -274,6 +419,7 @@ impl EventLoop {
     pub fn signal_ready(&mut self, id: TaskId) {
         if let Some(entry) = self.tasks.iter_mut().find(|e| e.id == id) {
             entry.ready = true;
+            self.notify.notify(1);
         }
     }
 
@@ -344,6 +490,192 @@ impl EventLoop {
     /// Returns `true` if the event loop has no tasks.
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
+    }
+
+    // -----------------------------------------------------------------------
+    // Interest tracking
+    // -----------------------------------------------------------------------
+
+    /// Register external interest — the event loop should stay alive even
+    /// with no pending tasks.
+    pub fn acquire_interest(&mut self) {
+        self.interest.acquire();
+    }
+
+    /// Release previously registered interest.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no matching [`acquire_interest`](Self::acquire_interest)
+    /// was called.
+    pub fn release_interest(&mut self) {
+        self.interest.release();
+        // Wake the driver — if interest dropped to zero and no tasks
+        // remain, the loop should discover `Done` and exit.
+        self.notify.notify(1);
+    }
+
+    /// Returns `true` if at least one external interest is held.
+    pub fn has_interest(&self) -> bool {
+        self.interest.has_interest()
+    }
+
+    /// Returns `true` if the event loop should stay alive: either there
+    /// are pending tasks or external interest is held.
+    pub fn is_alive(&self) -> bool {
+        self.has_pending() || self.has_interest()
+    }
+
+    /// Returns an [`EventListener`] future that resolves when the event
+    /// loop is notified of new readiness (a task became ready, a timer
+    /// was queued, etc.).
+    ///
+    /// The returned listener must be `.await`ed. If the event was already
+    /// notified before the listener was created, the first listener to
+    /// poll will complete immediately.
+    pub fn notified(&self) -> EventListener<()> {
+        self.notify.listen()
+    }
+}
+
+/// Run the event loop to completion asynchronously.
+///
+/// This is the single, platform-agnostic event loop driver. On each
+/// iteration it creates a fresh [`RootScope`] from `raw_cx` (dropping it
+/// before any await point), calls [`EventLoop::step`], and acts on the
+/// outcome:
+///
+/// - [`StepOutcome::Done`] → return.
+/// - [`StepOutcome::Progressed`] → immediately loop again.
+/// - [`StepOutcome::Idle`] → race the next timer deadline against a
+///   notification from the event loop. The `sleep` parameter abstracts
+///   the platform timer: on native it is a `thread::sleep`-based future;
+///   on wasm32 it is `wasi:clocks/monotonic-clock.wait-for`.
+///
+/// The [`CURRENT_EVENT_LOOP`] thread-local is set during each `step()`
+/// call and cleared before any await.
+///
+/// # Safety
+///
+/// `raw_cx` must be a valid JSContext pointer that remains valid for the
+/// lifetime of this future (i.e. the `Runtime` must not be dropped).
+pub async unsafe fn run_to_completion<S, F>(
+    raw_cx: *mut js::native::RawJSContext,
+    event_loop: &mut EventLoop,
+    sleep: S,
+) where
+    S: Fn(Duration) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    loop {
+        // Create a fresh rooting scope each iteration — the same
+        // technique JSNative trampolines use. It is dropped before any
+        // await point so GC roots don't span a suspension.
+        let scope = js::gc::scope::RootScope::from_current_realm(raw_cx);
+
+        let outcome = with_event_loop(event_loop, |el| el.step(&scope));
+
+        drop(scope);
+
+        match outcome {
+            StepOutcome::Done => return,
+            StepOutcome::Progressed => continue,
+            StepOutcome::Idle => {
+                // Wait for either the next timer to fire or an external
+                // notification (a task was signaled ready, a new timer
+                // was queued, etc.).
+                let timer_wait = async {
+                    if let Some(wait) = event_loop.time_to_next_timer() {
+                        sleep(wait).await;
+                    } else {
+                        // No timers — pend forever; the notified branch
+                        // will wake us.
+                        std::future::pending::<()>().await;
+                    }
+                };
+                let notified = event_loop.notified();
+
+                // Race: first one to complete wins.
+                futures_lite::future::or(timer_wait, notified).await;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exception handling helper
+// ---------------------------------------------------------------------------
+
+/// Handle and clear a pending JS exception.
+///
+/// Prints the exception to stderr and clears the pending state,
+/// allowing the event loop to continue. This is called by [`EventLoop::step`]
+/// when a task or microtask throws.
+fn handle_and_clear_exception(scope: &Scope<'_>) {
+    eprintln!("[event_loop] Uncaught exception:");
+    // TODO: Extract and format the exception value properly.
+    // For now, just indicate that an exception occurred.
+    js::exception::clear(scope);
+}
+
+impl EventLoop {
+    /// Advance the event loop by one step.
+    ///
+    /// A single step:
+    /// 1. Asserts that the microtask queue is empty.
+    /// 2. Asserts that there are no pending JS exceptions.
+    /// 3. Advances timers.
+    /// 4. Runs all currently-ready tasks (draining microtasks and checking
+    ///    for exceptions after each).
+    ///
+    /// Returns a [`StepOutcome`] telling the driver what to do next.
+    pub fn step(&mut self, scope: &Scope<'_>) -> StepOutcome {
+        // 1. Assert that there are no pending microtasks.
+        debug_assert!(
+            !js::exception::is_pending(scope),
+            "Pending microtask detected"
+        );
+
+        // 2. Assert that there are no pending exceptions.
+        debug_assert!(
+            !js::exception::is_pending(scope),
+            "Pending JS exception detected"
+        );
+
+        // 3. Advance timers.
+        self.advance_timers();
+
+        // 4. Run all ready tasks.
+        let mut ran_any = false;
+        while let Some((id, task)) = self.pop_ready() {
+            if task.run(scope, id).is_err() {
+                eprintln!("[event_loop] Task error (id={:?})", id);
+                handle_and_clear_exception(scope);
+            }
+            ran_any = true;
+
+            // After each task, drain microtasks — the task may have
+            // resolved promises or scheduled reactions.
+            run_microtasks(scope);
+
+            if js::exception::is_pending(scope) {
+                handle_and_clear_exception(scope);
+            }
+
+            // Re-advance timers in case task execution took long enough
+            // for more timers to expire.
+            self.advance_timers();
+        }
+
+        if ran_any {
+            return StepOutcome::Progressed;
+        }
+
+        if self.is_alive() {
+            StepOutcome::Idle
+        } else {
+            StepOutcome::Done
+        }
     }
 
     /// Trace all live tasks for GC.

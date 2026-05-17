@@ -19,7 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  WASI_SDK_VERSION: "25"
+  WASI_SDK_VERSION: "33"
   RUSTC_WRAPPER: sccache
   CCACHE: sccache
   # Bump to purge the sccache GHA cache.

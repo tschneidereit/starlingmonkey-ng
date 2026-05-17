@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod event_loop;
+pub mod invocation;
 pub mod module;
 pub mod runtime;
 
@@ -24,12 +25,24 @@ use crate::runtime::Runtime;
 /// 4. Optionally runs an initializer script
 /// 5. Executes the content script (from `--eval` or a file path)
 ///    in either ES module mode (default) or legacy script mode
-/// 6. Runs the event loop to completion (timers, promises, etc.)
+/// 6. Delegates to `drive_event_loop` to run the event loop.
 ///
-/// Exits the process with code 1 on any JS error.
-pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
+/// The `drive_event_loop` callback receives the `Runtime` and
+/// `InvocationState` and is responsible for driving the event loop to
+/// completion using whatever executor and timer mechanism the embedding
+/// provides. It must call `runtime.unregister_invocation()` when done.
+///
+/// On native targets, the callback typically creates an async runtime, e.g.
+/// Tokio, and calls `block_on(run_to_completion(..., tokio::time::sleep))`.
+/// On WASIp3, it spawns the event loop via `wit_bindgen::spawn`.
+pub fn run(
+    config: config::RuntimeConfig,
+    drive_event_loop: impl FnOnce(
+        std::rc::Rc<Runtime>,
+        invocation::InvocationState,
+    ) -> Result<(), String>,
+) -> Result<(), String> {
     let runtime = Runtime::init(&config);
-    let scope = runtime.default_global();
 
     // Determine source and filename.
     let (source, filename) = if let Some(ref eval) = config.eval_script {
@@ -45,40 +58,50 @@ pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
         (source, path.clone())
     };
 
-    // Borrow the event loop before evaluation so the CURRENT_EVENT_LOOP
-    // thread-local is set — this allows `setTimeout` etc. to queue tasks
-    // during the initial script evaluation.
-    let mut el = runtime.event_loop().borrow_mut();
+    // Create a per-invocation state with its own event loop and register
+    // it with the runtime so the GC can trace it.
+    let mut invocation = invocation::InvocationState::new();
 
-    let eval_result = unsafe {
-        event_loop::timer::with_current_event_loop(&mut el, || {
-            if config.module_mode() {
-                module::evaluate_module(&scope, &source, &filename)
-            } else {
-                js::compile::evaluate_with_filename(&scope, &source, &filename, 1)
-            }
-        })
-    };
+    // SAFETY: `invocation` lives on this stack frame (or is moved into
+    // the spawned wasm32 task which keeps it alive) and won't be freed
+    // until we unregister below (or the spawned task unregisters it).
+    unsafe { runtime.register_invocation(&invocation) };
 
-    if eval_result.is_err() {
-        let exn = ExnThrown::capture(&scope);
-        println!("exn: {exn}");
-        return Err(format!("Script evaluation failed with error {exn}"));
+    // Evaluate the script and drain initial microtasks inside a scope
+    // block. The scope borrows `runtime` (via Rc::deref), so it must
+    // be dropped before we can move `runtime` into the wasm32 spawn path.
+    {
+        let scope = runtime.default_global();
+
+        let eval_result = unsafe {
+            event_loop::with_event_loop(invocation.event_loop_mut(), |_| {
+                if config.module_mode() {
+                    module::evaluate_module(&scope, &source, &filename)
+                } else {
+                    js::compile::evaluate_with_filename(&scope, &source, &filename, 1)
+                }
+            })
+        };
+
+        if eval_result.is_err() {
+            runtime.unregister_invocation(&invocation);
+            let exn = ExnThrown::capture(&scope);
+            println!("exn: {exn}");
+            return Err(format!("Script evaluation failed with error {exn}"));
+        }
+
+        // Always drain microtasks first — promise reactions (e.g. from
+        // `Promise.resolve().then(...)`) must run even if no event-loop
+        // tasks are queued.
+        event_loop::run_microtasks(&scope);
     }
 
-    // Run the event loop to process any queued async work.
-    // Always drain microtasks first — promise reactions (e.g. from
-    // `Promise.resolve().then(...)`) must run even if no event-loop tasks
-    // are queued. After draining microtasks, run the full event loop if
-    // there are pending tasks.
-    event_loop::run_microtasks(&scope);
-
-    if el.has_pending() && event_loop::native::run_to_completion(&scope, &mut el).is_err() {
-        let exn = ExnThrown::capture(&scope);
-        return Err(format!("Script evaluation failed with error {exn:?}"));
+    if !invocation.event_loop().is_alive() {
+        runtime.unregister_invocation(&invocation);
+        return Ok(());
     }
 
-    Ok(())
+    drive_event_loop(runtime, invocation)
 }
 
 /// Extract and print the pending JS exception, if any.
@@ -126,11 +149,26 @@ mod tests {
         RuntimeConfig::from_args(args.iter().map(|s| s.to_string())).unwrap()
     }
 
+    /// Dummy event loop driver for tests whose scripts don't use timers
+    /// or async work. If the event loop is alive, something unexpected
+    /// happened.
+    fn noop_driver(
+        runtime: std::rc::Rc<runtime::Runtime>,
+        invocation: invocation::InvocationState,
+    ) -> Result<(), String> {
+        assert!(
+            !invocation.event_loop().is_alive(),
+            "Event loop should not be alive"
+        );
+        runtime.unregister_invocation(&invocation);
+        Ok(())
+    }
+
     #[test]
     fn run_eval_module_mode() {
         let config = config_from(&["starling", "-e", "globalThis._x = 1 + 2;"]);
         assert!(config.module_mode());
-        run(config)
+        run(config, noop_driver)
             .map_err(|e| println!("{e}"))
             .expect("Run failed");
     }
@@ -139,7 +177,7 @@ mod tests {
     fn run_eval_legacy_script() {
         let config = config_from(&["starling", "-e", "var x = 42;", "--legacy-script"]);
         assert!(!config.module_mode());
-        run(config)
+        run(config, noop_driver)
             .map_err(|e| println!("{e}"))
             .expect("Run failed");
     }
@@ -151,7 +189,7 @@ mod tests {
         std::fs::write(&script, "const x = 1 + 2;\n").unwrap();
 
         let config = config_from(&["starling", &script.to_string_lossy()]);
-        run(config)
+        run(config, noop_driver)
             .map_err(|e| println!("{e}"))
             .expect("Run failed");
     }
@@ -163,7 +201,7 @@ mod tests {
         std::fs::write(&script, "var x = 1 + 2;\n").unwrap();
 
         let config = config_from(&["starling", &script.to_string_lossy(), "--legacy-script"]);
-        run(config)
+        run(config, noop_driver)
             .map_err(|e| println!("{e}"))
             .expect("Run failed");
     }
@@ -180,7 +218,7 @@ mod tests {
         .unwrap();
 
         let config = config_from(&["starling", &entry.to_string_lossy()]);
-        run(config)
+        run(config, noop_driver)
             .map_err(|e| println!("{e}"))
             .expect("Run failed");
     }
@@ -199,7 +237,7 @@ mod tests {
             "-i",
             &init.to_string_lossy(),
         ]);
-        run(config)
+        run(config, noop_driver)
             .map_err(|e| println!("{e}"))
             .expect("Run failed");
     }

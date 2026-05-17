@@ -349,6 +349,10 @@ function runSingleTest(testPath) {
       args = [
         "run",
         "--dir=.::/",
+        "--dir=.",
+        "--dir=/tmp",
+        "-Sinherit-env=y,inherit-network=y,http=y,tcp=y,udp=y,p3=y",
+        "-Wcomponent-model-async=y",
         config.runtime,
         "--legacy-script",
         "--wpt-mode",

@@ -224,7 +224,9 @@ impl<'cx> Scope<'cx> {
 
     /// Root a property key (jsid), returning a [`Handle`] tied to this scope.
     pub fn root_id(&self, id: jsid) -> Handle<'cx, jsid> {
-        let bits = unsafe { std::mem::transmute_copy::<jsid, u64>(&id) };
+        // jsid is pointer-sized (8 bytes on 64-bit, 4 bytes on wasm32).
+        // Zero-extend to u64 for storage in the uniformly-sized slot array.
+        let bits = id.asBits_ as u64;
         let ptr = self.alloc_mut().alloc(SlotTag::Id, bits);
         unsafe { Handle::from_marked_location(ptr as *const jsid) }
     }

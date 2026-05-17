@@ -11,10 +11,17 @@ debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs"]
 
 [dependencies]
 core-runtime.workspace = true
+futures-lite.workspace = true
 js.workspace = true
 simple-http.workspace = true
 web-globals.workspace = true
 cpp-builtins.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip3.workspace = true
 
 [lints]
 workspace = true
