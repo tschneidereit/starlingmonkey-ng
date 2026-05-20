@@ -6,11 +6,9 @@ license.workspace = true
 authors.workspace = true
 edition.workspace = true
 
-[features]
-debugmozjs = ['js/debugmozjs']
-
 [dependencies]
 core-runtime.workspace = true
+encoding_rs.workspace = true
 js.workspace = true
 
 [dev-dependencies]

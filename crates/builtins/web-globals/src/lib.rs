@@ -14,14 +14,14 @@
 pub mod base64;
 // pub mod console;
 pub mod dom_exception;
+pub mod encoding;
 mod structured_clone;
 
 pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
-    unsafe {
-        // Note: the Rust console builtin isn't currently used: we use the C++ version for now.
-        // console::console_ns::add_to_global(scope, global);
-        dom_exception::DOMException::add_to_global(scope, global);
-        base64::base64_globals::add_to_global(scope, global);
-        structured_clone::structured_clone_globals::add_to_global(scope, global);
-    }
+    // Note: the Rust console builtin isn't currently used: we use the C++ version for now.
+    // console::console_ns::add_to_global(scope, global);
+    dom_exception::DOMException::add_to_global(scope, global);
+    encoding::add_to_global(scope, global);
+    base64::base64_globals::add_to_global(scope, global);
+    structured_clone::structured_clone_globals::add_to_global(scope, global);
 }
