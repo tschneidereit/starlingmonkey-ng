@@ -910,8 +910,15 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                 new_post_init_info = Some(i);
             }
             MethodKind::Method { js_name, nargs } => {
-                let (native_fn, builder_call) =
-                    gen_method_native(method, &inner_name, &type_name, js_name, *nargs, on_newtype);
+                let (native_fn, builder_call) = gen_method_native(
+                    method,
+                    &inner_name,
+                    &type_name,
+                    js_name,
+                    *nargs,
+                    config.method_flags,
+                    on_newtype,
+                );
                 native_fns.push(native_fn);
                 builder_calls.push(builder_call);
             }
@@ -1589,6 +1596,7 @@ fn parse_method_info(
 
     // Collect non-self parameters, detecting cx and raw params
     let mut params = Vec::new();
+    let mut nargs = 0;
     let mut has_cx = false;
     let mut is_raw = false;
     let mut has_rest_args = false;
@@ -1617,6 +1625,9 @@ fn parse_method_info(
             }
             if let Pat::Ident(pat_ident) = pat_ty.pat.as_ref() {
                 params.push((pat_ident.ident.clone(), (*pat_ty.ty).clone()));
+                if !is_option_type(&pat_ty.ty) {
+                    nargs += 1;
+                }
             }
         }
     }
@@ -1635,8 +1646,6 @@ fn parse_method_info(
             method_name.to_lower_camel_case()
         }
     });
-
-    let nargs = params.len();
 
     match &mut kind {
         MethodKind::Method {
