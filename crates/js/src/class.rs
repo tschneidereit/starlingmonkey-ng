@@ -377,9 +377,7 @@ pub trait StackType<'s>: Sized + Copy {
     /// or a subclass of `T`, `Err(CastError)` otherwise.
     fn cast<T: CastTarget<'s>>(self) -> Result<T::Output, CastError> {
         let ptr = self.js_handle().get();
-        let concrete_tag = unsafe { crate::object::get_object_class(ptr) } as usize;
-        let target_tag = T::target_class_tag();
-        if !is_derived_from_type(concrete_tag, target_tag) {
+        if !unsafe { T::is_instance(ptr) } {
             return Err(CastError {
                 from: Self::Inner::NAME,
                 to: T::TARGET_NAME,
@@ -1313,7 +1311,7 @@ pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
     index: u32,
 ) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
-        return Err(crate::error::report_error_ascii(
+        return Err(crate::error::throw_type_error(
             scope,
             c"Not enough arguments",
         ));
@@ -1321,7 +1319,7 @@ pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
     let val = crate::native::Handle::from_raw(args.get(index));
     T::from_jsval(scope, val, ()).map_err(|e| match e {
         ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::report_error_ascii(scope, &msg),
+        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
     })
 }
 
@@ -1338,7 +1336,7 @@ pub unsafe fn get_int_arg<'s, T: FromJSVal<'s, Config = ConversionBehavior>>(
     behavior: ConversionBehavior,
 ) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
-        return Err(crate::error::report_error_ascii(
+        return Err(crate::error::throw_type_error(
             scope,
             c"Not enough arguments",
         ));
@@ -1346,7 +1344,7 @@ pub unsafe fn get_int_arg<'s, T: FromJSVal<'s, Config = ConversionBehavior>>(
     let val = crate::native::Handle::from_raw(args.get(index));
     T::from_jsval(scope, val, behavior).map_err(|e| match e {
         ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::report_error_ascii(scope, &msg),
+        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
     })
 }
 
@@ -1369,7 +1367,7 @@ pub unsafe fn get_arg_with_config<'s, T: FromJSVal<'s>>(
     config: T::Config,
 ) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
-        return Err(crate::error::report_error_ascii(
+        return Err(crate::error::throw_type_error(
             scope,
             c"Not enough arguments",
         ));
@@ -1377,7 +1375,7 @@ pub unsafe fn get_arg_with_config<'s, T: FromJSVal<'s>>(
     let val = crate::native::Handle::from_raw(args.get(index));
     T::from_jsval(scope, val, config).map_err(|e| match e {
         ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::report_error_ascii(scope, &msg),
+        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
     })
 }
 
@@ -1398,7 +1396,7 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
     index: u32,
 ) -> Result<T, ExnThrown> {
     if index >= args.argc_ {
-        return Err(crate::error::report_error_ascii(
+        return Err(crate::error::throw_type_error(
             scope,
             c"Not enough arguments",
         ));

@@ -477,8 +477,9 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
 
             const TARGET_NAME: &'static str = <#inner_name as ::js::class::ClassDef>::NAME;
 
-            fn target_class_tag() -> usize {
-                <#inner_name as ::js::builtins::JSType>::js_class() as usize
+            #[inline]
+            unsafe fn is_instance(obj: *mut ::js::native::JSObject) -> bool {
+                unsafe { <#inner_name as ::js::builtins::JSType>::is_instance(obj) }
             }
 
             unsafe fn construct_unchecked(
@@ -3925,6 +3926,10 @@ pub fn allow_unrooted_interior_in_rc(_attr: TokenStream, item: TokenStream) -> T
 /// - `Vec<T>` → sequence branch (checks `Symbol.iterator`)
 /// - Other types → object/interface branch (uses `FromJSVal`)
 ///
+/// The enum may carry a single lifetime parameter when its variants hold
+/// scope-rooted types; that lifetime is bound to the scope's lifetime in the
+/// generated impls.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -3932,6 +3937,12 @@ pub fn allow_unrooted_interior_in_rc(_attr: TokenStream, item: TokenStream) -> T
 /// pub enum StringOrUnsignedLong {
 ///     String(String),
 ///     UnsignedLong(u32),
+/// }
+///
+/// #[webidl_union]
+/// pub enum BufferOrString<'a> {
+///     Buffer(ArrayBuffer<'a>),
+///     Str(String),
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -3971,6 +3982,30 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
     let enum_name = &input.ident;
     let vis = &input.vis;
     let attrs = &input.attrs;
+    let generics = &input.generics;
+    let where_clause = &generics.where_clause;
+
+    // Unions whose variants reference scope-rooted types declare a single
+    // lifetime parameter. Reject anything beyond one lifetime / type parameter
+    // so the generated impl shape stays predictable.
+    if generics.type_params().next().is_some() || generics.const_params().next().is_some() {
+        return syn::Error::new_spanned(
+            generics,
+            "#[webidl_union] does not support type or const generic parameters",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let mut lifetimes = generics.lifetimes();
+    let lifetime = lifetimes.next().map(|lt| lt.lifetime.clone());
+    if lifetimes.next().is_some() {
+        return syn::Error::new_spanned(
+            generics,
+            "#[webidl_union] accepts at most one lifetime parameter",
+        )
+        .to_compile_error()
+        .into();
+    }
 
     // Collect variant info: (variant_ident, inner_type, category).
     let mut variants_info = Vec::new();
@@ -4140,17 +4175,28 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
         })
         .collect();
 
+    // When the enum carries a lifetime parameter, reuse it as the scope
+    // lifetime so variants like `Stack<'a, T>` line up with the trait's `'s`.
+    let scope_lt = match &lifetime {
+        Some(lt) => quote! { #lt },
+        None => quote! { 's },
+    };
+    let enum_ty = match &lifetime {
+        Some(_) => quote! { #enum_name<#scope_lt> },
+        None => quote! { #enum_name },
+    };
+
     let output = quote! {
         #(#attrs)*
-        #vis enum #enum_name {
+        #vis enum #enum_name #generics #where_clause {
             #(#variant_defs,)*
         }
 
-        impl<'s> ::js::conversion::FromJSVal<'s> for #enum_name {
+        impl<#scope_lt> ::js::conversion::FromJSVal<#scope_lt> for #enum_ty {
             type Config = ();
             fn from_jsval(
-                scope: &'s ::js::prelude::Scope<'s>,
-                val: ::js::prelude::HandleValue<'s>,
+                scope: &#scope_lt ::js::prelude::Scope<#scope_lt>,
+                val: ::js::prelude::HandleValue<#scope_lt>,
                 _: (),
             ) -> Result<Self, ::js::conversion::ConversionError> {
                 #(#from_body)*
@@ -4161,11 +4207,11 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
             }
         }
 
-        impl<'s> ::js::conversion::ToJSVal<'s> for #enum_name {
+        impl<#scope_lt> ::js::conversion::ToJSVal<#scope_lt> for #enum_ty {
             fn to_jsval(
                 &self,
-                scope: &'s ::js::prelude::Scope<'s>,
-            ) -> Result<::js::prelude::HandleValue<'s>, ::js::conversion::ConversionError> {
+                scope: &#scope_lt ::js::prelude::Scope<#scope_lt>,
+            ) -> Result<::js::prelude::HandleValue<#scope_lt>, ::js::conversion::ConversionError> {
                 match self {
                     #(#to_arms)*
                 }

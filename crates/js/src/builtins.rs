@@ -37,6 +37,21 @@ pub trait JSType: 'static {
     /// [`Stack::from_object`](Stack::from_object) for type-checked
     /// conversions.
     fn js_class() -> *const crate::class_spec::JSClass;
+
+    /// Test whether `obj` is an instance of this type.
+    ///
+    /// The default compares `obj`'s `JSClass` against [`js_class`](Self::js_class)
+    /// (with subclass inheritance via [`is_derived_from_type`]). Override for
+    /// umbrella markers like `ArrayBufferView` that stand in for a union of
+    /// classes rather than a single one.
+    ///
+    /// # Safety
+    ///
+    /// `obj` must be a valid, non-null JS object pointer.
+    #[inline]
+    unsafe fn is_instance(obj: *mut JSObject) -> bool {
+        is_derived_from_type(unsafe { get_class_tag(obj) }, Self::js_class() as usize)
+    }
 }
 
 /// Target type for [`Stack::cast`] and [`StackType::cast`].
@@ -52,8 +67,12 @@ pub trait CastTarget<'s> {
     /// JS-visible name of the target type (for error messages).
     const TARGET_NAME: &'static str;
 
-    /// The `JSClass` pointer tag identifying this type.
-    fn target_class_tag() -> usize;
+    /// Test whether `obj` is an instance of the target type.
+    ///
+    /// # Safety
+    ///
+    /// `obj` must be a valid, non-null JS object pointer.
+    unsafe fn is_instance(obj: *mut JSObject) -> bool;
 
     /// Construct the output from a rooted handle without type checking.
     ///
@@ -70,8 +89,9 @@ impl<'s, T: JSType> CastTarget<'s> for Stack<'s, T> {
 
     const TARGET_NAME: &'static str = T::JS_NAME;
 
-    fn target_class_tag() -> usize {
-        class_tag::<T>()
+    #[inline]
+    unsafe fn is_instance(obj: *mut JSObject) -> bool {
+        unsafe { T::is_instance(obj) }
     }
 
     unsafe fn construct_unchecked(h: Handle<'s, *mut JSObject>) -> Stack<'s, T> {

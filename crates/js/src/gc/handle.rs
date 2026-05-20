@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::ptr::NonNull;
 
-use crate::builtins::{get_class_tag, is_derived_from_type, CastError, CastTarget, JSType};
+use crate::builtins::{CastError, CastTarget, JSType};
 use crate::conversion::{ConversionError, ToJSVal};
 use crate::gc::scope::Scope;
 use crate::heap::Trace;
@@ -44,9 +44,7 @@ impl<'s, T: JSType> Stack<'s, T> {
     /// Accepts both builtin marker types (`Date`, `Array`, …) and
     /// proc-macro newtypes (`Dog<'s>`, etc.) as the target.
     pub fn is<U: CastTarget<'s>>(&self) -> bool {
-        let concrete_tag = unsafe { get_class_tag(self.as_raw()) };
-        let target_tag = U::target_class_tag();
-        is_derived_from_type(concrete_tag, target_tag)
+        unsafe { U::is_instance(self.as_raw()) }
     }
 
     /// Type-checked downcast to any supported target type.

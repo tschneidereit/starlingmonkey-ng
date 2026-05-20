@@ -386,6 +386,171 @@ mod union_tests {
     }
 }
 
+mod union_lifetime_tests {
+    use core_runtime::jsclass;
+    use core_runtime::jsmethods;
+    use core_runtime::test_util::{eval_with_setup, throws_with_setup};
+    use core_runtime::webidl_union;
+    use js::ArrayBuffer;
+    use js::Object;
+
+    /// Union with a scope-rooted variant and a primitive variant.
+    #[webidl_union]
+    pub enum BufferOrString<'a> {
+        Buffer(ArrayBuffer<'a>),
+        Str(String),
+    }
+
+    /// Union with two scope-rooted variants of different specificity. The
+    /// `ArrayBuffer` branch is declared first so it wins for typed buffers;
+    /// other objects fall through to the generic `Object` branch.
+    #[webidl_union]
+    pub enum BufferOrObject<'a> {
+        Buffer(ArrayBuffer<'a>),
+        Obj(Object<'a>),
+    }
+
+    #[jsclass]
+    struct LifetimeUnionAcceptor {}
+
+    #[jsmethods]
+    impl LifetimeUnionAcceptor {
+        #[constructor]
+        fn construct() -> Self {
+            Self {}
+        }
+
+        #[method]
+        fn buffer_or_string(&self, val: BufferOrString<'_>) -> String {
+            match val {
+                BufferOrString::Buffer(b) => format!("buffer:{}", b.byte_length()),
+                BufferOrString::Str(s) => format!("string:{s}"),
+            }
+        }
+
+        #[method]
+        fn optional_buffer_or_string(&self, val: Option<BufferOrString<'_>>) -> String {
+            match val {
+                Some(BufferOrString::Buffer(b)) => format!("buffer:{}", b.byte_length()),
+                Some(BufferOrString::Str(s)) => format!("string:{s}"),
+                None => "none".to_string(),
+            }
+        }
+
+        #[method]
+        fn buffer_or_object(&self, val: BufferOrObject<'_>) -> String {
+            match val {
+                BufferOrObject::Buffer(b) => format!("buffer:{}", b.byte_length()),
+                BufferOrObject::Obj(_) => "object".to_string(),
+            }
+        }
+    }
+
+    fn eval(code: &str) -> String {
+        eval_with_setup(
+            || {
+                core_runtime::runtime::register_global_initializer(|scope, global| {
+                    LifetimeUnionAcceptor::add_to_global(scope, global);
+                });
+            },
+            code,
+        )
+    }
+
+    fn throws(code: &str) -> bool {
+        throws_with_setup(
+            || {
+                core_runtime::runtime::register_global_initializer(|scope, global| {
+                    LifetimeUnionAcceptor::add_to_global(scope, global);
+                });
+            },
+            code,
+        )
+    }
+
+    #[test]
+    fn buffer_variant_with_array_buffer() {
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().bufferOrString(new ArrayBuffer(8))"),
+            "buffer:8"
+        );
+    }
+
+    #[test]
+    fn string_variant_with_string() {
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().bufferOrString('hello')"),
+            "string:hello"
+        );
+    }
+
+    #[test]
+    fn string_variant_with_number() {
+        // No numeric branch is declared, so the string fallback applies.
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().bufferOrString(42)"),
+            "string:42"
+        );
+    }
+
+    #[test]
+    fn string_variant_when_object_does_not_match_buffer() {
+        // Plain objects don't satisfy the ArrayBuffer branch and fall through
+        // to the string fallback (after `Object.prototype.toString`).
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().bufferOrString({})"),
+            "string:[object Object]"
+        );
+    }
+
+    #[test]
+    fn optional_buffer_or_string_null() {
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().optionalBufferOrString(null)"),
+            "none"
+        );
+    }
+
+    #[test]
+    fn optional_buffer_or_string_undefined() {
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().optionalBufferOrString(undefined)"),
+            "none"
+        );
+    }
+
+    #[test]
+    fn optional_buffer_or_string_with_buffer() {
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().optionalBufferOrString(new ArrayBuffer(4))"),
+            "buffer:4"
+        );
+    }
+
+    #[test]
+    fn declared_order_picks_buffer_first() {
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().bufferOrObject(new ArrayBuffer(16))"),
+            "buffer:16"
+        );
+    }
+
+    #[test]
+    fn declared_order_falls_back_to_object() {
+        assert_eq!(
+            eval("new LifetimeUnionAcceptor().bufferOrObject({a: 1})"),
+            "object"
+        );
+    }
+
+    #[test]
+    fn buffer_or_object_throws_on_non_object() {
+        assert!(throws(
+            "new LifetimeUnionAcceptor().bufferOrObject('not an object')"
+        ));
+    }
+}
+
 // ============================================================================
 // AsyncSequence tests
 // ============================================================================
