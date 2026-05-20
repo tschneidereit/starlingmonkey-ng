@@ -20,7 +20,7 @@
 //   -vv                        Very verbose output
 //   --help                     Show help
 
-import { execFileSync, execFile } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import path from "path";
 
@@ -367,22 +367,39 @@ function runSingleTest(testPath) {
       ];
     }
 
-    const stdout = execFileSync(command, args, {
+    const result = spawnSync(command, args, {
       timeout: config.timeout,
       encoding: "utf-8",
       maxBuffer: 10 * 1024 * 1024,
     });
+
+    const stdout = result.stdout || "";
+    const stderr = result.stderr || "";
+    let output = stdout;
+    if (stderr) {
+      output += "\n--- stderr ---\n" + stderr;
+    }
+
+    if (result.error) {
+      return { error: result.error, output };
+    }
+    if (result.status !== 0 || result.signal) {
+      const reason = result.signal
+        ? `killed by signal ${result.signal}`
+        : `exited with status ${result.status}`;
+      return { error: new Error(reason), output };
+    }
 
     // Parse results from stdout — look for the WPT_RESULTS_JSON marker.
     const lines = stdout.split("\n");
     for (const line of lines) {
       if (line.startsWith("Log: WPT_RESULTS_JSON:")) {
         const json = line.slice("Log: WPT_RESULTS_JSON:".length);
-        return { results: JSON.parse(json), output: stdout };
+        return { results: JSON.parse(json), output };
       }
     }
 
-    return { error: new Error("No WPT_RESULTS_JSON found in output"), output: stdout };
+    return { error: new Error("No WPT_RESULTS_JSON found in output"), output };
   } catch (e) {
     return { error: e, output: e.stdout || "" };
   }
@@ -448,8 +465,14 @@ async function run() {
       if (hasExpectations) {
         console.log(`UNEXPECTED ERROR: ${testPath} (${duration}ms)`);
         console.log(`  MESSAGE: ${error.message}`);
-        if (config.logLevel >= LogLevel.Verbose && output) {
-          console.log(`  OUTPUT: ${output.slice(0, 500)}`);
+        if (output) {
+          // Show the tail rather than the head: WPT_RESULTS_JSON would be at the
+          // end on success, and crash diagnostics from stderr are appended last.
+          const limit = config.logLevel >= LogLevel.Verbose ? 120 : 30;
+          const lines = output.trim().split("\n");
+          const tail = lines.length > limit ? lines.slice(-limit).join("\n") : output;
+          const prefix = lines.length > limit ? `... (last ${limit} lines)\n` : "";
+          console.log(`  OUTPUT:\n${prefix}${tail}`);
         }
         if (config.tests.updateExpectations) {
           console.log(`  Removing expectations file ${expectPath}`);
