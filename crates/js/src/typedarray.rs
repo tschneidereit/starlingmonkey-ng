@@ -1,227 +1,614 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
-//! Typed array creation and access.
+//! Typed array, `ArrayBuffer`, and `ArrayBufferView` creation and access.
 //!
-//! This module re-exports and wraps the typed array API from [`crate::typedarray`],
-//! adding safe wrappers for creating typed arrays with the `Scope` constraint.
+//! Every JS buffer type — `ArrayBuffer`, `SharedArrayBuffer`, and each
+//! concrete typed-array view (`Uint8Array`, `Int32Array`, …) — has a marker
+//! struct in this module that implements [`JSType`]. The scope-rooted handle
+//! type is [`Stack<'s, Marker>`](crate::gc::handle::Stack), exposed at the
+//! crate root as the [`js::Uint8Array<'s>`](crate::Uint8Array) family of
+//! aliases.
 //!
-//! For the core typed array types (`TypedArray`, `TypedArrayElement`,
-//! `TypedArrayElementCreator`) and element type tags (`Uint8`, `Int32`,
-//! `Float64`, etc.), see the re-exports below.
+//! [`ArrayBufferView`] is the umbrella marker for the union of all view
+//! types. Use [`ArrayBufferView::from_object`] to test whether an object is
+//! any view (typed array or `DataView`) and obtain a typed handle exposing
+//! byte-level access.
 //!
-//! # Creating typed arrays
-//!
-//! Use [`new_typed_array`] to create a typed array of a given element type and
-//! length in the current realm.
+//! # Example
 //!
 //! ```ignore
-//! use crate::typedarray;
-//! use mozjs::typedarray::Uint8;
+//! use js::{Uint8Array, ArrayBuffer};
 //!
-//! let obj = typedarray::new_typed_array::<Uint8>(&mut realm, 1024)?;
+//! let bytes = Uint8Array::with_data(&scope, b"hello")?;
+//! let buf = ArrayBuffer::new(&scope, 1024)?;
 //! ```
+//!
+//! # Safety
+//!
+//! Methods that hand out raw slices into a buffer's backing store
+//! (`data`, `data_mut`) are `unsafe`: callers must ensure that no GC runs
+//! and the buffer is not detached or transferred while the slice is live.
+//! Use [`copy_bytes`](Stack::copy_bytes) when you want an owned copy.
+//!
+//! The underlying SpiderMonkey element-type tags
+//! (`mozjs::typedarray::{Uint8, Int32, …}`) and the generic
+//! `TypedArray<T, S>` wrapper are an internal implementation detail of this
+//! module and are not part of the public surface.
 
+use std::borrow::Cow;
 use std::ptr::NonNull;
 
-use crate::gc::scope::Scope;
-use mozjs::gc::Handle;
-use mozjs::jsapi::JSObject;
+use mozjs::gc::{HandleObject, HandleValue};
+use mozjs::jsapi::{JSClass, JSObject, JSProtoKey, JS};
 use mozjs::rust::wrappers2;
-use mozjs::typedarray::TypedArrayElementCreator;
-
-use super::error::ExnThrown;
-
-// Re-export the core typed array types so users can `use crate::typedarray::*`.
-pub use mozjs::typedarray::{
-    ClampedU8, Float32, Float64, Int16, Int32, Int8, TypedArray, TypedArrayElement as Element,
+use mozjs::typedarray::{
+    ClampedU8, Float32, Float64, Int16, Int32, Int8, TypedArrayElement, TypedArrayElementCreator,
     Uint16, Uint32, Uint8,
 };
 
-/// Create a new typed array of the given element type with the specified length.
-///
-/// # Example
-///
-/// ```ignore
-/// let arr = typedarray::new_typed_array::<Uint8>(scope, 256)?;
-/// ```
-pub fn new_typed_array<'s, T: TypedArrayElementCreator>(
-    scope: &'s Scope<'_>,
-    length: usize,
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    let obj = unsafe { T::create_new(scope.cx_mut().raw_cx(), length) };
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
-}
+use crate::builtins::JSType;
+use crate::conversion::{ConversionError, FromJSVal};
+use crate::gc::handle::Stack;
+use crate::gc::scope::Scope;
+use crate::native::RawJSContext;
+use crate::Object;
 
-/// Create a new typed array of the given element type pre-populated with data.
-pub fn new_typed_array_with_data<'s, T: TypedArrayElementCreator>(
-    scope: &'s Scope<'_>,
-    data: &[T::Element],
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    use std::ptr;
-    let obj = unsafe { T::create_new(scope.cx_mut().raw_cx(), data.len()) };
-    let nn = NonNull::new(obj).ok_or(ExnThrown)?;
-    // Copy data into the newly created typed array buffer.
-    unsafe {
-        let (buf, _len) = T::length_and_data(obj);
-        ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+use super::error::ExnThrown;
+
+// ---------------------------------------------------------------------------
+// ArrayBuffer
+// ---------------------------------------------------------------------------
+
+/// Marker type for JavaScript `ArrayBuffer` objects.
+///
+/// Scope-rooted handle type: [`js::ArrayBuffer<'s>`](crate::ArrayBuffer).
+pub struct ArrayBuffer;
+
+impl JSType for ArrayBuffer {
+    const JS_NAME: &'static str = "ArrayBuffer";
+
+    fn js_class() -> *const JSClass {
+        crate::class::proto_key_to_class(JSProtoKey::JSProto_ArrayBuffer)
     }
-    Ok(scope.root_object(nn))
 }
 
-/// Create a new `ArrayBuffer` with the given byte length.
-pub fn new_array_buffer<'s>(
-    scope: &'s Scope<'_>,
-    nbytes: usize,
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    let obj = unsafe { wrappers2::NewArrayBuffer(scope.cx_mut(), nbytes) };
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
-}
+impl<'s> Stack<'s, ArrayBuffer> {
+    /// Create a new `ArrayBuffer` with the given byte length.
+    pub fn new(scope: &'s Scope<'_>, byte_length: usize) -> Result<Self, ExnThrown> {
+        let obj = unsafe { wrappers2::NewArrayBuffer(scope.cx_mut(), byte_length) };
+        root_or_throw(scope, obj)
+    }
 
-/// Copy an `ArrayBuffer`.
-pub fn copy_array_buffer<'s>(
-    scope: &'s Scope<'_>,
-    buffer: mozjs::gc::HandleObject,
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    let obj = unsafe { wrappers2::CopyArrayBuffer(scope.cx_mut(), buffer) };
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
-}
+    /// Create a new `ArrayBuffer` with the given bytes copied into it.
+    pub fn with_data(scope: &'s Scope<'_>, data: &[u8]) -> Result<Self, ExnThrown> {
+        let obj = unsafe { wrappers2::NewArrayBuffer(scope.cx_mut(), data.len()) };
+        let nn = NonNull::new(obj).ok_or(ExnThrown)?;
+        if !data.is_empty() {
+            // SAFETY: nn was just created with `data.len()` bytes; we have a
+            // unique reference to it before exposing it to JS.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    buffer_data_ptr(nn.as_ptr()),
+                    data.len(),
+                );
+            }
+        }
+        Ok(unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
+    }
 
-/// Detach an `ArrayBuffer`, making it zero-length.
-pub fn detach_array_buffer(
-    scope: &Scope<'_>,
-    buffer: mozjs::gc::HandleObject,
-) -> Result<(), ExnThrown> {
-    let ok = unsafe { wrappers2::DetachArrayBuffer(scope.cx_mut(), buffer) };
-    ExnThrown::check(ok)
-}
+    /// Create a new `ArrayBuffer` whose contents are borrowed from the caller.
+    ///
+    /// The returned buffer references `data` without copying. The caller
+    /// must ensure `data` outlives the buffer and is not mutated through
+    /// any other reference while in use.
+    ///
+    /// # Safety
+    ///
+    /// `data` must remain valid for as long as JS can reach the buffer.
+    pub unsafe fn with_user_owned_contents(
+        scope: &'s Scope<'_>,
+        data: &[u8],
+    ) -> Result<Self, ExnThrown> {
+        let obj = wrappers2::NewArrayBufferWithUserOwnedContents(
+            scope.cx_mut(),
+            data.len(),
+            data.as_ptr() as *mut std::os::raw::c_void,
+        );
+        root_or_throw(scope, obj)
+    }
 
-/// Create a new `SharedArrayBuffer` with the given byte length.
-pub fn new_shared_array_buffer<'s>(
-    scope: &'s Scope<'_>,
-    nbytes: usize,
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    let obj = unsafe { wrappers2::NewSharedArrayBuffer(scope.cx_mut(), nbytes) };
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
-}
+    /// Copy an existing `ArrayBuffer`, returning a new independent buffer.
+    pub fn copy_from(scope: &'s Scope<'_>, src: HandleObject) -> Result<Self, ExnThrown> {
+        let obj = unsafe { wrappers2::CopyArrayBuffer(scope.cx_mut(), src) };
+        root_or_throw(scope, obj)
+    }
 
-/// Create a new `ArrayBuffer` whose contents are borrowed from the caller.
-///
-/// The returned `ArrayBuffer` references the provided `data` without copying.
-/// The caller **must** ensure `data` outlives the `ArrayBuffer` and that the
-/// buffer is not detached while `data` is in use.
-///
-/// This is useful for passing pre-existing byte slices (e.g. Wasm modules)
-/// to JS without copying.
-///
-/// # Safety
-///
-/// The caller must guarantee that `data` remains valid and is not mutated
-/// for the lifetime of the returned `ArrayBuffer`.
-pub unsafe fn new_array_buffer_with_user_owned_contents<'s>(
-    scope: &'s Scope<'_>,
-    data: &[u8],
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    let obj = wrappers2::NewArrayBufferWithUserOwnedContents(
-        scope.cx_mut(),
-        data.len(),
-        data.as_ptr() as *mut std::os::raw::c_void,
-    );
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
-}
+    /// Detach this `ArrayBuffer`, making it zero-length.
+    pub fn detach(self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
+        let ok = unsafe { wrappers2::DetachArrayBuffer(scope.cx_mut(), self.handle()) };
+        ExnThrown::check(ok)
+    }
 
-/// Create a new `ArrayBuffer` with the given data copied into it.
-pub fn new_array_buffer_with_data<'s>(
-    scope: &'s Scope<'_>,
-    data: &[u8],
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    let obj = unsafe { wrappers2::NewArrayBuffer(scope.cx_mut(), data.len()) };
-    let nn = NonNull::new(obj).ok_or(ExnThrown)?;
-    if !data.is_empty() {
-        unsafe {
-            let mut is_shared = false;
-            let nogc = mozjs::jsapi::JS::AutoRequireNoGC { _address: 0 };
-            let buf = mozjs::jsapi::JS::GetArrayBufferData(nn.as_ptr(), &mut is_shared, &nogc);
-            std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+    /// Get the byte length of this `ArrayBuffer`.
+    pub fn byte_length(self) -> usize {
+        unsafe { JS::GetArrayBufferByteLength(self.as_raw()) }
+    }
+
+    /// Whether this buffer has been detached.
+    pub fn is_detached(self) -> bool {
+        unsafe { JS::IsDetachedArrayBufferObject(self.as_raw()) }
+    }
+
+    /// Borrow the buffer's backing bytes.
+    ///
+    /// # Safety
+    ///
+    /// No GC may run and the buffer must not be detached or transferred
+    /// while the returned slice is live.
+    pub unsafe fn bytes(self) -> &'s [u8] {
+        let (ptr, len) = array_buffer_length_and_data(self.as_raw());
+        if ptr.is_null() || len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(ptr, len)
         }
     }
-    Ok(scope.root_object(nn))
-}
 
-/// Copy the bytes held by any `BufferSource` (ArrayBuffer or ArrayBufferView)
-/// into a new `Vec<u8>`.
-///
-/// Returns `None` if `obj` is neither an ArrayBuffer nor an ArrayBufferView.
-///
-/// # Safety
-///
-/// `obj` must be a valid, non-null JS object pointer. No GC may occur during
-/// the lifetime of this call (the caller must ensure no JS operations happen
-/// concurrently).
-pub unsafe fn copy_buffer_source_bytes(obj: *mut JSObject) -> Option<Vec<u8>> {
-    if mozjs::jsapi::JS::IsArrayBufferObject(obj) {
-        let mut length = 0usize;
-        let mut is_shared = false;
-        let mut data: *mut u8 = std::ptr::null_mut();
-        mozjs::jsapi::JS::GetArrayBufferLengthAndData(obj, &mut length, &mut is_shared, &mut data);
-        if data.is_null() || length == 0 {
-            return Some(Vec::new());
+    /// Mutably borrow the buffer's backing bytes.
+    ///
+    /// # Safety
+    ///
+    /// No GC may run and the buffer must not be detached or transferred
+    /// while the returned slice is live. Concurrent access via another
+    /// reference is undefined behaviour.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn bytes_mut(self) -> &'s mut [u8] {
+        let (ptr, len) = array_buffer_length_and_data(self.as_raw());
+        if ptr.is_null() || len == 0 {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(ptr, len)
         }
-        return Some(std::slice::from_raw_parts(data, length).to_vec());
     }
 
-    if mozjs::jsapi::JS_IsArrayBufferViewObject(obj) {
-        let length = mozjs::jsapi::JS_GetArrayBufferViewByteLength(obj);
+    /// Copy the buffer's contents into an owned `Vec`.
+    pub fn copy_bytes(self) -> Vec<u8> {
+        unsafe { self.bytes() }.to_vec()
+    }
+}
+
+impl<'s> std::ops::Deref for Stack<'s, ArrayBuffer> {
+    type Target = Object<'s>;
+
+    fn deref(&self) -> &Object<'s> {
+        // SAFETY: Stack<ArrayBuffer> and Stack<Object> are both
+        // repr(transparent) over Handle<'s, *mut JSObject>.
+        unsafe { &*(self as *const Stack<'s, ArrayBuffer> as *const Object<'s>) }
+    }
+}
+
+impl<'s> FromJSVal<'s> for Stack<'s, ArrayBuffer> {
+    type Config = ();
+
+    fn from_jsval(
+        scope: &'s Scope<'s>,
+        val: HandleValue<'s>,
+        _option: Self::Config,
+    ) -> Result<Self, ConversionError> {
+        Object::from_value(scope, *val)?
+            .cast::<Self>()
+            .map_err(|_| ConversionError::Failure(Cow::Borrowed(c"Value isn't an ArrayBuffer")))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SharedArrayBuffer
+// ---------------------------------------------------------------------------
+
+/// Marker type for JavaScript `SharedArrayBuffer` objects.
+pub struct SharedArrayBuffer;
+
+impl JSType for SharedArrayBuffer {
+    const JS_NAME: &'static str = "SharedArrayBuffer";
+
+    fn js_class() -> *const JSClass {
+        crate::class::proto_key_to_class(JSProtoKey::JSProto_SharedArrayBuffer)
+    }
+}
+
+impl<'s> Stack<'s, SharedArrayBuffer> {
+    /// Create a new `SharedArrayBuffer` with the given byte length.
+    pub fn new(scope: &'s Scope<'_>, byte_length: usize) -> Result<Self, ExnThrown> {
+        let obj = unsafe { wrappers2::NewSharedArrayBuffer(scope.cx_mut(), byte_length) };
+        root_or_throw(scope, obj)
+    }
+}
+
+impl<'s> std::ops::Deref for Stack<'s, SharedArrayBuffer> {
+    type Target = Object<'s>;
+
+    fn deref(&self) -> &Object<'s> {
+        unsafe { &*(self as *const Stack<'s, SharedArrayBuffer> as *const Object<'s>) }
+    }
+}
+
+impl<'s> FromJSVal<'s> for Stack<'s, SharedArrayBuffer> {
+    type Config = ();
+
+    fn from_jsval(
+        scope: &'s Scope<'s>,
+        val: HandleValue<'s>,
+        _option: Self::Config,
+    ) -> Result<Self, ConversionError> {
+        Object::from_value(scope, *val)?
+            .cast::<Self>()
+            .map_err(|_| {
+                ConversionError::Failure(Cow::Borrowed(c"Value isn't a SharedArrayBuffer"))
+            })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ArrayBufferView — umbrella for typed arrays and DataView
+// ---------------------------------------------------------------------------
+
+/// Marker type for any JavaScript `ArrayBufferView` (typed array or
+/// `DataView`).
+///
+/// This is a Web IDL union, not a single JS class, so the [`JSType`] impl
+/// overrides [`is_instance`](JSType::is_instance) to delegate to
+/// `JS_IsArrayBufferViewObject`. [`js_class`](JSType::js_class) returns the
+/// abstract `%TypedArray%` prototype's class as a stable identity for
+/// purposes that need a class pointer.
+pub struct ArrayBufferView;
+
+impl JSType for ArrayBufferView {
+    const JS_NAME: &'static str = "ArrayBufferView";
+
+    fn js_class() -> *const JSClass {
+        crate::class::proto_key_to_class(JSProtoKey::JSProto_TypedArray)
+    }
+
+    #[inline]
+    unsafe fn is_instance(obj: *mut JSObject) -> bool {
+        unsafe { mozjs::jsapi::JS_IsArrayBufferViewObject(obj) }
+    }
+}
+
+impl<'s> Stack<'s, ArrayBufferView> {
+    /// Wrap `obj` as an `ArrayBufferView` handle if it is a typed array or
+    /// `DataView`, otherwise return `None`.
+    pub fn from_object(obj: Object<'s>) -> Option<Self> {
+        obj.cast::<Self>().ok()
+    }
+
+    /// Get the byte length of this view.
+    pub fn byte_length(self) -> usize {
+        unsafe { mozjs::jsapi::JS_GetArrayBufferViewByteLength(self.as_raw()) }
+    }
+
+    /// Get the byte offset of this view into its underlying buffer.
+    pub fn byte_offset(self) -> usize {
+        unsafe { mozjs::jsapi::JS_GetArrayBufferViewByteOffset(self.as_raw()) }
+    }
+
+    /// Borrow the view's bytes.
+    ///
+    /// # Safety
+    ///
+    /// No GC may run and the buffer must not be detached while the
+    /// returned slice is live.
+    pub unsafe fn bytes(self) -> &'s [u8] {
+        let length = self.byte_length();
         if length == 0 {
-            return Some(Vec::new());
+            return &[];
         }
         let mut is_shared = false;
-        let nogc = mozjs::jsapi::JS::AutoRequireNoGC { _address: 0 };
-        let data = mozjs::jsapi::JS_GetArrayBufferViewData(obj, &mut is_shared, &nogc);
+        let nogc = JS::AutoRequireNoGC { _address: 0 };
+        let data = mozjs::jsapi::JS_GetArrayBufferViewData(self.as_raw(), &mut is_shared, &nogc);
         if data.is_null() {
-            return Some(Vec::new());
+            &[]
+        } else {
+            std::slice::from_raw_parts(data as *const u8, length)
         }
-        return Some(std::slice::from_raw_parts(data as *const u8, length).to_vec());
     }
 
+    /// Mutably borrow the view's bytes.
+    ///
+    /// # Safety
+    ///
+    /// No GC may run and the buffer must not be detached while the
+    /// returned slice is live. Concurrent access via another reference is
+    /// undefined behaviour.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn bytes_mut(self) -> &'s mut [u8] {
+        let length = self.byte_length();
+        if length == 0 {
+            return &mut [];
+        }
+        let mut is_shared = false;
+        let nogc = JS::AutoRequireNoGC { _address: 0 };
+        let data = mozjs::jsapi::JS_GetArrayBufferViewData(self.as_raw(), &mut is_shared, &nogc);
+        if data.is_null() {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(data as *mut u8, length)
+        }
+    }
+
+    /// Copy the view's bytes into an owned `Vec`.
+    pub fn copy_bytes(self) -> Vec<u8> {
+        unsafe { self.bytes() }.to_vec()
+    }
+}
+
+impl<'s> std::ops::Deref for Stack<'s, ArrayBufferView> {
+    type Target = Object<'s>;
+
+    fn deref(&self) -> &Object<'s> {
+        unsafe { &*(self as *const Stack<'s, ArrayBufferView> as *const Object<'s>) }
+    }
+}
+
+impl<'s> FromJSVal<'s> for Stack<'s, ArrayBufferView> {
+    type Config = ();
+
+    fn from_jsval(
+        scope: &'s Scope<'s>,
+        val: HandleValue<'s>,
+        _option: Self::Config,
+    ) -> Result<Self, ConversionError> {
+        Object::from_value(scope, *val)?
+            .cast::<Self>()
+            .map_err(|_| {
+                ConversionError::Failure(Cow::Borrowed(c"Value isn't a typed array or DataView"))
+            })
+    }
+}
+
+/// Copy the bytes held by any `BufferSource` (an `ArrayBuffer`,
+/// `SharedArrayBuffer`, or `ArrayBufferView`) into an owned `Vec`.
+///
+/// Returns `None` if `obj` is none of the above.
+pub fn copy_buffer_source_bytes(obj: Object<'_>) -> Option<Vec<u8>> {
+    let raw = obj.as_raw();
+    // SAFETY: `obj` is a rooted handle to a live JS object; the
+    // GetArrayBuffer* / JS_GetArrayBufferView* family are simple field
+    // reads, so no GC is triggered between the type check and the copy.
+    unsafe {
+        if JS::IsArrayBufferObject(raw) {
+            let (ptr, len) = array_buffer_length_and_data(raw);
+            if ptr.is_null() || len == 0 {
+                return Some(Vec::new());
+            }
+            return Some(std::slice::from_raw_parts(ptr, len).to_vec());
+        }
+        if mozjs::jsapi::JS_IsArrayBufferViewObject(raw) {
+            let view: Stack<'_, ArrayBufferView> = Stack::from_handle_unchecked(obj.handle());
+            return Some(view.copy_bytes());
+        }
+    }
     None
 }
 
-/// Get a mutable slice into a typed array's data buffer.
+// ---------------------------------------------------------------------------
+// Typed array specializations
+// ---------------------------------------------------------------------------
+
+/// Trait implemented by every concrete typed-array marker (`Uint8Array`,
+/// `Int32Array`, …). It associates the marker with its element type and the
+/// SpiderMonkey routines for creating and inspecting arrays of that type.
 ///
-/// Returns `Some(&mut [u8])` if `obj` is a `Uint8Array` (or any typed array
-/// view whose element size is 1 byte), or `None` if it is not a typed array
-/// view.
+/// This trait is `pub` so callers can write generic code, but the only
+/// implementors are the markers defined in this module.
+pub trait TypedArrayKind: JSType {
+    /// The Rust primitive type of one element.
+    type Element: Copy;
+
+    /// Create a new typed array of this kind with `length` elements.
+    ///
+    /// # Safety
+    ///
+    /// `cx` must be a valid JSContext with an entered realm.
+    unsafe fn create_new(cx: *mut RawJSContext, length: usize) -> *mut JSObject;
+
+    /// Get the data pointer and element count of an existing typed array.
+    ///
+    /// # Safety
+    ///
+    /// `obj` must be a non-null typed array of this kind.
+    unsafe fn length_and_data(obj: *mut JSObject) -> (*mut Self::Element, usize);
+}
+
+impl<'s, T: TypedArrayKind> Stack<'s, T> {
+    /// Create a new typed array with `length` elements (zero-initialized).
+    pub fn new(scope: &'s Scope<'_>, length: usize) -> Result<Self, ExnThrown> {
+        let obj = unsafe { T::create_new(scope.cx_mut().raw_cx(), length) };
+        root_or_throw(scope, obj)
+    }
+
+    /// Create a new typed array pre-populated with `data`.
+    pub fn with_data(scope: &'s Scope<'_>, data: &[T::Element]) -> Result<Self, ExnThrown> {
+        let obj = unsafe { T::create_new(scope.cx_mut().raw_cx(), data.len()) };
+        let nn = NonNull::new(obj).ok_or(ExnThrown)?;
+        if !data.is_empty() {
+            // SAFETY: just-created array of `data.len()` elements; we have
+            // unique access before exposing it to JS.
+            unsafe {
+                let (buf, _) = T::length_and_data(obj);
+                std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+            }
+        }
+        Ok(unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
+    }
+
+    /// Number of elements in this typed array.
+    pub fn len(self) -> usize {
+        // SAFETY: self is a rooted handle to a typed array of kind T.
+        unsafe { T::length_and_data(self.as_raw()) }.1
+    }
+
+    /// Whether this typed array has zero elements.
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// Byte length of the underlying buffer view.
+    pub fn byte_length(self) -> usize {
+        // SAFETY: self is a rooted handle to an ArrayBufferView.
+        unsafe { mozjs::jsapi::JS_GetArrayBufferViewByteLength(self.as_raw()) }
+    }
+
+    /// Borrow the typed array's elements.
+    ///
+    /// # Safety
+    ///
+    /// No GC may run and the underlying buffer must not be detached while
+    /// the returned slice is live.
+    pub unsafe fn as_slice(self) -> &'s [T::Element] {
+        let (ptr, len) = T::length_and_data(self.as_raw());
+        if ptr.is_null() || len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(ptr, len)
+        }
+    }
+
+    /// Mutably borrow the typed array's elements.
+    ///
+    /// # Safety
+    ///
+    /// No GC may run and the underlying buffer must not be detached while
+    /// the returned slice is live. Concurrent access via another reference
+    /// is undefined behaviour.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn as_mut_slice(self) -> &'s mut [T::Element] {
+        let (ptr, len) = T::length_and_data(self.as_raw());
+        if ptr.is_null() || len == 0 {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(ptr, len)
+        }
+    }
+
+    /// View this typed array through the abstract `ArrayBufferView` handle.
+    ///
+    /// Every typed array is an `ArrayBufferView`, so this is infallible.
+    pub fn as_array_buffer_view(self) -> Stack<'s, ArrayBufferView> {
+        unsafe { Stack::<ArrayBufferView>::from_handle_unchecked(self.handle()) }
+    }
+}
+
+macro_rules! typed_array_marker {
+    ($Marker:ident, $name:literal, $proto:ident, $tag:ty) => {
+        #[doc = concat!("Marker type for JavaScript `", $name, "` objects.")]
+        pub struct $Marker;
+
+        impl JSType for $Marker {
+            const JS_NAME: &'static str = $name;
+
+            fn js_class() -> *const JSClass {
+                crate::class::proto_key_to_class(JSProtoKey::$proto)
+            }
+        }
+
+        impl TypedArrayKind for $Marker {
+            type Element = <$tag as TypedArrayElement>::Element;
+
+            unsafe fn create_new(cx: *mut RawJSContext, length: usize) -> *mut JSObject {
+                <$tag as TypedArrayElementCreator>::create_new(cx, length)
+            }
+
+            unsafe fn length_and_data(obj: *mut JSObject) -> (*mut Self::Element, usize) {
+                <$tag as TypedArrayElement>::length_and_data(obj)
+            }
+        }
+
+        impl<'s> std::ops::Deref for Stack<'s, $Marker> {
+            type Target = Object<'s>;
+
+            fn deref(&self) -> &Object<'s> {
+                // SAFETY: both wrappers are repr(transparent) over the same handle.
+                unsafe { &*(self as *const Stack<'s, $Marker> as *const Object<'s>) }
+            }
+        }
+
+        impl<'s> FromJSVal<'s> for Stack<'s, $Marker> {
+            type Config = ();
+
+            fn from_jsval(
+                scope: &'s Scope<'s>,
+                val: HandleValue<'s>,
+                _option: Self::Config,
+            ) -> Result<Self, ConversionError> {
+                Object::from_value(scope, *val)?
+                    .cast::<Self>()
+                    .map_err(|_| {
+                        const MSG: &std::ffi::CStr = unsafe {
+                            std::ffi::CStr::from_bytes_with_nul_unchecked(
+                                concat!("Value isn't a ", $name, "\0").as_bytes(),
+                            )
+                        };
+                        ConversionError::Failure(std::borrow::Cow::Borrowed(MSG))
+                    })
+            }
+        }
+    };
+}
+
+typed_array_marker!(Int8Array, "Int8Array", JSProto_Int8Array, Int8);
+typed_array_marker!(Uint8Array, "Uint8Array", JSProto_Uint8Array, Uint8);
+typed_array_marker!(
+    Uint8ClampedArray,
+    "Uint8ClampedArray",
+    JSProto_Uint8ClampedArray,
+    ClampedU8
+);
+typed_array_marker!(Int16Array, "Int16Array", JSProto_Int16Array, Int16);
+typed_array_marker!(Uint16Array, "Uint16Array", JSProto_Uint16Array, Uint16);
+typed_array_marker!(Int32Array, "Int32Array", JSProto_Int32Array, Int32);
+typed_array_marker!(Uint32Array, "Uint32Array", JSProto_Uint32Array, Uint32);
+typed_array_marker!(Float32Array, "Float32Array", JSProto_Float32Array, Float32);
+typed_array_marker!(Float64Array, "Float64Array", JSProto_Float64Array, Float64);
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+fn root_or_throw<'s, T: JSType>(
+    scope: &'s Scope<'_>,
+    obj: *mut JSObject,
+) -> Result<Stack<'s, T>, ExnThrown> {
+    NonNull::new(obj)
+        .map(|nn| unsafe { Stack::<T>::from_handle_unchecked(scope.root_object(nn)) })
+        .ok_or(ExnThrown)
+}
+
+/// Read the data pointer and length of an `ArrayBuffer`, asserting it is
+/// not shared.
 ///
 /// # Safety
 ///
-/// `obj` must be a valid, non-null JS object pointer. The returned slice
-/// borrows the typed array's inline data buffer — no GC or detach operations
-/// may occur while the slice is live.
-pub unsafe fn typed_array_data_mut(obj: *mut JSObject) -> Option<&'static mut [u8]> {
-    if !mozjs::jsapi::JS_IsArrayBufferViewObject(obj) {
-        return None;
-    }
-    let length = mozjs::jsapi::JS_GetArrayBufferViewByteLength(obj);
-    if length == 0 {
-        return Some(&mut []);
-    }
+/// `obj` must be a live `ArrayBuffer` object. The returned pointer is valid
+/// only until the next GC or detach.
+unsafe fn array_buffer_length_and_data(obj: *mut JSObject) -> (*mut u8, usize) {
+    let mut length = 0usize;
     let mut is_shared = false;
-    let nogc = mozjs::jsapi::JS::AutoRequireNoGC { _address: 0 };
-    let data = mozjs::jsapi::JS_GetArrayBufferViewData(obj, &mut is_shared, &nogc);
-    if data.is_null() {
-        return None;
-    }
-    Some(std::slice::from_raw_parts_mut(data as *mut u8, length))
+    let mut data: *mut u8 = std::ptr::null_mut();
+    JS::GetArrayBufferLengthAndData(obj, &mut length, &mut is_shared, &mut data);
+    debug_assert!(!is_shared, "expected an unshared ArrayBuffer");
+    (data, length)
 }
 
-// TODO: add the full typed array API, potentially as a generic builtin, taking the element type as a type parameter. This would include functions for getting/setting elements, getting the length, etc. Use JS_IsTypedArrayObject, JS_IsArrayBufferViewObject, and various other functions available on mozjs_sys::jsapi. DO NOT REMOVE THIS TODO WITHOUT ADDRESSING OR BY JUST CHANGING THIS COMMENT.
+/// Get the data pointer of a freshly created (and therefore non-detached,
+/// non-shared) `ArrayBuffer`.
+///
+/// # Safety
+///
+/// `obj` must be a live `ArrayBuffer` and not detached.
+unsafe fn buffer_data_ptr(obj: *mut JSObject) -> *mut u8 {
+    let mut is_shared = false;
+    let nogc = JS::AutoRequireNoGC { _address: 0 };
+    JS::GetArrayBufferData(obj, &mut is_shared, &nogc)
+}

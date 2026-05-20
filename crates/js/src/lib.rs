@@ -255,3 +255,39 @@ pub type Function<'s> = Stack<'s, function::Function>;
 /// they are a separate GC-managed type. `JSString<'s>` wraps a rooted
 /// `Handle<'s, *mut JSString>` and exposes all string operations as methods.
 pub type JSString<'s> = string::Str<'s>;
+
+/// A scope-rooted handle to a JavaScript `ArrayBuffer` object.
+pub type ArrayBuffer<'s> = Stack<'s, typedarray::ArrayBuffer>;
+
+/// A scope-rooted handle to a JavaScript `SharedArrayBuffer` object.
+pub type SharedArrayBuffer<'s> = Stack<'s, typedarray::SharedArrayBuffer>;
+
+/// A scope-rooted handle to any `ArrayBufferView` (typed array or `DataView`).
+pub type ArrayBufferView<'s> = Stack<'s, typedarray::ArrayBufferView>;
+
+/// A scope-rooted handle to a JavaScript `Int8Array` object.
+pub type Int8Array<'s> = Stack<'s, typedarray::Int8Array>;
+
+/// A scope-rooted handle to a JavaScript `Uint8Array` object.
+pub type Uint8Array<'s> = Stack<'s, typedarray::Uint8Array>;
+
+/// A scope-rooted handle to a JavaScript `Uint8ClampedArray` object.
+pub type Uint8ClampedArray<'s> = Stack<'s, typedarray::Uint8ClampedArray>;
+
+/// A scope-rooted handle to a JavaScript `Int16Array` object.
+pub type Int16Array<'s> = Stack<'s, typedarray::Int16Array>;
+
+/// A scope-rooted handle to a JavaScript `Uint16Array` object.
+pub type Uint16Array<'s> = Stack<'s, typedarray::Uint16Array>;
+
+/// A scope-rooted handle to a JavaScript `Int32Array` object.
+pub type Int32Array<'s> = Stack<'s, typedarray::Int32Array>;
+
+/// A scope-rooted handle to a JavaScript `Uint32Array` object.
+pub type Uint32Array<'s> = Stack<'s, typedarray::Uint32Array>;
+
+/// A scope-rooted handle to a JavaScript `Float32Array` object.
+pub type Float32Array<'s> = Stack<'s, typedarray::Float32Array>;
+
+/// A scope-rooted handle to a JavaScript `Float64Array` object.
+pub type Float64Array<'s> = Stack<'s, typedarray::Float64Array>;
