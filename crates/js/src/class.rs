@@ -1013,7 +1013,13 @@ impl<T: ClassDef> ClassBuilder<T> {
     /// `nargs` is the number of expected arguments.
     /// `func` is a `JSNative` callback — use the [`js_method!`] or
     /// [`js_method_simple!`] macros to generate one easily.
-    pub fn method(mut self, name: &'static std::ffi::CStr, nargs: u32, func: JSNative) -> Self {
+    pub fn method(
+        mut self,
+        name: &'static std::ffi::CStr,
+        nargs: u32,
+        func: JSNative,
+        flags: u16,
+    ) -> Self {
         self.methods.push(JSFunctionSpec {
             name: crate::class_spec::JSPropertySpec_Name {
                 string_: name.as_ptr(),
@@ -1023,7 +1029,7 @@ impl<T: ClassDef> ClassBuilder<T> {
                 info: ptr::null(),
             },
             nargs: nargs as u16,
-            flags: 0,
+            flags,
             selfHostedName: ptr::null(),
         });
         self

@@ -94,9 +94,7 @@ impl Parse for AttrOpts {
 /// ```
 #[proc_macro_attribute]
 pub fn jsclass(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let opts = parse_macro_input!(attr as AttrOpts);
-    let input = parse_macro_input!(item as ItemStruct);
-    process_class_def(opts, input, ClassConfig::JSCLASS)
+    process_class_def(attr, item, ClassConfig::JSCLASS)
 }
 
 /// Attribute macro for WebIDL interface definitions.
@@ -118,9 +116,7 @@ pub fn jsclass(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn webidl_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let opts = parse_macro_input!(attr as AttrOpts);
-    let input = parse_macro_input!(item as ItemStruct);
-    process_class_def(opts, input, ClassConfig::WEBIDL_INTERFACE)
+    process_class_def(attr, item, ClassConfig::WEBIDL_INTERFACE)
 }
 
 // ============================================================================
@@ -136,6 +132,8 @@ struct ClassConfig {
     /// so that `pub const` items are installed on both constructor and
     /// prototype (per WebIDL §3.7.3).
     constants_on_prototype: bool,
+    /// JS builtins' methods aren't enumerable, but WebIDL interfaces' are, so we have to use different flags for them.
+    method_flags: u16,
 }
 
 impl ClassConfig {
@@ -144,6 +142,7 @@ impl ClassConfig {
     const JSCLASS: Self = Self {
         auto_to_string_tag: false,
         constants_on_prototype: false,
+        method_flags: 0,
     };
 
     /// Configuration for `#[webidl_interface]`: auto Symbol.toStringTag,
@@ -151,6 +150,7 @@ impl ClassConfig {
     const WEBIDL_INTERFACE: Self = Self {
         auto_to_string_tag: true,
         constants_on_prototype: true,
+        method_flags: 1, // js::class_spec::JSPROP_ENUMERATE
     };
 }
 
@@ -158,7 +158,9 @@ impl ClassConfig {
 ///
 /// Processes the attributed struct and generates all ClassDef machinery
 /// and stack newtypes.
-fn process_class_def(opts: AttrOpts, mut input: ItemStruct, config: ClassConfig) -> TokenStream {
+fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) -> TokenStream {
+    let opts = parse_macro_input!(attr as AttrOpts);
+    let mut input = parse_macro_input!(item as ItemStruct);
     let struct_name = input.ident.clone();
     let inner_name = format_ident!("{}Impl", struct_name);
     let js_name = opts.name.unwrap_or_else(|| struct_name.to_string());
@@ -685,6 +687,19 @@ struct MethodInfo {
 /// ```
 #[proc_macro_attribute]
 pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
+    process_methods(attr, item, ClassConfig::JSCLASS)
+}
+
+/// Attribute macro for an `impl` block that generates JSNative wrappers for
+/// WebIDL interfaces' methods and properties.
+///
+/// Identical to `#[jsmethods]`, except that methods are enumerable.
+#[proc_macro_attribute]
+pub fn webidl_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
+    process_methods(attr, item, ClassConfig::WEBIDL_INTERFACE)
+}
+
+fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) -> TokenStream {
     let _opts = parse_macro_input!(attr as AttrOpts);
     let mut input = parse_macro_input!(item as ItemImpl);
 
@@ -902,7 +917,7 @@ pub fn jsmethods(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
             MethodKind::StaticMethod { js_name, nargs } => {
                 let (native_fn, builder_call) =
-                    gen_method_native(method, &inner_name, &type_name, js_name, *nargs, false);
+                    gen_method_native(method, &inner_name, &type_name, js_name, *nargs, 0, false);
                 native_fns.push(native_fn);
                 static_builder_calls.push(builder_call);
             }
@@ -2134,6 +2149,7 @@ fn gen_method_native(
     struct_name: &Ident,
     js_name: &str,
     nargs: usize,
+    flags: u16,
     on_newtype: bool,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
     let fn_name = &info.fn_item.sig.ident;
@@ -2352,13 +2368,14 @@ fn gen_method_native(
         }
     };
 
-    // Generate: .method(c"jsName", nargs, Some(native_fn))
+    // Generate: .method(c"jsName", nargs, Some(native_fn), flags)
     // We need a &'static CStr. Use an unsafe trick with a byte string literal.
     let builder_call = quote! {
         .method(
             #js_name_cstr_lit,
             #nargs_u32,
             Some(#native_name),
+            #flags,
         )
     };
 
