@@ -21,7 +21,14 @@
 //   --help                     Show help
 
 import { execFileSync, spawnSync } from "child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
+import {
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+} from "fs";
 import path from "path";
 
 // ---------------------------------------------------------------------------
@@ -40,8 +47,9 @@ const LogLevel = { Quiet: 0, Verbose: 1, VeryVerbose: 2 };
 const config = {
   // Default automatically adjusted to "target/wasm32-wasip2/debug/starling.wasm" for wasm target.
   runtime: "target/debug/starling",
-  target: "native",  // "native" or "wasm"
+  target: "native", // "native" or "wasm"
   wptRoot: relativePath("../../deps/wpt"),
+  tmpDir: relativePath("../../deps/.wpt-tmp"),
   tests: {
     list: relativePath("tests.json"),
     expectations: relativePath("expectations"),
@@ -60,13 +68,17 @@ const config = {
 const ArgParsers = {
   "--runtime": {
     help: `Path to starling binary (default: ${config.runtime})`,
-    cmd: val => { config.runtime = val; },
+    cmd: (val) => {
+      config.runtime = val;
+    },
   },
   "--target": {
     help: `Execution target: native or wasm (default: native)`,
-    cmd: val => {
+    cmd: (val) => {
       if (val !== "native" && val !== "wasm") {
-        console.error(`Unknown --target value: ${val}. Use "native" or "wasm".`);
+        console.error(
+          `Unknown --target value: ${val}. Use "native" or "wasm".`,
+        );
         process.exit(1);
       }
       config.target = val;
@@ -74,31 +86,45 @@ const ArgParsers = {
   },
   "--wpt-root": {
     help: `Path to WPT checkout (default: ${config.wptRoot})`,
-    cmd: val => { config.wptRoot = val; },
+    cmd: (val) => {
+      config.wptRoot = val;
+    },
   },
   "--expectations": {
     help: `Path to expectations directory`,
-    cmd: val => { config.tests.expectations = val; },
+    cmd: (val) => {
+      config.tests.expectations = val;
+    },
   },
   "--update-expectations": {
     help: "Update expectation files with current results",
-    cmd: () => { config.tests.updateExpectations = true; },
+    cmd: () => {
+      config.tests.updateExpectations = true;
+    },
   },
   "--skip-slow-tests": {
     help: "Skip tests marked as SLOW",
-    cmd: () => { config.skipSlowTests = true; },
+    cmd: () => {
+      config.skipSlowTests = true;
+    },
   },
   "--timeout": {
     help: `Timeout per test in ms (default: ${config.timeout})`,
-    cmd: val => { config.timeout = parseInt(val, 10); },
+    cmd: (val) => {
+      config.timeout = parseInt(val, 10);
+    },
   },
   "-v": {
     help: "Verbose output",
-    cmd: () => { config.logLevel = LogLevel.Verbose; },
+    cmd: () => {
+      config.logLevel = LogLevel.Verbose;
+    },
   },
   "-vv": {
     help: "Very verbose output",
-    cmd: () => { config.logLevel = LogLevel.VeryVerbose; },
+    cmd: () => {
+      config.logLevel = LogLevel.VeryVerbose;
+    },
   },
   "--help": {
     help: "Show this help message",
@@ -109,7 +135,9 @@ If a pattern is provided, only tests whose path contains the pattern will be run
 
 Options:`);
       for (const [name, parser] of Object.entries(ArgParsers)) {
-        console.log(`  ${(name + (parser.cmd.length > 0 ? "=value" : "")).padEnd(30)} ${parser.help}`);
+        console.log(
+          `  ${(name + (parser.cmd.length > 0 ? "=value" : "")).padEnd(30)} ${parser.help}`,
+        );
       }
       process.exit(0);
     },
@@ -140,9 +168,13 @@ function applyConfig(argv) {
 
   if (!existsSync(config.runtime)) {
     if (config.target === "wasm") {
-      console.error(`Wasm runtime not found: ${config.runtime}. Run 'just build-wasm' first.`);
+      console.error(
+        `Wasm runtime not found: ${config.runtime}. Run 'just build-wasm' first.`,
+      );
     } else {
-      console.error(`Runtime not found: ${config.runtime}. Run 'cargo build' first.`);
+      console.error(
+        `Runtime not found: ${config.runtime}. Run 'cargo build' first.`,
+      );
     }
     return false;
   }
@@ -152,13 +184,17 @@ function applyConfig(argv) {
     try {
       execFileSync("wasmtime", ["--version"], { encoding: "utf-8" });
     } catch {
-      console.error("wasmtime not found. Install wasmtime to run WPT tests on wasm.");
+      console.error(
+        "wasmtime not found. Install wasmtime to run WPT tests on wasm.",
+      );
       return false;
     }
   }
 
   if (!existsSync(config.wptRoot)) {
-    console.error(`WPT root not found: ${config.wptRoot}. Run 'just wpt-setup' first.`);
+    console.error(
+      `WPT root not found: ${config.wptRoot}. Run 'just wpt-setup' first.`,
+    );
     return false;
   }
 
@@ -178,11 +214,12 @@ function getBaseHarness() {
   const preHarness = readFileSync(relativePath("pre-harness.js"), "utf-8");
   const testHarness = readFileSync(
     path.join(config.wptRoot, "resources", "testharness.js"),
-    "utf-8"
+    "utf-8",
   );
   const postHarness = readFileSync(relativePath("post-harness.js"), "utf-8");
 
-  cachedBaseHarness = preHarness + "\n" + testHarness + "\n" + postHarness + "\n";
+  cachedBaseHarness =
+    preHarness + "\n" + testHarness + "\n" + postHarness + "\n";
   return cachedBaseHarness;
 }
 
@@ -222,7 +259,7 @@ function assembleTestScript(testPath) {
   if (idlTestMatch) {
     const idlSpecs = idlTestMatch[1]
       .split(",")
-      .map(s => s.trim().replace(/^['"]|['"]$/g, ""))
+      .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
       .filter(Boolean);
 
     // Pre-read all referenced IDL files and build a fetch polyfill.
@@ -235,16 +272,21 @@ function assembleTestScript(testPath) {
     }
 
     // Also check for dependency IDL specs (second argument to idl_test).
-    const depsMatch = testSource.match(/idl_test\(\s*\[[^\]]*\]\s*,\s*\[([^\]]*)\]/);
+    const depsMatch = testSource.match(
+      /idl_test\(\s*\[[^\]]*\]\s*,\s*\[([^\]]*)\]/,
+    );
     if (depsMatch) {
       const depSpecs = depsMatch[1]
         .split(",")
-        .map(s => s.trim().replace(/^['"]|['"]$/g, ""))
+        .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
         .filter(Boolean);
       for (const spec of depSpecs) {
         const idlPath = path.join(config.wptRoot, "interfaces", spec + ".idl");
         if (existsSync(idlPath)) {
-          idlMap["/interfaces/" + spec + ".idl"] = readFileSync(idlPath, "utf-8");
+          idlMap["/interfaces/" + spec + ".idl"] = readFileSync(
+            idlPath,
+            "utf-8",
+          );
         }
       }
     }
@@ -276,7 +318,9 @@ function assembleTestScript(testPath) {
       resolvedPath = path.join(path.dirname(fullPath), effectivePath);
     }
     if (!existsSync(resolvedPath)) {
-      console.error(`  META script not found: ${metaPath} (resolved: ${resolvedPath})`);
+      console.error(
+        `  META script not found: ${metaPath} (resolved: ${resolvedPath})`,
+      );
       continue;
     }
     const metaSource = readFileSync(resolvedPath, "utf-8");
@@ -305,16 +349,16 @@ function toEvalScriptCall(source, url) {
 
 function getTests(pattern) {
   const raw = JSON.parse(readFileSync(config.tests.list, "utf-8"));
-  let testPaths = raw.filter(p => !p.startsWith(SKIP_PREFIX));
+  let testPaths = raw.filter((p) => !p.startsWith(SKIP_PREFIX));
   const totalCount = testPaths.length;
 
   if (config.skipSlowTests) {
-    testPaths = testPaths.filter(p => !p.startsWith(SLOW_PREFIX));
+    testPaths = testPaths.filter((p) => !p.startsWith(SLOW_PREFIX));
   }
 
   testPaths = testPaths
-    .map(p => (p.startsWith(SLOW_PREFIX) ? p.slice(SLOW_PREFIX.length) : p))
-    .filter(p => p.includes(pattern));
+    .map((p) => (p.startsWith(SLOW_PREFIX) ? p.slice(SLOW_PREFIX.length) : p))
+    .filter((p) => p.includes(pattern));
 
   return { testPaths, totalCount };
 }
@@ -332,14 +376,12 @@ function runSingleTest(testPath) {
   const script = assembleTestScript(testPath);
 
   // Write assembled script to a temp file.
-  const tmpDir = path.join(config.wptRoot, "..", ".wpt-tmp");
-  mkdirSync(tmpDir, { recursive: true });
-  const tmpFile = path.join(tmpDir, "wpt-test.js");
+  mkdirSync(config.tmpDir, { recursive: true });
+  const tmpFile = path.join(config.tmpDir, "wpt-test.js");
   writeFileSync(tmpFile, script);
 
+  let command, args;
   try {
-    let command, args;
-
     if (config.target === "wasm") {
       // Run via wasmtime with filesystem access to the temp directory and CWD.
       // The --dir=.::/ maps the host CWD to the WASI root /, so convert the
@@ -360,11 +402,7 @@ function runSingleTest(testPath) {
       ];
     } else {
       command = config.runtime;
-      args = [
-        "--legacy-script",
-        "--wpt-mode",
-        tmpFile,
-      ];
+      args = ["--legacy-script", "--wpt-mode", tmpFile];
     }
 
     const result = spawnSync(command, args, {
@@ -381,13 +419,13 @@ function runSingleTest(testPath) {
     }
 
     if (result.error) {
-      return { error: result.error, output };
+      return { error: result.error, output, tmpFile, command, args };
     }
     if (result.status !== 0 || result.signal) {
       const reason = result.signal
         ? `killed by signal ${result.signal}`
         : `exited with status ${result.status}`;
-      return { error: new Error(reason), output };
+      return { error: new Error(reason), output, tmpFile, command, args };
     }
 
     // Parse results from stdout — look for the WPT_RESULTS_JSON marker.
@@ -395,13 +433,19 @@ function runSingleTest(testPath) {
     for (const line of lines) {
       if (line.startsWith("Log: WPT_RESULTS_JSON:")) {
         const json = line.slice("Log: WPT_RESULTS_JSON:".length);
-        return { results: JSON.parse(json), output };
+        return { results: JSON.parse(json), output, tmpFile, command, args };
       }
     }
 
-    return { error: new Error("No WPT_RESULTS_JSON found in output"), output };
+    return {
+      error: new Error("No WPT_RESULTS_JSON found in output"),
+      output,
+      tmpFile,
+      command,
+      args,
+    };
   } catch (e) {
-    return { error: e, output: e.stdout || "" };
+    return { error: e, output: e.stdout || "", tmpFile, command, args };
   }
 }
 
@@ -446,7 +490,8 @@ async function run() {
 
     const expectations = getExpectedResults(testPath);
     const t1 = Date.now();
-    const { results, error, output } = runSingleTest(testPath);
+    const { results, error, output, tmpFile, command, args } =
+      runSingleTest(testPath);
     const duration = Date.now() - t1;
 
     const stats = {
@@ -459,7 +504,10 @@ async function run() {
     };
 
     if (error) {
-      const expectPath = path.join(config.tests.expectations, testPath + ".json");
+      const expectPath = path.join(
+        config.tests.expectations,
+        testPath + ".json",
+      );
       const hasExpectations = existsSync(expectPath);
 
       if (hasExpectations) {
@@ -470,8 +518,10 @@ async function run() {
           // end on success, and crash diagnostics from stderr are appended last.
           const limit = config.logLevel >= LogLevel.Verbose ? 120 : 30;
           const lines = output.trim().split("\n");
-          const tail = lines.length > limit ? lines.slice(-limit).join("\n") : output;
-          const prefix = lines.length > limit ? `... (last ${limit} lines)\n` : "";
+          const tail =
+            lines.length > limit ? lines.slice(-limit).join("\n") : output;
+          const prefix =
+            lines.length > limit ? `... (last ${limit} lines)\n` : "";
           console.log(`  OUTPUT:\n${prefix}${tail}`);
         }
         if (config.tests.updateExpectations) {
@@ -480,6 +530,7 @@ async function run() {
           expectationsUpdated++;
         } else {
           unexpectedFailure = true;
+          printSTR(testPath, tmpFile, args, command);
         }
       } else {
         console.log(`EXPECTED ERROR: ${testPath} (${duration}ms)`);
@@ -501,12 +552,14 @@ async function run() {
       if (result.status === 0) {
         stats.pass++;
         if (!expectation || expectation.status === "FAIL") {
-          console.log(`${expectation ? "UNEXPECTED" : "NEW"} PASS\n  NAME: ${result.name}`);
+          console.log(
+            `${expectation ? "UNEXPECTED" : "NEW"} PASS\n  NAME: ${result.name}`,
+          );
           stats.unexpectedPass++;
         }
       } else if (!expectation || expectation.status === "PASS") {
         console.log(
-          `${expectation ? "UNEXPECTED" : "NEW"} FAIL\n  NAME: ${result.name}\n  MESSAGE: ${result.message}`
+          `${expectation ? "UNEXPECTED" : "NEW"} FAIL\n  NAME: ${result.name}\n  MESSAGE: ${result.message}`,
         );
         stats.unexpectedFail++;
       }
@@ -515,7 +568,9 @@ async function run() {
     for (const [name, expectation] of Object.entries(expectations)) {
       if (!expectation.did_run) {
         stats.missing++;
-        console.log(`MISSING TEST\n  NAME: ${name}\n  EXPECTED: ${expectation.status}`);
+        console.log(
+          `MISSING TEST\n  NAME: ${name}\n  EXPECTED: ${expectation.status}`,
+        );
       }
     }
 
@@ -528,29 +583,54 @@ async function run() {
 
     console.log(`${testPath.padEnd(pathLength)} ${formatStats(stats)}`);
 
-    if (config.tests.updateExpectations && (stats.unexpectedFail + stats.unexpectedPass + stats.missing > 0)) {
-      const expectPath = path.join(config.tests.expectations, testPath + ".json");
-      console.log(`  Writing expectations to ${expectPath}`);
-      const newExpectations = {};
-      for (const result of results) {
-        newExpectations[result.name] = {
-          status: result.status === 0 ? "PASS" : "FAIL",
-        };
+    if (stats.unexpectedFail + stats.unexpectedPass + stats.missing > 0) {
+      if (config.tests.updateExpectations) {
+        const expectPath = path.join(
+          config.tests.expectations,
+          testPath + ".json",
+        );
+        console.log(`  Writing expectations to ${expectPath}`);
+        const newExpectations = {};
+        for (const result of results) {
+          newExpectations[result.name] = {
+            status: result.status === 0 ? "PASS" : "FAIL",
+          };
+        }
+        mkdirSync(path.dirname(expectPath), { recursive: true });
+        writeFileSync(
+          expectPath,
+          JSON.stringify(newExpectations, null, 2) + "\n",
+        );
+        expectationsUpdated++;
+      } else {
+        printSTR(testPath, tmpFile, args, command);
       }
-      mkdirSync(path.dirname(expectPath), { recursive: true });
-      writeFileSync(expectPath, JSON.stringify(newExpectations, null, 2) + "\n");
-      expectationsUpdated++;
     }
   }
 
-  console.log(`\n${"Done. Stats:".padEnd(pathLength)} ${formatStats(totalStats)}`);
+  console.log(
+    `\n${"Done. Stats:".padEnd(pathLength)} ${formatStats(totalStats)}`,
+  );
 
   if (config.tests.updateExpectations) {
     console.log(`Expectations updated: ${expectationsUpdated}`);
-  } else if (totalStats.unexpectedFail + totalStats.unexpectedPass + totalStats.missing > 0 || unexpectedFailure) {
-    console.error("\nUnexpected results. Run with --update-expectations to update.");
+  } else if (
+    totalStats.unexpectedFail + totalStats.unexpectedPass + totalStats.missing >
+      0 ||
+    unexpectedFailure
+  ) {
+    console.error(
+      "\nUnexpected results. Run with --update-expectations to update.",
+    );
     process.exit(1);
   }
 }
 
 run();
+function printSTR(testPath, tmpFile, args, command) {
+  let tmpPath = path.join(config.tmpDir, testPath.replace(/\//g, "_"));
+  copyFileSync(tmpFile, tmpPath);
+  args[args.length - 1] = tmpPath;
+  console.error(`  To reproduce, run $ ${command} ${args.join(" ")}`);
+}
+
