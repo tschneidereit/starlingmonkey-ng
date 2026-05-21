@@ -20,3 +20,18 @@ globalThis.window = globalThis;
 globalThis.Window = {
   prototype: {}
 };
+
+// Provide a minimal `location` for tests that reference `location.origin`, to be replaced by a real one soon.
+if (typeof globalThis.location === 'undefined') {
+  globalThis.location = Object.freeze({
+    origin: "null",
+    protocol: "",
+    host: "",
+    hostname: "",
+    port: "",
+    pathname: "",
+    search: "",
+    hash: "",
+    href: "",
+  });
+}

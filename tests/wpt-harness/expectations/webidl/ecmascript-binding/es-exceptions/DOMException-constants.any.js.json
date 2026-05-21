@@ -1,5 +1,6 @@
 {
-  "Untitled": {
+  "": {
+    "comment": "Name based on location.pathname, so will change once that's properly implemented.",
     "status": "PASS"
   },
   "Constant INDEX_SIZE_ERR on DOMException constructor object": {
