@@ -8,11 +8,11 @@ pub mod runtime;
 
 pub mod test_util;
 
-use js::error::ExnThrown;
 pub use js::macros::{
     jsclass, jsglobals, jsmethods, jsmodule, jsnamespace, webidl_dictionary, webidl_interface,
     webidl_methods, webidl_namespace, webidl_union, Traceable,
 };
+use js::{error::ExnThrown, exception};
 
 use crate::runtime::Runtime;
 
@@ -83,7 +83,7 @@ pub fn run(
             })
         };
 
-        if eval_result.is_err() {
+        if eval_result.is_err() || exception::is_pending(&scope) {
             runtime.unregister_invocation(&invocation);
             let exn = ExnThrown::capture(&scope);
             println!("exn: {exn}");

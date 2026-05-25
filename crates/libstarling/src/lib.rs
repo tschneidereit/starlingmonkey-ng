@@ -37,7 +37,10 @@ fn drive_event_loop(
         .build()
         .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
 
-    let scope = unsafe { runtime.scope() };
+    // Enter the default global's realm for the lifetime of the event loop.
+    // Tasks running inside `run_to_completion` (timers, promise reactions,
+    // etc.) need an active realm to call into JS.
+    let scope = runtime.default_global();
     let el = invocation.event_loop_mut();
 
     tokio_rt.block_on(async {
@@ -48,6 +51,7 @@ fn drive_event_loop(
         unsafe { run_to_completion(raw_cx, el, tokio::time::sleep).await }
     });
 
+    drop(scope);
     runtime.unregister_invocation(&invocation);
     Ok(())
 }
@@ -58,9 +62,14 @@ fn drive_event_loop(
     runtime: std::rc::Rc<runtime::Runtime>,
     mut invocation: invocation::InvocationState,
 ) -> Result<(), String> {
-    // SAFETY: the Runtime is alive (held by Rc) and we're single-threaded.
-    let raw_cx = unsafe { runtime.mozjs_rt().cx_no_gc().raw_cx_no_gc() };
     wasip3::wit_bindgen::spawn(async move {
+        // Enter the default global's realm for the lifetime of the event
+        // loop. Tasks running inside `run_to_completion` (timers, promise
+        // reactions, etc.) need an active realm to call into JS.
+        let scope = runtime.default_global();
+        // SAFETY: the scope (and its Runtime) outlive this future — the
+        // spawned task owns both via the `Rc`.
+        let raw_cx = unsafe { scope.raw_cx_no_gc() };
         let el = invocation.event_loop_mut();
         // SAFETY: raw_cx is valid — the runtime is kept alive by the Rc.
         unsafe {
@@ -70,6 +79,7 @@ fn drive_event_loop(
             })
             .await;
         }
+        drop(scope);
         runtime.unregister_invocation(&invocation);
     });
     Ok(())

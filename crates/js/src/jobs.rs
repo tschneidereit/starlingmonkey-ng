@@ -39,6 +39,12 @@ pub fn run_jobs(scope: &Scope<'_>) {
     unsafe { wrappers2::RunJobs(scope.cx_mut()) }
 }
 
+/// Returns whether any promise reactions or other microtasks are currently
+/// pending in the job queue.
+pub fn has_pending_jobs(scope: &Scope<'_>) -> bool {
+    unsafe { wrappers2::HasJobsPending(scope.cx_mut()) }
+}
+
 /// Stop draining the job queue.
 ///
 /// After calling this, [`run_jobs`] becomes a no-op until the queue is
