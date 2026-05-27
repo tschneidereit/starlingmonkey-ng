@@ -1,5 +1,5 @@
 [package]
-name = "wpt-support"
+name = "web-url"
 version.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -7,11 +7,13 @@ authors.workspace = true
 edition.workspace = true
 
 [dependencies]
-libstarling.workspace = true
 core-runtime.workspace = true
+form_urlencoded.workspace = true
 js.workspace = true
 url.workspace = true
-web-globals.workspace = true
+
+[dev-dependencies]
+libstarling.workspace = true
 
 [lints]
 workspace = true

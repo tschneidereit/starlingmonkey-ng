@@ -250,7 +250,12 @@ function assembleTestScript(testPath) {
     metaScripts.push(match[1].trim());
   }
 
-  let script = getBaseHarness();
+  // Point `globalThis.location` at the test's canonical WPT URL before any
+  // harness or test code runs.
+  let script = `__setLocation(${JSON.stringify(
+    "http://web-platform.test:8000/" + testPath,
+  )});\n`;
+  script += getBaseHarness();
 
   // If the test uses idl_test(), inject a minimal fetch polyfill that serves
   // IDL files from the WPT /interfaces/ directory on disk. This avoids

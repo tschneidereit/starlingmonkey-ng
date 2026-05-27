@@ -14,7 +14,9 @@ core-runtime.workspace = true
 futures-lite.workspace = true
 js.workspace = true
 simple-http.workspace = true
+url.workspace = true
 web-globals.workspace = true
+web-url.workspace = true
 cpp-builtins.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -19,6 +19,7 @@ use js::Object;
 ///
 /// Currently installs:
 /// - `evalScript(source)` — evaluate a script in non-syntactic scope
+/// - `__setLocation(url)` — configure the URL backing `globalThis.location`
 ///
 /// # Safety
 ///
@@ -33,6 +34,15 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
         0,
     )
     .expect("failed to define evalScript");
+    js::Function::define(
+        scope,
+        global.handle(),
+        c"__setLocation",
+        Some(set_location_native),
+        1,
+        0,
+    )
+    .expect("failed to define __setLocation");
 }
 
 /// JSNative implementation of `evalScript(source)`.
@@ -72,6 +82,41 @@ unsafe extern "C" fn eval_script_native(
     }
 }
 
+/// JSNative implementation of `__setLocation(url)`.
+///
+/// Parses `url` and installs it as the URL backing `globalThis.location`. The
+/// WPT harness calls this once per test with the test's canonical
+/// `http://web-platform.test:8000/...` URL so that tests querying
+/// `location.origin`, `location.href`, etc. observe the same values they
+/// would when loaded from a real WPT HTTP server.
+unsafe extern "C" fn set_location_native(
+    raw_cx: *mut RawJSContext,
+    argc: u32,
+    vp: *mut js::native::Value,
+) -> bool {
+    use js::prelude::RootScope;
+
+    let scope = RootScope::from_current_realm(raw_cx);
+    let args = js::native::CallArgs::from_vp(vp, argc);
+    let raw = match String::from_jsval(&scope, Handle::from_raw(args.get(0)), ()) {
+        Ok(s) => s,
+        Err(_) => {
+            throw_error(&scope, "__setLocation: argument must be a string");
+            return false;
+        }
+    };
+    let url = match url::Url::parse(&raw) {
+        Ok(u) => u,
+        Err(e) => {
+            throw_error(&scope, &format!("__setLocation: invalid URL {raw:?}: {e}"));
+            return false;
+        }
+    };
+    web_globals::worker_location::set_init_location(url);
+    args.rval().set(js::value::undefined());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     mod wpt_integration {
@@ -106,6 +151,31 @@ mod tests {
         fn eval_script_available_in_wpt_mode() {
             // evalScript should be available as a global function.
             assert_eq!(eval_wpt("typeof evalScript"), "function");
+        }
+
+        #[test]
+        fn set_location_configures_worker_location() {
+            // After __setLocation runs, every WorkerLocation accessor must
+            // report the configured URL's components.
+            assert_eq!(
+                eval_wpt(
+                    "__setLocation('http://web-platform.test:8000/foo/bar.any.js?x=1'); \
+                     [location.href, location.origin, location.pathname, location.search].join('|')"
+                ),
+                "http://web-platform.test:8000/foo/bar.any.js?x=1|\
+                 http://web-platform.test:8000|/foo/bar.any.js|?x=1"
+            );
+        }
+
+        #[test]
+        fn set_location_rejects_invalid_url() {
+            assert_eq!(
+                eval_wpt(
+                    "try { __setLocation('not a url'); 'no-throw' } \
+                     catch(e) { (e instanceof TypeError) + ',' + e.message.includes('invalid URL') }"
+                ),
+                "true,true"
+            );
         }
     }
 }

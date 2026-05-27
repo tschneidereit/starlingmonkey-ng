@@ -1,0 +1,26 @@
+{
+  "Delete basics": {
+    "status": "PASS"
+  },
+  "Deleting appended multiple": {
+    "status": "PASS"
+  },
+  "Deleting all params removes ? from URL": {
+    "status": "PASS"
+  },
+  "Removing non-existent param removes ? from URL": {
+    "status": "PASS"
+  },
+  "Changing the query of a URL with an opaque path with trailing spaces": {
+    "status": "PASS"
+  },
+  "Changing the query of a URL with an opaque path with trailing spaces and a fragment": {
+    "status": "PASS"
+  },
+  "Two-argument delete()": {
+    "status": "PASS"
+  },
+  "Two-argument delete() respects undefined as second arg": {
+    "status": "PASS"
+  }
+}

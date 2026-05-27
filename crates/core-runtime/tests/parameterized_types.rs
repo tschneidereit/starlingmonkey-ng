@@ -552,6 +552,139 @@ mod union_lifetime_tests {
 }
 
 // ============================================================================
+// Sequence-or-record union tests (e.g. URLSearchParams init shape)
+// ============================================================================
+
+mod union_sequence_record_tests {
+    use core_runtime::jsclass;
+    use core_runtime::jsmethods;
+    use core_runtime::test_util::{eval_with_setup, throws_with_setup};
+    use core_runtime::webidl_union;
+    use js::conversion::Record;
+
+    /// Mirrors the WebIDL signature
+    /// `(sequence<sequence<USVString>> or record<USVString, USVString> or USVString)`
+    /// used by `URLSearchParams`.
+    #[webidl_union]
+    pub enum SeqOrRecordOrString {
+        Pairs(Vec<Vec<String>>),
+        Record(Record<String>),
+        Str(String),
+    }
+
+    #[jsclass]
+    struct SeqRecordAcceptor {}
+
+    #[jsmethods]
+    impl SeqRecordAcceptor {
+        #[constructor]
+        fn construct() -> Self {
+            Self {}
+        }
+
+        #[method]
+        fn classify(&self, val: SeqOrRecordOrString) -> String {
+            match val {
+                SeqOrRecordOrString::Pairs(pairs) => {
+                    let mut parts = Vec::new();
+                    for pair in pairs {
+                        parts.push(pair.join("="));
+                    }
+                    format!("pairs:{}", parts.join("&"))
+                }
+                SeqOrRecordOrString::Record(record) => {
+                    let mut entries: Vec<String> = record
+                        .into_iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect();
+                    entries.sort();
+                    format!("record:{}", entries.join("&"))
+                }
+                SeqOrRecordOrString::Str(s) => format!("string:{s}"),
+            }
+        }
+    }
+
+    fn eval(code: &str) -> String {
+        eval_with_setup(
+            || {
+                core_runtime::runtime::register_global_initializer(|scope, global| {
+                    SeqRecordAcceptor::add_to_global(scope, global);
+                });
+            },
+            code,
+        )
+    }
+
+    fn throws(code: &str) -> bool {
+        throws_with_setup(
+            || {
+                core_runtime::runtime::register_global_initializer(|scope, global| {
+                    SeqRecordAcceptor::add_to_global(scope, global);
+                });
+            },
+            code,
+        )
+    }
+
+    #[test]
+    fn array_of_pairs_picks_sequence() {
+        assert_eq!(
+            eval("new SeqRecordAcceptor().classify([['a','1'], ['b','2']])"),
+            "pairs:a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn plain_object_picks_record() {
+        assert_eq!(
+            eval("new SeqRecordAcceptor().classify({a:'1', b:'2'})"),
+            "record:a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn string_picks_string() {
+        assert_eq!(
+            eval("new SeqRecordAcceptor().classify('hello')"),
+            "string:hello"
+        );
+    }
+
+    #[test]
+    fn custom_iterable_picks_sequence() {
+        // A non-Array iterable with @@iterator must still be routed to the
+        // sequence branch.
+        assert_eq!(
+            eval(
+                "let it = { [Symbol.iterator]: function*() { yield ['a','1']; yield ['b','2']; } };\
+                 new SeqRecordAcceptor().classify(it)"
+            ),
+            "pairs:a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn iterable_with_non_iterable_element_throws() {
+        // WebIDL §3.2.25: once @@iterator is detected the sequence branch is
+        // selected; if an element can't be converted to the inner sequence
+        // type, the conversion *throws* — it does not silently fall through
+        // to the record branch.
+        assert!(throws("new SeqRecordAcceptor().classify([1, 2])"));
+    }
+
+    #[test]
+    fn iterable_throwing_iterator_propagates() {
+        // If the iterator throws, the failure propagates as an exception
+        // rather than being silently swallowed.
+        assert!(throws(
+            "let it = { [Symbol.iterator]: function() { return { next() { throw new Error('boom'); } }; } };\
+             new SeqRecordAcceptor().classify(it)"
+        ));
+    }
+}
+
+// ============================================================================
 // AsyncSequence tests
 // ============================================================================
 

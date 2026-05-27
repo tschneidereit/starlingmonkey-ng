@@ -4035,7 +4035,8 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
     //   4. Numeric
     //   5. String (fallback — any value can be stringified)
 
-    let mut object_branches = Vec::new();
+    let mut sequence_branches = Vec::new();
+    let mut object_only_branches = Vec::new();
     let mut boolean_branch = None;
     let mut numeric_branch = None;
     let mut string_branch = None;
@@ -4051,8 +4052,11 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
             UnionCategory::String => {
                 string_branch = Some((ident, inner_ty));
             }
-            UnionCategory::Sequence | UnionCategory::Object => {
-                object_branches.push((ident, inner_ty, category));
+            UnionCategory::Sequence => {
+                sequence_branches.push((ident, inner_ty));
+            }
+            UnionCategory::Object => {
+                object_only_branches.push((ident, inner_ty));
             }
         }
     }
@@ -4062,36 +4066,56 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
     // then primitive branches.
     let mut from_body = Vec::new();
 
-    // Object branches: only attempted when val.is_object().
-    if !object_branches.is_empty() {
+    let has_object_branches = !sequence_branches.is_empty() || !object_only_branches.is_empty();
+    if has_object_branches {
         let mut obj_checks = Vec::new();
 
-        // Sequence types first (check Symbol.iterator).
-        for (ident, inner_ty, cat) in &object_branches {
-            if **cat == UnionCategory::Sequence {
-                obj_checks.push(quote! {
-                    // Sequence type: try Vec conversion (uses iterable protocol).
-                    if let Ok(v) = <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
+        // WebIDL §3.2.25: when the value is an Object and the union includes a
+        // sequence type, the sequence branch is selected iff the value has a
+        // non-null `@@iterator`.
+        if !sequence_branches.is_empty() {
+            // Try sequence variants in declaration order. Within the iterable
+            // arm, propagate `ExnPending` immediately and only fall through on
+            // a soft `Failure` (so the rare case of multiple sequence variants
+            // with different element types still works in declaration order).
+            let mut seq_attempts = Vec::new();
+            for (ident, inner_ty) in &sequence_branches {
+                seq_attempts.push(quote! {
+                    match <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
                         scope, val, Default::default(),
                     ) {
-                        return Ok(#enum_name::#ident(v));
+                        Ok(v) => return Ok(#enum_name::#ident(v)),
+                        Err(::js::conversion::ConversionError::ExnPending) => {
+                            return Err(::js::conversion::ConversionError::ExnPending);
+                        }
+                        Err(e) => return Err(e),
                     }
                 });
             }
+
+            obj_checks.push(quote! {
+                if ::js::conversion::is_iterable_value(scope, val)? {
+                    #(#seq_attempts)*
+                }
+            });
         }
 
-        // Interface/object types.
-        for (ident, inner_ty, cat) in &object_branches {
-            if **cat == UnionCategory::Object {
-                obj_checks.push(quote! {
-                    // Object/interface type: try FromJSVal conversion.
-                    if let Ok(v) = <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
-                        scope, val, Default::default(),
-                    ) {
-                        return Ok(#enum_name::#ident(v));
+        // Interface / record / object types: try in declaration order. Always
+        // propagate `ExnPending` (a pending JS exception cannot be silently
+        // recovered from); fall through only on soft `Failure` so the next
+        // variant gets a chance.
+        for (ident, inner_ty) in &object_only_branches {
+            obj_checks.push(quote! {
+                match <#inner_ty as ::js::conversion::FromJSVal>::from_jsval(
+                    scope, val, Default::default(),
+                ) {
+                    Ok(v) => return Ok(#enum_name::#ident(v)),
+                    Err(::js::conversion::ConversionError::ExnPending) => {
+                        return Err(::js::conversion::ConversionError::ExnPending);
                     }
-                });
-            }
+                    Err(_) => {}
+                }
+            });
         }
 
         from_body.push(quote! {

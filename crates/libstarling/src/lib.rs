@@ -11,18 +11,31 @@ pub use core_runtime::*;
 /// globals (like `btoa`, `atob`) are installed on every global object.
 pub fn register_builtins() {
     runtime::register_global_initializer(web_globals::add_to_global);
+    runtime::register_global_initializer(web_url::add_to_global);
     runtime::register_global_initializer(|scope, global| unsafe {
         cpp_builtins::install(scope.cx_mut().raw_cx(), global.handle());
     });
 }
 
-/// Run a JavaScript script or module based on the provided configuration.
+/// Apply CLI options that take effect before the runtime is initialized.
+///
+/// Currently this just installs the worker location URL parsed from
+/// `--init-location`. Shared between the native and wasm32 entry points.
+fn apply_pre_init_config(config: &config::RuntimeConfig) -> Result<(), String> {
+    if let Some(location) = config.init_location.as_deref() {
+        let url = url::Url::parse(location)
+            .map_err(|e| format!("Invalid --init-location URL {location:?}: {e}"))?;
+        web_globals::worker_location::set_init_location(url);
+    }
+    Ok(())
+}
+
+/// Run a JavaScript script or module on native targets.
 ///
 /// This registers all builtin globals (btoa, atob, etc.) and then delegates
 /// to [`core_runtime::run()`] with a platform-appropriate event loop driver.
 pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
-    register_builtins();
-    core_runtime::run(config, drive_event_loop)
+    apply_pre_init_config(&config)?;
 }
 
 /// Drive the event loop on native targets using a tokio current-thread

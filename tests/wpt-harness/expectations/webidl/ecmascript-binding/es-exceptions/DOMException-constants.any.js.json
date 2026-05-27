@@ -1,6 +1,5 @@
 {
-  "": {
-    "comment": "Name based on location.pathname, so will change once that's properly implemented.",
+  "DOMException-constants": {
     "status": "PASS"
   },
   "Constant INDEX_SIZE_ERR on DOMException constructor object": {

@@ -10,6 +10,7 @@ edition.workspace = true
 core-runtime.workspace = true
 encoding_rs.workspace = true
 js.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 libstarling.workspace = true
