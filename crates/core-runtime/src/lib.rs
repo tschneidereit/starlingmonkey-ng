@@ -42,9 +42,33 @@ pub fn run(
         invocation::InvocationState,
     ) -> Result<(), String>,
 ) -> Result<(), String> {
+    match setup(config)? {
+        Some((runtime, invocation)) => drive_event_loop(runtime, invocation),
+        None => Ok(()),
+    }
+}
+
+/// Perform the synchronous portion of a runtime invocation: initialize the
+/// runtime, evaluate the script, drain initial microtasks, and check whether
+/// any asynchronous work remains.
+///
+/// Returns:
+/// - `Ok(Some((runtime, invocation)))` if the script left work in the event
+///   loop. The caller drives [`event_loop::run_to_completion`] (or an
+///   equivalent) to completion and then calls
+///   [`Runtime::unregister_invocation`] before dropping the runtime.
+/// - `Ok(None)` if the script completed without scheduling any async work.
+///   The invocation is already cleaned up.
+/// - `Err(_)` if the script failed to parse or threw during top-level
+///   evaluation.
+///
+/// Splitting this out lets the wasm32 cdylib driver hold an async event-loop
+/// future on its own stack instead of bridging through a sync callback.
+pub fn setup(
+    config: config::RuntimeConfig,
+) -> Result<Option<(std::rc::Rc<Runtime>, invocation::InvocationState)>, String> {
     let runtime = Runtime::init(&config);
 
-    // Determine source and filename.
     let (source, filename) = if let Some(ref eval) = config.eval_script {
         (eval.clone(), "<eval>".to_string())
     } else {
@@ -58,18 +82,14 @@ pub fn run(
         (source, path.clone())
     };
 
-    // Create a per-invocation state with its own event loop and register
-    // it with the runtime so the GC can trace it.
     let mut invocation = invocation::InvocationState::new();
 
-    // SAFETY: `invocation` lives on this stack frame (or is moved into
-    // the spawned wasm32 task which keeps it alive) and won't be freed
-    // until we unregister below (or the spawned task unregisters it).
+    // SAFETY: `invocation` is owned by this function until we either move it
+    // out in the `Some` return or unregister and drop it in the `None` /
+    // error paths. It is never freed while the runtime tracer holds the
+    // raw pointer.
     unsafe { runtime.register_invocation(&invocation) };
 
-    // Evaluate the script and drain initial microtasks inside a scope
-    // block. The scope borrows `runtime` (via Rc::deref), so it must
-    // be dropped before we can move `runtime` into the wasm32 spawn path.
     {
         let scope = runtime.default_global();
 
@@ -98,10 +118,10 @@ pub fn run(
 
     if !invocation.event_loop().is_alive() {
         runtime.unregister_invocation(&invocation);
-        return Ok(());
+        return Ok(None);
     }
 
-    drive_event_loop(runtime, invocation)
+    Ok(Some((runtime, invocation)))
 }
 
 /// Extract and print the pending JS exception, if any.
