@@ -15,8 +15,9 @@
 use std::time::{Duration, Instant};
 
 use js::error::throw_error;
-use js::heap::{Heap, RootedTraceableBox, Trace};
-use js::native::{JSObject, JSTracer};
+use js::gc::handle::Heap;
+use js::heap::{RootedTraceableBox, Trace};
+use js::native::JSTracer;
 
 use js::gc::scope::Scope;
 
@@ -29,7 +30,7 @@ use super::{with_active_event_loop, Task, TaskId};
 // TODO: remove use of RootedTraceableBox here and make TimerTask a proper Traceable.
 pub struct TimerTask {
     /// The JS callback function to invoke.
-    callback: RootedTraceableBox<Heap<*mut JSObject>>,
+    callback: RootedTraceableBox<Heap<js::object::Object>>,
     /// If `Some`, this is a repeating timer (`setInterval`) and will
     /// re-queue itself with this delay after each execution.
     interval: Option<Duration>,
@@ -42,8 +43,7 @@ impl TimerTask {
     ///
     /// `callback` must be a valid JS function object.
     pub unsafe fn one_shot(callback: Object) -> Self {
-        let heap = RootedTraceableBox::new(Heap::default());
-        heap.set(callback.as_raw());
+        let heap = RootedTraceableBox::new(Heap::from(callback));
         Self {
             callback: heap,
             interval: None,
@@ -56,8 +56,7 @@ impl TimerTask {
     ///
     /// `callback` must be a valid JS function object.
     pub unsafe fn repeating(callback: Object, interval: Duration) -> Self {
-        let heap = RootedTraceableBox::new(Heap::default());
-        heap.set(callback.as_raw());
+        let heap = RootedTraceableBox::new(Heap::from(callback));
         Self {
             callback: heap,
             interval: Some(interval),
@@ -75,8 +74,7 @@ impl Task for TimerTask {
     }
 
     fn run(self: Box<Self>, scope: &Scope<'_>, id: TaskId) -> Result<(), ()> {
-        let cb =
-            Object::from_handle(self.callback.handle()).expect("We should have a callback here");
+        let cb: Object<'_> = self.callback.get(scope);
 
         // Call the callback with no arguments and the global as `this`.
         let result = {

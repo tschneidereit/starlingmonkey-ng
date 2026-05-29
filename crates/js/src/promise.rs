@@ -296,7 +296,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::heap::{Heap as MozHeap, RootedTraceableBox};
+use crate::heap::{MozHeap, RootedTraceableBox};
 use crate::native::{MutableHandleValue, RawJSContext};
 use crate::value;
 use mozjs::conversions::ToJSValConvertible;

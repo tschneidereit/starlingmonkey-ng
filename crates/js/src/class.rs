@@ -21,7 +21,7 @@ use crate::conversion::{ConversionBehavior, ConversionError, FromJSVal, ToJSVal}
 use crate::error::{capture_stack_from_error, ExnThrown};
 use crate::gc::handle::Stack;
 use crate::gc::scope::{RootScope, Scope};
-use crate::heap::{Heap as MozHeap, Trace};
+use crate::heap::{MozHeap, Trace};
 use crate::native::{
     CallArgs, GCContext, HandleObject, JSNative, JSObject, JSTracer, RawJSContext, Value,
 };

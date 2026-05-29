@@ -16,11 +16,9 @@ use std::ptr::NonNull;
 use crate::builtins::{CastError, CastTarget, JSType};
 use crate::conversion::{ConversionError, ToJSVal};
 use crate::gc::scope::Scope;
-use crate::heap::Trace;
+use crate::heap::{MozHeap, Trace};
 use crate::native::{JSObject, JSTracer, RawHandle};
-use mozjs::gc::{Handle, HandleValue};
-
-pub use crate::heap::Heap as MozHeap;
+use mozjs::gc::{GCMethods, Handle, HandleValue};
 
 /// A scope-rooted handle to a JavaScript object of type `T`.
 ///
@@ -148,6 +146,33 @@ impl<'s, T: JSType> ToJSVal<'s> for Stack<'s, T> {
     }
 }
 
+/// Maps a `Heap<T>` type parameter to the mozjs GC cell it stores.
+///
+/// Implemented blanket for object marker types (`T: JSType`, cell =
+/// `*mut JSObject`) and concretely for [`Value`](crate::native::Value). This is
+/// what lets one `Heap<T>` cover both object references and arbitrary JS values
+/// while the inner `MozHeap` stays boxed (and therefore move-safe).
+pub trait HeapCell {
+    /// The mozjs cell type backing this heap reference.
+    type Cell: Copy + GCMethods;
+    /// The empty/uninitialised cell value (null object / `undefined`).
+    fn null_cell() -> Self::Cell;
+}
+
+impl<T: JSType> HeapCell for T {
+    type Cell = *mut JSObject;
+    fn null_cell() -> *mut JSObject {
+        std::ptr::null_mut()
+    }
+}
+
+impl HeapCell for crate::native::Value {
+    type Cell = crate::native::Value;
+    fn null_cell() -> crate::native::Value {
+        crate::value::undefined()
+    }
+}
+
 /// A GC-traced heap reference to a JavaScript object of type `T`.
 ///
 /// `Heap<T>` stores a JS object pointer that is traced by the garbage
@@ -166,8 +191,8 @@ impl<'s, T: JSType> ToJSVal<'s> for Stack<'s, T> {
 /// To access the object, root it with [`get`](Heap::get), which returns
 /// the stack newtype directly (e.g. `Item<'s>` for `Heap<ItemImpl>`).
 #[crate::must_root]
-pub struct Heap<T: JSType> {
-    heap: Pin<Box<MozHeap<*mut JSObject>>>,
+pub struct Heap<T: HeapCell> {
+    heap: Pin<Box<MozHeap<T::Cell>>>,
     _marker: PhantomData<T>,
 }
 
@@ -221,6 +246,23 @@ impl<T: JSType> Heap<T> {
     pub fn is_initialized(&self) -> bool {
         !self.heap.get().is_null()
     }
+
+    /// Store a new referent, replacing any previous one.
+    pub fn set(&self, value: Stack<'_, T>) {
+        (*self.heap).set(value.as_raw());
+    }
+
+    /// The current raw object pointer, for identity comparison only.
+    ///
+    /// `Heap` is traced, so the GC updates the stored pointer when a
+    /// compacting collection moves the object; this returns that
+    /// barrier-updated pointer. Comparing two live `as_ptr` results is
+    /// therefore correct across collections — unlike caching a raw pointer,
+    /// which would go stale. The returned pointer must not be dereferenced or
+    /// stored; root it via [`get`](Heap::get) for any actual use.
+    pub fn as_ptr(&self) -> *mut JSObject {
+        self.heap.get()
+    }
 }
 
 /// Default creates a null `Heap`. Only intended for use by the proc
@@ -228,7 +270,10 @@ impl<T: JSType> Heap<T> {
 /// before the object is exposed. Calling `get()` on a default `Heap`
 /// panics.
 #[crate::allow_unrooted]
-impl<T: JSType> Default for Heap<T> {
+impl<T: HeapCell> Default for Heap<T>
+where
+    MozHeap<T::Cell>: Default,
+{
     fn default() -> Self {
         Heap {
             heap: Box::pin(MozHeap::default()),
@@ -254,9 +299,74 @@ impl<'s, T: JSType> From<Stack<'s, T>> for Heap<T> {
 }
 
 #[crate::allow_unrooted_interior]
-unsafe impl<T: JSType> Trace for Heap<T> {
+unsafe impl<T: HeapCell> Trace for Heap<T>
+where
+    MozHeap<T::Cell>: Trace,
+{
     #[inline]
     unsafe fn trace(&self, trc: *mut JSTracer) {
         self.heap.trace(trc);
+    }
+}
+
+#[crate::allow_unrooted]
+impl Heap<crate::native::Value> {
+    /// Root the stored value in `scope`, returning a rooted handle.
+    ///
+    /// This is the safe way to read the value: the returned [`Handle`] keeps
+    /// it alive for the scope's lifetime, so it is safe to hold across
+    /// allocations.
+    pub fn get<'s>(&self, scope: &'s Scope<'_>) -> Handle<'s, crate::native::Value> {
+        scope.root_value(self.heap.get())
+    }
+
+    /// Store `v`. Safe to call repeatedly and at any time: the inner `MozHeap`
+    /// is boxed, so its write barrier is registered at a stable address that
+    /// survives moving this `Heap` into a struct, `Vec`, or box.
+    pub fn set(&self, v: crate::native::Value) {
+        (*self.heap).set(v);
+    }
+
+    /// Whether the stored value is `undefined` (a default-constructed
+    /// `Heap<Value>`). Reads only the value's tag; the value is not retained,
+    /// so this needs no rooting.
+    pub fn is_undefined(&self) -> bool {
+        self.heap.get().is_undefined()
+    }
+
+    /// A `Heap<Value>` is always initialized: its default is `undefined`, a
+    /// valid JS value, so there is no null/uninitialized state to guard
+    /// against.
+    ///
+    /// This method satisfies the `debug_assert_fully_initialized` hook that
+    /// the `#[jsclass]` / `#[webidl_interface]` proc macros emit for bare
+    /// `Heap<T>` fields.
+    pub fn is_initialized(&self) -> bool {
+        true
+    }
+
+    /// The stored value without rooting it.
+    ///
+    /// # Safety
+    ///
+    /// The returned [`Value`](crate::native::Value) is **not** rooted. If it is
+    /// a GC pointer (object/string), the caller must consume it before any
+    /// allocation can trigger a GC — e.g. set it straight into `rval` or a
+    /// call's argument array — or root it via [`get`](Self::get). Holding it
+    /// across an allocation is undefined behavior.
+    pub unsafe fn as_raw(&self) -> crate::native::Value {
+        self.heap.get()
+    }
+}
+
+#[crate::allow_unrooted]
+impl From<crate::native::Value> for Heap<crate::native::Value> {
+    fn from(v: crate::native::Value) -> Self {
+        let heap = Box::pin(MozHeap::default());
+        (*heap).set(v);
+        Heap {
+            heap,
+            _marker: PhantomData,
+        }
     }
 }

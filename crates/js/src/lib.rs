@@ -184,14 +184,13 @@ pub mod class_spec {
     pub use mozjs::{JSCLASS_GLOBAL_SLOT_COUNT, JSCLASS_RESERVED_SLOTS_MASK};
 }
 
-/// GC heap storage types and tracing.
+/// GC tracing and self-rooting heap storage.
 ///
-/// `Heap<T>` stores GC pointers outside the stack. `RootedTraceableBox<T>`
-/// provides self-rooting heap storage. Both are fundamental to storing
-/// JS objects in Rust data structures that outlive a single scope.
+/// `RootedTraceableBox<T>` provides self-rooting heap storage, and `Trace` is
+/// the tracing hook for custom GC containers.
 pub mod heap {
     pub use mozjs::gc::RootedTraceableBox;
-    pub use mozjs::jsapi::Heap;
+    pub(crate) use mozjs::jsapi::Heap as MozHeap;
     pub use mozjs::rust::Trace;
 }
 
