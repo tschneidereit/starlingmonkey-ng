@@ -31,7 +31,9 @@ use mozjs::jsapi::{
 };
 use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
-use mozjs::rust::{wrappers2, Runtime};
+use mozjs::rust::wrappers2;
+#[cfg(debug_assertions)]
+use mozjs::rust::Runtime;
 
 /// A lightweight marker indicating that a JavaScript exception is pending on
 /// the context.

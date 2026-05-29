@@ -1413,6 +1413,7 @@ dependencies = [
  "js",
  "simple-http",
  "tokio",
+ "url",
  "wasip3 0.5.0+wasi-0.3.0-rc-2026-03-15",
  "web-files",
  "web-globals",
@@ -1501,7 +1502,7 @@ dependencies = [
 [[package]]
 name = "mozjs"
 version = "0.15.4"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#7a64fd6c4c39594528966e021857001256ee932f"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ba9d19916845816deb03fcd60a45fe053bf6584"
 dependencies = [
  "bindgen",
  "cc",
@@ -1515,7 +1516,7 @@ dependencies = [
 [[package]]
 name = "mozjs_sys"
 version = "0.140.7-2"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#7a64fd6c4c39594528966e021857001256ee932f"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ba9d19916845816deb03fcd60a45fe053bf6584"
 dependencies = [
  "bindgen",
  "cc",
@@ -2685,6 +2686,7 @@ dependencies = [
  "encoding_rs",
  "js",
  "libstarling",
+ "url",
 ]
 
 [[package]]
@@ -3123,6 +3125,8 @@ dependencies = [
  "core-runtime",
  "js",
  "libstarling",
+ "url",
+ "web-globals",
 ]
 
 [[package]]
