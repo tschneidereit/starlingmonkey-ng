@@ -33,8 +33,8 @@ use mozjs::jsapi::AssertSameCompartment;
 use mozjs::jsapi::JS_GetTwoByteStringCharsAndLength;
 use mozjs::jsapi::JS;
 use mozjs::jsapi::{ForOfIterator, ForOfIterator_NonIterableBehavior};
-use mozjs::jsapi::{Heap, JS_DefineElement, JS_GetLatin1StringCharsAndLength};
 use mozjs::jsapi::{JSContext, JSObject, JSString, PropertyDescriptor, RootedObject, RootedValue};
+use mozjs::jsapi::{JS_DefineElement, JS_GetLatin1StringCharsAndLength};
 use mozjs::jsapi::{JS_DeprecatedStringHasLatin1Chars, JS_NewStringCopyUTF8N, JSPROP_ENUMERATE};
 use mozjs::jsval::{BooleanValue, DoubleValue, Int32Value, UInt32Value, UndefinedValue};
 use mozjs::jsval::{JSVal, ObjectOrNullValue, ObjectValue, StringValue, SymbolValue};
@@ -51,7 +51,8 @@ use std::rc::Rc;
 use std::{mem, ptr, slice};
 
 use crate::error::{throw_type_error, ExnThrown, ThrowException};
-use crate::heap::Trace;
+use crate::gc::handle::Heap;
+use crate::heap::{MozHeap, Trace};
 use crate::prelude::Scope;
 
 pub use indexmap::IndexMap;
@@ -313,7 +314,7 @@ impl<'s> ToJSVal<'s> for HandleValue<'s> {
     }
 }
 
-impl<'s> ToJSVal<'s> for Heap<JSVal> {
+impl<'s> ToJSVal<'s> for MozHeap<JSVal> {
     #[inline]
     fn to_jsval(&self, _scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
         Ok(unsafe { HandleValue::from_marked_location(self.get_unsafe()) })
@@ -1134,9 +1135,9 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Record<T> {
 #[crate::allow_unrooted_interior]
 pub struct AsyncSequence {
     /// The iterable object.
-    object: crate::gc::handle::MozHeap<JSVal>,
+    object: Heap<crate::native::Value>,
     /// The iterator factory method (Symbol.asyncIterator or Symbol.iterator).
-    method: crate::gc::handle::MozHeap<JSVal>,
+    method: Heap<crate::native::Value>,
     /// `true` if the method came from `Symbol.asyncIterator`; `false` for
     /// `Symbol.iterator` (sync, needs wrapping via `CreateAsyncFromSyncIterator`).
     is_async: bool,
@@ -1182,13 +1183,9 @@ impl FromJSVal<'_> for AsyncSequence {
                 .get_property_by_id(scope, async_iter_id)
                 .map_err(|_| ConversionError::ExnPending)?;
             if !method_val.is_null_or_undefined() {
-                let object = crate::gc::handle::MozHeap::default();
-                object.set(val.get());
-                let method = crate::gc::handle::MozHeap::default();
-                method.set(method_val.get());
                 return Ok(AsyncSequence {
-                    object,
-                    method,
+                    object: Heap::from(val.get()),
+                    method: Heap::from(method_val.get()),
                     is_async: true,
                 });
             }
@@ -1204,13 +1201,9 @@ impl FromJSVal<'_> for AsyncSequence {
                 .get_property_by_id(scope, iter_id)
                 .map_err(|_| ConversionError::ExnPending)?;
             if !method_val.is_null_or_undefined() {
-                let object = crate::gc::handle::MozHeap::default();
-                object.set(val.get());
-                let method = crate::gc::handle::MozHeap::default();
-                method.set(method_val.get());
                 return Ok(AsyncSequence {
-                    object,
-                    method,
+                    object: Heap::from(val.get()),
+                    method: Heap::from(method_val.get()),
                     is_async: false,
                 });
             }
@@ -1245,7 +1238,7 @@ impl<'s> ToJSVal<'s> for ptr::NonNull<JSObject> {
 }
 
 // https://heycam.github.io/webidl/#es-object
-impl<'s> ToJSVal<'s> for Heap<*mut JSObject> {
+impl<'s> ToJSVal<'s> for MozHeap<*mut JSObject> {
     #[inline]
     fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
         let mut rval = scope.root_value_mut(UndefinedValue());

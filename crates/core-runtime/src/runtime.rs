@@ -17,10 +17,10 @@ use crate::{
 };
 use js::{
     engine::{JSEngine, JSEngineHandle, MozJSRuntime, RealmOptions},
-    gc::scope::Scope,
-    heap::{Heap, Trace},
+    gc::{handle::Heap, scope::Scope},
+    heap::Trace,
     native::JS_GetRuntime,
-    native::{JSObject, JSRuntime, JSTracer},
+    native::{JSRuntime, JSTracer},
     prelude::RootScope,
     Object,
 };
@@ -135,7 +135,7 @@ pub struct Runtime {
     /// Default global, declared before `mozjs_rt` so it drops first.
     /// `Heap::drop()` fires a GC write barrier, which requires the
     /// SpiderMonkey context to still be alive.
-    default_global: Heap<*mut JSObject>,
+    default_global: Heap<js::object::Object>,
     mozjs_rt: UnsafeCell<MozJSRuntime>,
     /// Registry of live [`InvocationState`](crate::invocation::InvocationState)
     /// instances. The GC trace callback iterates this to trace all event
@@ -255,7 +255,7 @@ impl Runtime {
         // `default_global` to be set so it can find and trace the ClassRegistry's
         // Heap entries — otherwise compaction moves prototype objects without
         // updating the Heap pointers, leaving them stale.
-        self.default_global.set(scope.global().handle().get());
+        self.default_global.set(scope.global());
 
         unsafe {
             event_loop::timer::install_timer_globals(&scope, scope.global());
@@ -273,7 +273,8 @@ impl Runtime {
 
     /// Enter the default global realm and return a rooting scope for it.
     pub fn default_global(&self) -> RootScope<'_, js::gc::scope::EnteredRealm> {
-        let global = NonNull::new(self.default_global.get()).expect("default global should be set");
+        let global =
+            NonNull::new(self.default_global.as_ptr()).expect("default global should be set");
         RootScope::new_with_realm(self.mozjs_rt_mut().cx(), global)
     }
 
@@ -386,7 +387,7 @@ impl Drop for Runtime {
 ///
 /// `data` is a raw pointer to the `Runtime` (passed via
 /// `add_extra_gc_roots_tracer`). SpiderMonkey calls this during GC so
-/// that the stored `Heap<*mut JSObject>` is properly traced and updated,
+/// that the stored `Heap<Object>` is properly traced and updated,
 /// and the class registry's prototype Heaps are kept in sync with
 /// compacting GC.
 ///
@@ -399,7 +400,7 @@ unsafe extern "C" fn trace_runtime_cb(trc: *mut JSTracer, data: *mut c_void) {
     let rt = &*(data as *const Runtime);
     rt.default_global.trace(trc);
     // Trace the per-global class registry stored in the global's reserved slot.
-    let global = rt.default_global.get();
+    let global = rt.default_global.as_ptr();
     if !global.is_null() {
         js::class::trace_class_registry_for_global(trc, global);
     }

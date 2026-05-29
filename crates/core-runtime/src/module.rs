@@ -46,8 +46,9 @@ use std::ptr;
 
 use js::conversion::ToJSVal;
 use js::error::EvalError;
+use js::gc::handle::Heap;
 use js::gc::scope::Scope;
-use js::heap::{Heap, Trace};
+use js::heap::Trace;
 use js::module_raw::{transform_str_to_source_text, CompileOptionsWrapper, SetModulePrivate};
 use js::native::{HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
 use js::prelude::{HandleValue, RootScope};
@@ -113,7 +114,7 @@ pub trait NativeModule: 'static {
 /// Traced by `trace_module_registry`, so allowed to contain unrooted interior.
 #[js::allow_unrooted_interior]
 struct ModuleEntry {
-    module_obj: Box<Heap<*mut JSObject>>,
+    module_obj: Heap<js::object::Object>,
 }
 
 thread_local! {
@@ -192,7 +193,7 @@ unsafe extern "C" fn module_resolve_hook(
     let cached = MODULE_REGISTRY.with(|reg| {
         reg.borrow()
             .get(&specifier)
-            .map(|entry| entry.module_obj.get())
+            .map(|entry| entry.module_obj.as_ptr())
     });
     if let Some(obj) = cached {
         return obj;
@@ -247,7 +248,7 @@ unsafe fn resolve_file_module(
     let cached = MODULE_REGISTRY.with(|reg| {
         reg.borrow()
             .get(&canonical_key)
-            .map(|entry| entry.module_obj.get())
+            .map(|entry| entry.module_obj.as_ptr())
     });
     if let Some(obj) = cached {
         return Ok(obj);
@@ -279,14 +280,16 @@ unsafe fn resolve_file_module(
         reg.insert(
             canonical_key.clone(),
             ModuleEntry {
-                module_obj: Heap::boxed(module_obj),
+                // SAFETY: module_obj was just compiled and null-checked above.
+                module_obj: unsafe { Heap::from_raw(module_obj) },
             },
         );
         if specifier != canonical_key {
             reg.insert(
                 specifier.to_string(),
                 ModuleEntry {
-                    module_obj: Heap::boxed(module_obj),
+                    // SAFETY: module_obj was just compiled and null-checked above.
+                    module_obj: unsafe { Heap::from_raw(module_obj) },
                 },
             );
         }
@@ -390,7 +393,8 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
         reg.borrow_mut().insert(
             T::NAME.to_string(),
             ModuleEntry {
-                module_obj: Heap::boxed(module.as_raw()),
+                // SAFETY: module was just compiled and is non-null.
+                module_obj: unsafe { Heap::from_raw(module.as_raw()) },
             },
         );
     });
