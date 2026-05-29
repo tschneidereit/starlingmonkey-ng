@@ -82,6 +82,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use event_listener::{Event, EventListener};
+use js::error::ExnThrown;
 use js::native::JSTracer;
 
 use js::gc::scope::Scope;
@@ -612,9 +613,8 @@ pub async unsafe fn run_to_completion<S, F>(
 /// allowing the event loop to continue. This is called by [`EventLoop::step`]
 /// when a task or microtask throws.
 fn handle_and_clear_exception(scope: &Scope<'_>) {
-    eprintln!("[event_loop] Uncaught exception:");
-    // TODO: Extract and format the exception value properly.
-    // For now, just indicate that an exception occurred.
+    let e = ExnThrown::capture(scope);
+    eprintln!("[event_loop] Uncaught exception: {e}");
     js::exception::clear(scope);
 }
 
@@ -632,7 +632,7 @@ impl EventLoop {
     pub fn step(&mut self, scope: &Scope<'_>) -> StepOutcome {
         // 1. Assert that there are no pending microtasks.
         debug_assert!(
-            !js::exception::is_pending(scope),
+            !js::jobs::has_pending_jobs(scope),
             "Pending microtask detected"
         );
 
@@ -717,6 +717,10 @@ impl Default for EventLoop {
 /// promise reactions or other microtasks. It drains the job queue and
 /// then clears the weak-reference set for the current "turn".
 pub fn run_microtasks(scope: &Scope<'_>) {
+    debug_assert!(
+        !js::exception::is_pending(scope),
+        "Cannot run microtasks with pending exception"
+    );
     jobs::run_jobs(scope);
     // Weak-ref set is cleared by run_jobs.
 }

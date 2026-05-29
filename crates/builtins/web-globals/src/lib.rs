@@ -16,6 +16,7 @@ pub mod base64;
 pub mod dom_exception;
 pub mod encoding;
 mod structured_clone;
+pub mod worker_location;
 
 pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
     // Note: the Rust console builtin isn't currently used: we use the C++ version for now.
@@ -24,4 +25,5 @@ pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
     encoding::add_to_global(scope, global);
     base64::base64_globals::add_to_global(scope, global);
     structured_clone::structured_clone_globals::add_to_global(scope, global);
+    worker_location::add_to_global(scope, global);
 }

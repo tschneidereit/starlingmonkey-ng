@@ -48,7 +48,7 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::{ptr, slice};
+use std::{mem, ptr, slice};
 
 use crate::error::{throw_type_error, ExnThrown, ThrowException};
 use crate::heap::Trace;
@@ -746,18 +746,54 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Vec<T> {
     }
 }
 
-/// Rooting guard for the iterator field of ForOfIterator.
-/// Behaves like RootedGuard (roots on creation, unroots on drop),
-/// but borrows and allows access to the whole ForOfIterator, so
-/// that methods on ForOfIterator can still be used through it.
+/// Returns `true` if `val` is an object with a non-null `@@iterator` method.
+///
+/// This is the WebIDL §3.2.25 distinguishability check used when a union type
+/// includes a sequence type: when the input has `@@iterator`, sequence
+/// conversion is selected.
+///
+/// Returns `Ok(false)` for non-objects. Returns `Err(ExnPending)` if reading
+/// the `@@iterator` property throws.
+pub fn is_iterable_value(scope: &Scope<'_>, val: HandleValue<'_>) -> Result<bool, ConversionError> {
+    if !val.is_object() {
+        return Ok(false);
+    }
+    let obj = unsafe {
+        crate::Object::from_raw(scope, val.to_object()).ok_or(ConversionError::ExnPending)?
+    };
+    let iter_key = crate::symbol::get_well_known_key(scope, crate::native::SymbolCode::iterator);
+    let iter_id = scope.root_id(iter_key);
+    let method = obj
+        .get_property_by_id(scope, iter_id)
+        .map_err(|_| ConversionError::ExnPending)?;
+    Ok(!method.is_null_or_undefined())
+}
+
+/// Rooting guard for a [`ForOfIterator`].
+///
+/// Behaves like `RootedGuard` (roots on creation, unroots on drop), but borrows
+/// the whole `ForOfIterator` so its methods remain usable through `root`. Both
+/// of the struct's `Rooted` fields are registered, and the borrow keeps the
+/// struct pinned for as long as the guard lives — a registered `Rooted` records
+/// its own address on the context root stack and must not move.
+///
+/// This type is deliberately private: the only sound way to obtain a rooted,
+/// initialized iterator is [`for_of`], which owns the backing storage.
 struct ForOfIteratorGuard<'s> {
     root: &'s mut ForOfIterator,
 }
 
 impl<'s> ForOfIteratorGuard<'s> {
     fn new(scope: &'s Scope<'_>, root: &'s mut ForOfIterator) -> Self {
+        let cx = unsafe { scope.cx_mut().raw_cx() };
+        // SpiderMonkey's `ForOfIterator` declares both `iterator` and
+        // `nextMethod` as `Rooted` members. We build the struct by hand, so
+        // both fields must be registered on the context's root stack;
+        // otherwise a moving GC between `init` and `next` leaves `nextMethod`
+        // pointing at a forwarded cell.
         unsafe {
-            Rooted::add_to_root_stack(&raw mut root.iterator, scope.cx_mut().raw_cx());
+            Rooted::add_to_root_stack(&raw mut root.iterator, cx);
+            Rooted::add_to_root_stack(&raw mut root.nextMethod, cx);
         }
         ForOfIteratorGuard { root }
     }
@@ -766,8 +802,69 @@ impl<'s> ForOfIteratorGuard<'s> {
 impl<'s> Drop for ForOfIteratorGuard<'s> {
     fn drop(&mut self) {
         unsafe {
+            self.root.nextMethod.remove_from_root_stack();
             self.root.iterator.remove_from_root_stack();
         }
+    }
+}
+
+/// Build the backing [`ForOfIterator`] in an inert, unrooted state.
+///
+/// The result must be pinned (bound to a stack slot and rooted via
+/// [`ForOfIteratorGuard`]) before any of its methods are called.
+fn for_of_iterator_slot(scope: &Scope<'_>) -> ForOfIterator {
+    // Depending on the LLVM version, bindgen may add a trailing padding field
+    // to `ForOfIterator`. Start from a zeroed instance and assign the named
+    // fields, so any such padding stays zero without being named explicitly.
+    let mut it: ForOfIterator = unsafe { mem::zeroed() };
+    it.cx_ = unsafe { scope.cx_mut().raw_cx() };
+    it.iterator = RootedObject::new_unrooted(ptr::null_mut());
+    it.nextMethod = RootedValue::new_unrooted(JSVal { asBits_: 0 });
+    it.index = u32::MAX; // NOT_ARRAY
+    it
+}
+
+/// Drive the ES `for...of` protocol over `value`, calling `f` for each element.
+///
+/// This owns the backing [`ForOfIterator`], so it pins and roots it correctly
+/// for the whole iteration; callers never touch the raw rooting machinery and
+/// cannot observe a half-rooted iterator. SpiderMonkey's array fast path is
+/// preserved, since the engine's own iterator is used.
+///
+/// Returns `Ok(true)` once iteration completes, or `Ok(false)` if `value` is
+/// not iterable. `f` receives a handle to a value slot that is reused across
+/// iterations, so it must consume each element before returning.
+pub fn for_of<'s, E: From<ConversionError>>(
+    scope: &'s Scope<'s>,
+    value: HandleValue<'s>,
+    mut f: impl FnMut(HandleValue<'s>) -> Result<(), E>,
+) -> Result<bool, E> {
+    let mut slot = for_of_iterator_slot(scope);
+    let guard = ForOfIteratorGuard::new(scope, &mut slot);
+
+    if !unsafe {
+        guard.root.init(
+            value.into(),
+            ForOfIterator_NonIterableBehavior::AllowNonIterable,
+        )
+    } {
+        return Err(ConversionError::ExnPending.into());
+    }
+
+    if guard.root.iterator.data.is_null() {
+        return Ok(false);
+    }
+
+    let mut out = scope.root_value_mut(UndefinedValue());
+    loop {
+        let mut done = false;
+        if !unsafe { guard.root.next(out.reborrow().into(), &mut done) } {
+            return Err(ConversionError::ExnPending.into());
+        }
+        if done {
+            return Ok(true);
+        }
+        f(out.handle())?;
     }
 }
 
@@ -783,47 +880,14 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Vec<T
             return Err(ConversionError::Failure(c"Value is not an object".into()));
         }
 
-        // Depending on the version of LLVM in use, bindgen can end up including
-        // a padding field in the ForOfIterator. To support multiple versions of
-        // LLVM that may not have the same fields as a result, we create an empty
-        // iterator instance and initialize a non-empty instance using the empty
-        // instance as a base value.
-        let mut iterator = ForOfIterator {
-            cx_: unsafe { scope.cx_mut().raw_cx() },
-            iterator: RootedObject::new_unrooted(ptr::null_mut()),
-            nextMethod: RootedValue::new_unrooted(JSVal { asBits_: 0 }),
-            index: u32::MAX, // NOT_ARRAY
-        };
-        let iterator = ForOfIteratorGuard::new(scope, &mut iterator);
-        let iterator: &mut ForOfIterator = &mut *iterator.root;
-
-        if !unsafe {
-            iterator.init(
-                val.into(),
-                ForOfIterator_NonIterableBehavior::AllowNonIterable,
-            )
-        } {
-            return Err(ConversionError::ExnPending);
-        }
-
-        if iterator.iterator.data.is_null() {
-            return Err(ConversionError::Failure(c"Value is not iterable".into()));
-        }
-
         let mut ret = vec![];
+        let iterable = for_of(scope, val, |elem| {
+            ret.push(T::from_jsval(scope, elem, option.clone())?);
+            Ok::<_, ConversionError>(())
+        })?;
 
-        let mut val = scope.root_value_mut(UndefinedValue());
-        loop {
-            let mut done = false;
-            if !unsafe { iterator.next(val.reborrow().into(), &mut done) } {
-                return Err(ConversionError::ExnPending);
-            }
-
-            if done {
-                break;
-            }
-
-            ret.push(T::from_jsval(scope, val.handle(), option.clone())?);
+        if !iterable {
+            return Err(ConversionError::Failure(c"Value is not iterable".into()));
         }
 
         Ok(ret)
