@@ -73,8 +73,6 @@
 //! ```
 
 pub mod interest;
-pub mod promise;
-pub mod spawner;
 pub mod timer;
 
 use std::cell::RefCell;
