@@ -428,7 +428,7 @@ impl EventLoop {
     /// is removed from the event loop — the caller must `run()` it.
     pub fn pop_ready(&mut self) -> Option<(TaskId, Box<dyn Task>)> {
         let pos = self.tasks.iter().position(|e| e.ready)?;
-        let entry = self.tasks.swap_remove(pos);
+        let entry = self.tasks.remove(pos);
         Some((entry.id, entry.task))
     }
 
