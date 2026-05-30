@@ -11,7 +11,7 @@ use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::{
     parse_macro_input, Data, DeriveInput, Fields, FnArg, Ident, ImplItem, ImplItemFn, ItemEnum,
-    ItemImpl, ItemStruct, LitStr, Pat, ReturnType, Token, Type, Visibility,
+    ItemImpl, ItemStruct, LitBool, LitStr, Pat, ReturnType, Token, Type, Visibility,
 };
 
 // ============================================================================
@@ -64,6 +64,34 @@ impl Parse for AttrOpts {
                 proc_macro2::Span::call_site(),
                 "`js_proto` and `extends` are mutually exclusive",
             ));
+        }
+        Ok(opts)
+    }
+}
+
+/// Parsed derive options from attribute arguments for WebIDL dictionaries.
+struct DictOpts {
+    derive_fromjs: bool,
+    derive_tojs: bool,
+}
+
+impl Parse for DictOpts {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut opts = Self {
+            derive_fromjs: true,
+            derive_tojs: false,
+        };
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            let _: Token![=] = input.parse()?;
+            match key.to_string().as_str() {
+                "derive_fromjs" => opts.derive_fromjs = input.parse::<LitBool>()?.value,
+                "derive_tojs" => opts.derive_tojs = input.parse::<LitBool>()?.value,
+                _ => return Err(syn::Error::new(key.span(), "unknown option")),
+            }
+            if !input.is_empty() {
+                let _: Token![,] = input.parse()?;
+            }
         }
         Ok(opts)
     }
@@ -1643,7 +1671,8 @@ fn parse_method_info(
 
     // Determine return style
     let is_constructor = matches!(kind, MethodKind::Constructor);
-    let return_style = classify_return_style(&fn_item.sig.output, Some(type_name), is_constructor);
+    let return_style =
+        classify_return_style(&fn_item.sig.output, Some(type_name), is_constructor, is_raw);
 
     // Compute JS name: custom name overrides, otherwise default to camelCase.
     // For setters, derive the property name by stripping "set_" prefix.
@@ -2005,6 +2034,7 @@ fn classify_return_style(
     output: &ReturnType,
     type_name: Option<&Ident>,
     is_constructor: bool,
+    is_raw: bool,
 ) -> ReturnStyle {
     match output {
         ReturnType::Default => ReturnStyle::Void,
@@ -2021,7 +2051,14 @@ fn classify_return_style(
             if is_promise_type(ty) {
                 ReturnStyle::Promise
             } else if is_result_unit_jserror(&ty_str) {
-                ReturnStyle::Raw
+                // A `Result<(), ExnThrown>` method that takes `&CallArgs` sets its
+                // own return value (Raw); otherwise the `Ok(())` value is the
+                // undefined return, like any other `Result<(), E>`.
+                if is_raw {
+                    ReturnStyle::Raw
+                } else {
+                    ReturnStyle::ResultVoid
+                }
             } else if let Some(has_inner_value) = is_result_type(&ty_str) {
                 if has_inner_value {
                     ReturnStyle::ResultValue
@@ -2748,7 +2785,7 @@ pub fn jsmodule(attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 }
 
-                let return_style = classify_return_style(&fn_item.sig.output, None, false);
+                let return_style = classify_return_style(&fn_item.sig.output, None, false, is_raw);
 
                 fn_exports.push(ModuleFnExport {
                     fn_name: fn_name.clone(),
@@ -3035,7 +3072,7 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 }
 
-                let return_style = classify_return_style(&fn_item.sig.output, None, false);
+                let return_style = classify_return_style(&fn_item.sig.output, None, false, is_raw);
 
                 fn_exports.push(ModuleFnExport {
                     fn_name: fn_name.clone(),
@@ -3334,7 +3371,7 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
                     }
                 }
 
-                let return_style = classify_return_style(&fn_item.sig.output, None, false);
+                let return_style = classify_return_style(&fn_item.sig.output, None, false, is_raw);
 
                 fn_exports.push(ModuleFnExport {
                     fn_name: fn_name.clone(),
@@ -3539,13 +3576,9 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn webidl_dictionary(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let opts = parse_macro_input!(attr as DictOpts);
     let input = parse_macro_input!(item as ItemStruct);
-    process_webidl_dictionary(input)
-}
-
-/// Shared implementation for `#[webidl_dictionary]`.
-fn process_webidl_dictionary(input: ItemStruct) -> TokenStream {
     let struct_name = &input.ident;
     let vis = &input.vis;
     let attrs = &input.attrs;
@@ -3637,7 +3670,9 @@ fn process_webidl_dictionary(input: ItemStruct) -> TokenStream {
     // For structs with a lifetime, the FromJSVal impl binds the struct's
     // lifetime to the scope's lifetime. For structs without a lifetime,
     // we use a fresh 's.
-    let from_jsval_impl = if lifetime.is_some() {
+    let from_jsval_impl = if !opts.derive_fromjs {
+        quote! {}
+    } else if lifetime.is_some() {
         quote! {
             impl<#scope_lifetime> ::js::conversion::FromJSVal<#scope_lifetime> for #struct_name<#scope_lifetime> {
                 type Config = ();
@@ -3706,6 +3741,31 @@ fn process_webidl_dictionary(input: ItemStruct) -> TokenStream {
             }
         }
     };
+    let to_jsval_impl = if !opts.derive_tojs {
+        quote! {}
+    } else if lifetime.is_some() {
+        quote! {
+            impl<#scope_lifetime> ::js::conversion::ToJSVal<#scope_lifetime> for #struct_name<#scope_lifetime> {
+                fn to_jsval(
+                    &self,
+                    scope: &#scope_lifetime ::js::prelude::Scope<#scope_lifetime>,
+                ) -> Result<::js::prelude::HandleValue<#scope_lifetime>, ::js::conversion::ConversionError> {
+                    unreachable!("ToJSVal is not implemented for WebIDL dictionaries");
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl<#scope_lifetime> ::js::conversion::ToJSVal<#scope_lifetime> for #struct_name {
+                fn to_jsval(
+                    &self,
+                    scope: &#scope_lifetime ::js::prelude::Scope<#scope_lifetime>,
+                ) -> Result<::js::prelude::HandleValue<#scope_lifetime>, ::js::conversion::ConversionError> {
+                    unreachable!("ToJSVal is not implemented for WebIDL dictionaries");
+                }
+            }
+        }
+    };
 
     // Strip #[webidl(...)] attributes from the output struct's fields.
     let mut output_struct = input.clone();
@@ -3746,6 +3806,8 @@ fn process_webidl_dictionary(input: ItemStruct) -> TokenStream {
         }
 
         #from_jsval_impl
+
+        #to_jsval_impl
     };
 
     output.into()
