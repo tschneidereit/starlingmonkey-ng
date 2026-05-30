@@ -9,7 +9,7 @@
     "status": "PASS"
   },
   "URL interface object length": {
-    "status": "FAIL"
+    "status": "PASS"
   },
   "URL interface object name": {
     "status": "PASS"
@@ -27,10 +27,10 @@
     "status": "PASS"
   },
   "URL interface: operation parse(USVString, optional USVString)": {
-    "status": "FAIL"
+    "status": "PASS"
   },
   "URL interface: operation canParse(USVString, optional USVString)": {
-    "status": "FAIL"
+    "status": "PASS"
   },
   "URL interface: attribute href": {
     "status": "PASS"

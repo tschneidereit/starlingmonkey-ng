@@ -62,7 +62,7 @@ pub unsafe fn init_class<'s>(
     fs: *const JSFunctionSpec,
     static_ps: *const JSPropertySpec,
     static_fs: *const JSFunctionSpec,
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
+) -> Result<Object<'s>, ExnThrown> {
     let obj = wrappers2::JS_InitClass(
         scope.cx_mut(),
         global,
@@ -76,9 +76,7 @@ pub unsafe fn init_class<'s>(
         static_ps,
         static_fs,
     );
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
+    Object::from_raw(scope, obj).ok_or(ExnThrown)
 }
 
 /// Create a new global object.
@@ -93,12 +91,10 @@ pub unsafe fn new_global_object<'s>(
     principals: *mut JSPrincipals,
     hook_option: OnNewGlobalHookOption,
     options: *const RealmOptions,
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
+) -> Result<Object<'s>, ExnThrown> {
     let obj =
         wrappers2::JS_NewGlobalObject(scope.cx_mut(), clasp, principals, hook_option, options);
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
+    Object::from_raw(scope, obj).ok_or(ExnThrown)
 }
 
 /// Initialize the standard classes on a global object.
@@ -513,12 +509,18 @@ const CLASS_REGISTRY_SLOT: u32 = JSCLASS_GLOBAL_SLOT_COUNT;
 #[crate::allow_unrooted_interior]
 struct ClassRegistry {
     map: HashMap<TypeId, Box<MozHeap<*mut JSObject>>>,
+    /// Shared getter functions for `[LegacyUnforgeable]` accessors, keyed by the
+    /// getter's native function pointer so the same `JSFunction` is reused for
+    /// every instance (WebIDL requires the getter to be identical across
+    /// instances). Traced like prototypes.
+    unforgeable_getters: HashMap<usize, Box<MozHeap<*mut JSObject>>>,
 }
 
 impl ClassRegistry {
     fn new() -> Self {
         Self {
             map: HashMap::new(),
+            unforgeable_getters: HashMap::new(),
         }
     }
 
@@ -534,10 +536,25 @@ impl ClassRegistry {
         self.map.get(&type_id).map(|h| h.get())
     }
 
-    /// Trace all prototype heap values so moving GC can update them.
+    fn get_unforgeable_getter(&self, key: usize) -> Option<*mut JSObject> {
+        self.unforgeable_getters.get(&key).map(|h| h.get())
+    }
+
+    fn set_unforgeable_getter(&mut self, key: usize, func: *mut JSObject) {
+        let entry = self
+            .unforgeable_getters
+            .entry(key)
+            .or_insert_with(|| MozHeap::boxed(ptr::null_mut()));
+        entry.set(func);
+    }
+
+    /// Trace all prototype and getter heap values so moving GC can update them.
     #[crate::allow_unrooted]
     unsafe fn trace(&self, trc: *mut JSTracer) {
         for heap in self.map.values() {
+            heap.trace(trc);
+        }
+        for heap in self.unforgeable_getters.values() {
             heap.trace(trc);
         }
     }
@@ -886,6 +903,21 @@ pub trait ClassDef: Sized + Trace + 'static {
         builder
     }
 
+    /// Whether this interface inherits from a parent interface via WebIDL
+    /// `extends` (as opposed to `js_proto`, which only borrows a built-in
+    /// prototype). When true, the interface object's [[Prototype]] is chained to
+    /// the parent interface object. Set by the `extends` macro option.
+    const INHERITS_INTERFACE: bool = false;
+
+    /// The constructor function's `length`: its number of required arguments.
+    ///
+    /// The `#[jsclass]`/`#[webidl_interface]` macros override this to delegate
+    /// to the constructor registrar in monomorphic context (where autoref
+    /// specialization can see the `#[jsmethods]` impl). The default is 0.
+    fn constructor_nargs() -> u32 {
+        0
+    }
+
     /// Called during GC finalization, before the Rust data is dropped.
     ///
     /// Use `#[destructor]` in `#[jsmethods]` to define this.
@@ -947,6 +979,15 @@ pub trait ClassDef: Sized + Trace + 'static {
     /// Set automatically by `#[webidl_interface]`.
     const CONSTANTS_ON_PROTOTYPE: bool = false;
 
+    /// Whether `new Foo()` is allowed from JavaScript. When `false`, the
+    /// generated constructor throws a `TypeError` ("Illegal constructor"),
+    /// matching a WebIDL interface with no `constructor` operation (e.g.
+    /// `AbortSignal`, which is created only via static factory methods).
+    /// Internal factory paths (`Foo::new(scope)`) are unaffected.
+    ///
+    /// Set by the `no_ctor` macro option.
+    const CONSTRUCTIBLE: bool = true;
+
     /// Post-construction hook called after the private data has been stored
     /// on the JS object.
     ///
@@ -957,6 +998,19 @@ pub trait ClassDef: Sized + Trace + 'static {
     ///
     /// Use `#[post_init]` in `#[jsmethods]` to define this.
     fn post_init(_scope: &Scope<'_>, _obj: Object<'_>, _args: &CallArgs) -> Result<(), ExnThrown> {
+        Ok(())
+    }
+
+    /// Install this interface's `[LegacyUnforgeable]` accessors as own,
+    /// non-configurable properties on a freshly constructed instance.
+    ///
+    /// WebIDL §3.7.4 requires unforgeable members to live on each instance
+    /// rather than the prototype, with a getter shared across instances. The
+    /// proc macro generates an override for interfaces that declare
+    /// `#[getter(unforgeable)]`; it installs its own attributes and then chains
+    /// to the parent's via `extends`. Runs inside `generic_constructor` after
+    /// `post_init`. The default is a no-op.
+    fn install_unforgeable(_scope: &Scope<'_>, _obj: Object<'_>) -> Result<(), ExnThrown> {
         Ok(())
     }
 
@@ -1152,6 +1206,10 @@ pub unsafe fn register_class<'s, T: ClassDef>(
 
     let class: &'static JSClass = T::class();
 
+    // The constructor function's `length` is its number of required arguments
+    // (WebIDL §3.7.1), carried from the `#[constructor]` by `ClassDef`.
+    let ctor_nargs = T::constructor_nargs();
+
     // Register inheritance information (parent accessor functions)
     T::register_inheritance();
     let parent_proto = scope.root_object_mut(T::parent_prototype(scope));
@@ -1165,7 +1223,7 @@ pub unsafe fn register_class<'s, T: ClassDef>(
         parent_proto.handle(),
         class.name,
         Some(generic_constructor::<T>),
-        0,
+        ctor_nargs,
         properties_ptr,
         methods_ptr,
         static_properties_ptr,
@@ -1173,43 +1231,54 @@ pub unsafe fn register_class<'s, T: ClassDef>(
     )
     .expect("init_class failed");
 
-    register_prototype::<T>(global, proto.get());
+    let ctor = Object::from_raw(
+        scope,
+        wrappers2::JS_GetConstructor(scope.cx_mut(), proto.handle()),
+    )
+    .expect("Constructor was just installed");
+
+    register_prototype::<T>(global, proto.handle().get());
 
     // Define Symbol.toStringTag if the class specifies one.
     if !T::TO_STRING_TAG.is_empty() {
-        define_to_string_tag(scope, proto, T::TO_STRING_TAG);
+        define_to_string_tag(scope, proto.handle(), T::TO_STRING_TAG);
     }
 
     // Install constants on the constructor (and optionally the prototype).
     if !constants.is_empty() {
-        let name = T::NAME_CSTR;
-        let ctor_val = global
-            .get_property(scope, name)
-            .expect("getting ctor property failed after init_class");
-        let ctor_obj = Object::from_value(scope, ctor_val.get())
-            .expect("constructor not found on global after init_class");
         let attrs = (crate::class_spec::JSPROP_READONLY
             | crate::class_spec::JSPROP_ENUMERATE
             | crate::class_spec::JSPROP_PERMANENT) as std::ffi::c_uint;
         for &(const_name, value) in &constants {
-            ctor_obj
-                .define_property(scope, const_name, &value, attrs)
+            ctor.define_property(scope, const_name, &value, attrs)
                 .expect("failed to define constant on constructor");
         }
 
         // WebIDL §3.7.3: constants are also defined on the prototype.
         if T::CONSTANTS_ON_PROTOTYPE {
-            let proto_obj =
-                Object::from_handle(proto).expect("prototype not found after init_class");
             for &(const_name, value) in &constants {
-                proto_obj
+                proto
                     .define_property(scope, const_name, &value, attrs)
                     .expect("failed to define constant on prototype");
             }
         }
     }
 
-    Object::from_raw(scope, proto.get()).unwrap()
+    // WebIDL §3.7: an inherited interface's interface object has its
+    // [[Prototype]] set to the inherited interface's interface object (so that
+    // e.g. `Object.getPrototypeOf(CustomEvent) === Event`). `init_class` only
+    // links the prototype chain, so set the constructor chain here.
+    if T::INHERITS_INTERFACE && !parent_proto.is_null() {
+        let parent_ctor = Object::from_raw(
+            scope,
+            wrappers2::JS_GetConstructor(scope.cx_mut(), parent_proto.handle()),
+        )
+        .expect("Parent constructor exists since parent_proto is non-null");
+        ctor.set_prototype(scope, parent_ctor.handle())
+            .expect("failed to set constructor prototype chain");
+    }
+
+    proto
 }
 
 /// Generic constructor callback for all ClassDef types.
@@ -1226,6 +1295,13 @@ unsafe extern "C" fn generic_constructor<T: ClassDef>(
 
     if !args.is_constructing() {
         crate::error::throw_type_error(&scope, c"Constructor must be called with 'new'");
+        return false;
+    }
+
+    // Interfaces with no WebIDL `constructor` operation are not constructible
+    // from JS.
+    if !T::CONSTRUCTIBLE {
+        crate::error::throw_type_error(&scope, c"Illegal constructor");
         return false;
     }
 
@@ -1250,6 +1326,11 @@ unsafe extern "C" fn generic_constructor<T: ClassDef>(
             // final heap location, so GC write barriers are registered at
             // stable addresses.
             if T::post_init(&scope, obj, &args).is_err() {
+                return false;
+            }
+
+            // Install `[LegacyUnforgeable]` own accessors (e.g. Event.isTrusted).
+            if T::install_unforgeable(&scope, obj).is_err() {
                 return false;
             }
 
@@ -1589,6 +1670,25 @@ autoref_reg!(
     __PostInitReg,
     "Autoref specialization helper for post-construction initialization."
 );
+autoref_reg!(
+    __UnforgeableReg,
+    "Autoref specialization helper for [LegacyUnforgeable] accessor installation."
+);
+
+/// Trait for `[LegacyUnforgeable]` accessor installation via autoref
+/// specialization. The blanket impl on `&__UnforgeableReg<T>` is a no-op;
+/// `#[jsmethods]` provides the real impl on `__UnforgeableReg<T>` when an
+/// interface declares `#[getter(unforgeable)]`.
+#[doc(hidden)]
+pub trait __UnforgeableRegistrar<T: ClassDef> {
+    fn install(&self, scope: &Scope<'_>, obj: Object<'_>) -> Result<(), ExnThrown>;
+}
+
+impl<T: ClassDef> __UnforgeableRegistrar<T> for &__UnforgeableReg<T> {
+    fn install(&self, _scope: &Scope<'_>, _obj: Object<'_>) -> Result<(), ExnThrown> {
+        Ok(())
+    }
+}
 
 /// Trait for constructor registration via autoref specialization.
 /// The blanket impl on `&__CtorReg<T>` panics; `#[jsmethods]` provides
@@ -1596,11 +1696,22 @@ autoref_reg!(
 #[doc(hidden)]
 pub trait __ConstructorRegistrar<T: ClassDef> {
     fn construct(&self, scope: &Scope<'_>, args: &CallArgs) -> Result<T, ExnThrown>;
+
+    /// The number of required (non-optional, non-variadic) constructor
+    /// arguments, used as the constructor function's `length`. The `#[jsmethods]`
+    /// impl on `__CtorReg<T>` overrides this.
+    fn nargs(&self) -> u32 {
+        0
+    }
 }
 
 impl<T: ClassDef> __ConstructorRegistrar<T> for &__CtorReg<T> {
     fn construct(&self, _scope: &Scope<'_>, _args: &CallArgs) -> Result<T, ExnThrown> {
         panic!("No #[constructor] defined. Use #[jsmethods] with #[constructor] to define one.");
+    }
+
+    fn nargs(&self) -> u32 {
+        0
     }
 }
 
@@ -1710,6 +1821,71 @@ pub unsafe fn create_instance_with<'s, T: ClassDef>(
         let data = init(*obj);
         set_private(obj.as_raw(), data);
     })
+}
+
+// ---------------------------------------------------------------------------
+// LegacyUnforgeable accessors
+// ---------------------------------------------------------------------------
+
+/// Define a `[LegacyUnforgeable]` read-only accessor as an own, enumerable,
+/// non-configurable property on `obj`, using a getter function shared across
+/// all instances (cached per global, keyed by the native pointer).
+///
+/// Used by the proc-macro-generated `ClassDef::install_unforgeable`.
+pub fn define_unforgeable_accessor(
+    scope: &Scope<'_>,
+    obj: Object<'_>,
+    name: &std::ffi::CStr,
+    getter: crate::native::JSNative,
+) -> Result<(), ExnThrown> {
+    let key = getter.map(|f| f as usize).unwrap_or(0);
+    let global = scope.global();
+    let name_str = name.to_str().map_err(|_| ExnThrown)?;
+
+    // Reuse the cached getter if present; otherwise create it once and store it.
+    let getter_obj = {
+        let registry = unsafe { get_or_init_class_registry(global.as_raw()) };
+        match registry.get_unforgeable_getter(key) {
+            Some(f) if !f.is_null() => f,
+            _ => {
+                // WebIDL names accessor getter functions "get <attribute>".
+                let getter_name =
+                    std::ffi::CString::new(format!("get {name_str}")).map_err(|_| ExnThrown)?;
+                let func = crate::Function::new(scope, getter, 0, 0, &getter_name)?;
+                let raw = func.as_raw();
+                registry.set_unforgeable_getter(key, raw);
+                raw
+            }
+        }
+    };
+
+    // SAFETY: `getter_obj` is a live JSFunction object — either freshly created
+    // and rooted above, or read from the traced registry cache.
+    let getter_handle = unsafe { Object::from_raw(scope, getter_obj) }.ok_or(ExnThrown)?;
+
+    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let desc = crate::native::PropertyDescriptor {
+        _bitfield_align_1: [0; 0],
+        _bitfield_1: crate::native::PropertyDescriptor::new_bitfield_1(
+            true,  // hasConfigurable
+            false, // configurable (unforgeable)
+            true,  // hasEnumerable
+            true,  // enumerable
+            false, // hasWritable
+            false, // writable
+            false, // hasValue
+            true,  // hasGetter
+            false, // hasSetter
+            false, // resolving
+        ),
+        getter_: getter_handle.as_raw(),
+        setter_: ptr::null_mut(),
+        value_: mozjs::jsval::UndefinedValue(),
+    });
+
+    let js_str = crate::string::Str::from_str(scope, name_str)?;
+    let id = crate::id::string_to_id(scope, js_str.handle())?;
+    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let id_rooted = id);
+    obj.define_property_by_id(scope, id_rooted.handle(), desc.handle())
 }
 
 // ---------------------------------------------------------------------------

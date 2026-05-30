@@ -261,7 +261,8 @@ impl<T: JSType> Heap<T> {
     /// which would go stale. The returned pointer must not be dereferenced or
     /// stored; root it via [`get`](Heap::get) for any actual use.
     ///
-    /// Safety: the returned pointer is not rooted. Use `get` wherever possible.
+    /// # Safety
+    /// The returned pointer is not rooted. Use `get` wherever possible.
     pub unsafe fn as_ptr(&self) -> *mut JSObject {
         self.heap.get()
     }
