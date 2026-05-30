@@ -501,6 +501,14 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
                 self.0.as_raw()
             }
 
+            pub fn eq_stack(&self, other: &::js::gc::handle::Stack<'_, #inner_name>) -> bool {
+                self.0.as_raw() == other.as_raw()
+            }
+
+            pub fn eq_heap(&self, other: &::js::gc::handle::Heap<#inner_name>) -> bool {
+                unsafe { self.0.as_raw() == other.as_ptr() }
+            }
+
             /// Get a shared reference to the private Rust data.
             pub fn data(&self) -> &#inner_name {
                 unsafe { self.0.data().unwrap_unchecked() }

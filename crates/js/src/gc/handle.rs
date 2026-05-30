@@ -260,8 +260,21 @@ impl<T: JSType> Heap<T> {
     /// therefore correct across collections — unlike caching a raw pointer,
     /// which would go stale. The returned pointer must not be dereferenced or
     /// stored; root it via [`get`](Heap::get) for any actual use.
-    pub fn as_ptr(&self) -> *mut JSObject {
+    ///
+    /// Safety: the returned pointer is not rooted. Use `get` wherever possible.
+    pub unsafe fn as_ptr(&self) -> *mut JSObject {
         self.heap.get()
+    }
+
+    pub fn eq_stack(&self, other: &Stack<'_, T>) -> bool {
+        unsafe { self.as_ptr() == other.as_raw() }
+    }
+}
+
+impl<T: JSType> std::cmp::Eq for Heap<T> {}
+impl<T: JSType> std::cmp::PartialEq for Heap<T> {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { self.as_ptr() == other.as_ptr() }
     }
 }
 
