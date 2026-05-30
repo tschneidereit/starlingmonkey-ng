@@ -1873,6 +1873,18 @@ fn is_option_type(ty: &Type) -> bool {
     false
 }
 
+/// Detect the WebIDL `any` type, represented in signatures as `Value` or
+/// `HandleValue`. For `any`, `null` is an ordinary value (distinct from a
+/// missing argument), unlike object/dictionary types where `null` means absent.
+fn is_any_value_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return seg.ident == "Value" || seg.ident == "HandleValue";
+        }
+    }
+    false
+}
+
 /// Check whether a type is a none-optional `Heap<T>`.
 fn is_bare_heap_type(ty: &Type) -> bool {
     if let Type::Path(tp) = ty {
@@ -2059,9 +2071,10 @@ fn gen_arg_extractions(
                 // Per WebIDL, only `undefined` (or a missing argument) maps to
                 // None for `optional` non-nullable primitive types.  `null`
                 // should be converted through the normal path (e.g. null →
-                // "null" for strings, null → 0 for integers).  For other types
-                // (dictionaries, objects), null is treated as absent.
-                let absent_check = if is_primitive_webidl_type(&inner) {
+                // "null" for strings, null → 0 for integers). The same holds for
+                // the `any` type, where `null` is an ordinary value. For other
+                // types (dictionaries, objects), null is treated as absent.
+                let absent_check = if is_primitive_webidl_type(&inner) || is_any_value_type(&inner) {
                     quote! { __val.is_undefined() }
                 } else {
                     quote! { __val.is_undefined() || __val.is_null() }
