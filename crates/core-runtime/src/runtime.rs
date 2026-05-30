@@ -273,8 +273,10 @@ impl Runtime {
 
     /// Enter the default global realm and return a rooting scope for it.
     pub fn default_global(&self) -> RootScope<'_, js::gc::scope::EnteredRealm> {
-        let global =
-            NonNull::new(self.default_global.as_ptr()).expect("default global should be set");
+        // SAFETY: Raw JSObject pointer is used to create a rooting scope.
+        let global = unsafe {
+            NonNull::new(self.default_global.as_ptr()).expect("default global should be set")
+        };
         RootScope::new_with_realm(self.mozjs_rt_mut().cx(), global)
     }
 
