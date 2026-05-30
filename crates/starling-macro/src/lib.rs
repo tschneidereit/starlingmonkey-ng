@@ -34,6 +34,12 @@ struct AttrOpts {
     /// `@@toStringTag` property to the given string value (non-writable,
     /// non-enumerable, configurable — per WebIDL §3.7.6).
     to_string_tag: Option<String>,
+    /// Bare flag: `#[webidl_interface(no_ctor)]` marks an interface
+    /// with no exposed `constructor` operation, so `new Foo()` throws TypeError.
+    no_ctor: bool,
+    /// Bare flag: `#[getter(unforgeable)]` marks a `[LegacyUnforgeable]`
+    /// accessor — installed per-instance as an own property, not on the prototype.
+    unforgeable: bool,
 }
 
 impl Parse for AttrOpts {
@@ -43,9 +49,26 @@ impl Parse for AttrOpts {
             extends: None,
             js_proto: None,
             to_string_tag: None,
+            no_ctor: false,
+            unforgeable: false,
         };
         while !input.is_empty() {
             let key: Ident = input.parse()?;
+            // Bare flags take no `= value`.
+            if key == "no_ctor" {
+                opts.no_ctor = true;
+                if !input.is_empty() {
+                    let _: Token![,] = input.parse()?;
+                }
+                continue;
+            }
+            if key == "unforgeable" {
+                opts.unforgeable = true;
+                if !input.is_empty() {
+                    let _: Token![,] = input.parse()?;
+                }
+                continue;
+            }
             let _: Token![=] = input.parse()?;
             match key.to_string().as_str() {
                 "name" => opts.name = Some(input.parse::<LitStr>()?.value()),
@@ -233,6 +256,11 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
     // methods if extends or js_proto is set.
     let parent_classdef_methods = if let Some(ref inner_parent_name) = inner_parent {
         quote! {
+            // `extends` is real WebIDL interface inheritance (unlike `js_proto`,
+            // which only borrows a built-in prototype), so the interface object's
+            // [[Prototype]] chains to the parent interface object.
+            const INHERITS_INTERFACE: bool = true;
+
             fn parent_prototype(scope: &::js::gc::scope::Scope<'_>) -> *mut ::js::native::JSObject {
                 ::js::class::get_prototype_for::<#inner_parent_name>(scope)
                     .unwrap_or(::std::ptr::null_mut())
@@ -305,6 +333,39 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         }
     } else {
         quote! {}
+    };
+
+    // Generate CONSTRUCTIBLE override when `no_ctor` is set.
+    let constructible_const = if opts.no_ctor {
+        quote! {
+            const CONSTRUCTIBLE: bool = false;
+        }
+    } else {
+        quote! {}
+    };
+
+    // Generate the `install_unforgeable` ClassDef method. It chains to the
+    // parent interface (for inherited unforgeable accessors) and delegates own
+    // accessors to the `__UnforgeableRegistrar` provided by `#[jsmethods]`.
+    let install_unforgeable_method = {
+        let parent_call = if let Some(ref inner_parent_name) = inner_parent {
+            quote! {
+                <#inner_parent_name as ::js::class::ClassDef>::install_unforgeable(scope, obj)?;
+            }
+        } else {
+            quote! {}
+        };
+        quote! {
+            fn install_unforgeable(
+                scope: &::js::gc::scope::Scope<'_>,
+                obj: ::js::Object<'_>,
+            ) -> Result<(), ::js::error::ExnThrown> {
+                #parent_call
+                use ::js::class::__UnforgeableRegistrar;
+                let reg = ::js::class::__UnforgeableReg::<Self>::new();
+                (&reg).install(scope, obj)
+            }
+        }
     };
 
     // Generate debug_assert_fully_initialized override if the struct has
@@ -427,6 +488,12 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
                 (&reg).construct(scope, args)
             }
 
+            fn constructor_nargs() -> u32 {
+                use ::js::class::__ConstructorRegistrar;
+                let reg = ::js::class::__CtorReg::<Self>::new();
+                (&reg).nargs()
+            }
+
             fn register_class_methods(
                 builder: ::js::class::ClassBuilder<Self>,
             ) -> ::js::class::ClassBuilder<Self> {
@@ -471,6 +538,8 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             #to_string_tag_const
             #has_error_data_const
             #constants_on_prototype_const
+            #constructible_const
+            #install_unforgeable_method
             #debug_assert_method
         }
 
@@ -640,9 +709,11 @@ enum MethodKind {
         js_name: String,
         nargs: usize,
     },
-    /// Property getter — becomes a JSPropertySpec accessor.
+    /// Property getter — becomes a JSPropertySpec accessor, or a per-instance
+    /// own accessor when `unforgeable` (`[LegacyUnforgeable]`).
     Getter {
         js_name: String,
+        unforgeable: bool,
     },
     /// Property setter — becomes a JSPropertySpec accessor.
     Setter {
@@ -811,12 +882,15 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                     });
                     false
                 } else if attr.path().is_ident("getter") {
-                    // Parse optional (name = "...")
+                    // Parse optional (name = "...", unforgeable)
+                    let mut unforgeable = false;
                     if let Ok(opts) = attr.parse_args::<AttrOpts>() {
                         custom_rename = opts.name;
+                        unforgeable = opts.unforgeable;
                     }
                     kind = Some(MethodKind::Getter {
                         js_name: String::new(), // filled below
+                        unforgeable,
                     });
                     false
                 } else if attr.path().is_ident("setter") {
@@ -908,6 +982,9 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
         setter_native: Option<Ident>,
     }
     let mut property_map: Vec<PropertyEntry> = Vec::new();
+    // `[LegacyUnforgeable]` getters: (JS name, native getter ident). Installed
+    // per-instance via `install_unforgeable` rather than on the prototype.
+    let mut unforgeable_getters: Vec<(String, Ident)> = Vec::new();
 
     fn find_or_create_property<'a>(
         map: &'a mut Vec<PropertyEntry>,
@@ -960,19 +1037,35 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                 builder_calls.push(builder_call);
             }
             MethodKind::StaticMethod { js_name, nargs } => {
-                let (native_fn, builder_call) =
-                    gen_method_native(method, &inner_name, &type_name, js_name, *nargs, 0, false);
+                let (native_fn, builder_call) = gen_method_native(
+                    method,
+                    &inner_name,
+                    &type_name,
+                    js_name,
+                    *nargs,
+                    config.method_flags,
+                    false,
+                );
                 native_fns.push(native_fn);
                 static_builder_calls.push(builder_call);
             }
-            MethodKind::Getter { js_name } => {
+            MethodKind::Getter {
+                js_name,
+                unforgeable,
+            } => {
                 let native_fn =
                     gen_accessor_native(method, &inner_name, &type_name, js_name, true, on_newtype);
                 let native_name =
                     format_ident!("__getter_{inner_name}_{}", method.fn_item.sig.ident);
                 native_fns.push(native_fn);
-                let entry = find_or_create_property(&mut property_map, js_name);
-                entry.getter_native = Some(native_name);
+                if *unforgeable {
+                    // Installed per-instance as an own property, not on the
+                    // prototype, so it is not added to `property_map`.
+                    unforgeable_getters.push((js_name.clone(), native_name));
+                } else {
+                    let entry = find_or_create_property(&mut property_map, js_name);
+                    entry.getter_native = Some(native_name);
+                }
             }
             MethodKind::Setter { js_name } => {
                 let native_fn = gen_accessor_native(
@@ -1065,6 +1158,24 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
         input.items = retained;
     }
 
+    // The constructor's `length` is its number of required arguments: the
+    // params that are neither `Option<T>` (optional) nor `RestArgs` (variadic).
+    let ctor_nargs: u32 = methods
+        .iter()
+        .find(|m| matches!(m.kind, MethodKind::Constructor))
+        .map(|m| {
+            m.params
+                .iter()
+                .filter(|(_, ty)| !is_option_type(ty))
+                .count() as u32
+        })
+        .unwrap_or(0);
+    let ctor_nargs_method = quote! {
+        fn nargs(&self) -> u32 {
+            #ctor_nargs
+        }
+    };
+
     // Generate the ConstructorRegistrar impl (on FooImpl)
     let ctor_impl = if setup_ctor_info.is_some() {
         // Setup-style: return FooImpl::default(). The real constructor logic
@@ -1078,6 +1189,7 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                 ) -> Result<#inner_name, ::js::error::ExnThrown> {
                     Ok(#inner_name::default())
                 }
+                #ctor_nargs_method
             }
         }
     } else if let Some(body) = constructor_body {
@@ -1090,6 +1202,7 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                 ) -> Result<#inner_name, ::js::error::ExnThrown> {
                     unsafe { #body }
                 }
+                #ctor_nargs_method
             }
         }
     } else {
@@ -1102,6 +1215,7 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                 ) -> Result<#inner_name, ::js::error::ExnThrown> {
                     panic!("{} builtin can't be instantiated directly", stringify!(#type_name));
                 }
+                #ctor_nargs_method
             }
         }
     };
@@ -1343,6 +1457,9 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                         ));
                         #setup_call_in_new
                         #new_post_init_call
+                        // Install [LegacyUnforgeable] accessors, as the JS
+                        // constructor path does (this factory bypasses it).
+                        <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __obj)?;
                         #[cfg(debug_assertions)]
                         if let Some(__data) = ::js::class::get_private::<#inner_name>(__obj.as_raw()) {
                             ::js::class::ClassDef::debug_assert_fully_initialized(__data);
@@ -1461,6 +1578,9 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                                 let obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
                                     #call
                                 })?;
+                                // Install [LegacyUnforgeable] accessors, as the JS
+                                // constructor path does (this factory bypasses it).
+                                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, obj)?;
                                 #[cfg(debug_assertions)]
                                 if let Some(__data) = ::js::class::get_private::<#inner_name>(obj.as_raw()) {
                                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
@@ -1538,6 +1658,7 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                             let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
                                 #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
                             })?;
+                            <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __obj)?;
                             let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
                             Ok(#type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn))))
                         }
@@ -1547,6 +1668,43 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
             _ => continue,
         }
     }
+
+    // Generate the UnforgeableRegistrar impl when the interface has
+    // `#[getter(unforgeable)]` accessors (e.g. Event.isTrusted). These are
+    // installed per-instance by `ClassDef::install_unforgeable`.
+    let unforgeable_impl = if unforgeable_getters.is_empty() {
+        quote! {}
+    } else {
+        let installs: Vec<_> = unforgeable_getters
+            .iter()
+            .map(|(js_name, native_name)| {
+                let name_bytes = format!("{js_name}\0");
+                let name_cstr = proc_macro2::Literal::byte_string(name_bytes.as_bytes());
+                quote! {
+                    ::js::class::define_unforgeable_accessor(
+                        scope,
+                        obj,
+                        unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(#name_cstr) },
+                        Some(#native_name),
+                    )?;
+                }
+            })
+            .collect();
+        quote! {
+            impl ::js::class::__UnforgeableRegistrar<#inner_name>
+                for ::js::class::__UnforgeableReg<#inner_name>
+            {
+                fn install(
+                    &self,
+                    scope: &::js::gc::scope::Scope<'_>,
+                    obj: ::js::Object<'_>,
+                ) -> Result<(), ::js::error::ExnThrown> {
+                    #(#installs)*
+                    Ok(())
+                }
+            }
+        }
+    };
 
     // Emit stack newtype methods in a separate `impl<'s> Foo<'s>` block.
     // These methods receive `self` as the stack newtype, giving direct
@@ -1594,6 +1752,9 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
 
         // Generated post-init registrar
         #post_init_impl
+
+        // Generated unforgeable-accessor registrar
+        #unforgeable_impl
 
         // Generated inherent new() constructor + add_to_global on stack newtype
         #ctor_new_impl
@@ -1700,7 +1861,7 @@ fn parse_method_info(
             *n = js_name;
             *na = nargs;
         }
-        MethodKind::Getter { js_name: n } => {
+        MethodKind::Getter { js_name: n, .. } => {
             *n = js_name;
         }
         MethodKind::Setter { js_name: n } => {

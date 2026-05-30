@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
+
+//! Abort signal algorithms from <https://dom.spec.whatwg.org>.
+
+use std::time::{Duration, Instant};
+
+use core_runtime::event_loop::{with_active_event_loop, Task, TaskId};
+use js::error::ExnThrown;
+use js::gc::handle::Heap;
+use js::gc::scope::Scope;
+use js::heap::Trace;
+use js::native::HandleValueArray;
+use js::native::JSTracer;
+use js::prelude::HandleValue;
+use js::prelude::ToJSVal;
+
+use super::abort_signal::{AbortAlgorithm, AbortSignal, AbortSignalImpl};
+use crate::events;
+use crate::events::event_target::EventTarget;
+
+/// Create a new `DOMException` with the given message and name as a JS value
+/// without throwing it.
+fn create_dom_exception<'s>(
+    scope: &'s Scope<'_>,
+    message: &str,
+    name: &str,
+) -> Result<HandleValue<'s>, ExnThrown> {
+    let name_val = name.to_jsval(scope).map_err(|_| ExnThrown)?;
+    let msg_val = message.to_jsval(scope).map_err(|_| ExnThrown)?;
+
+    let argv = [msg_val.get(), name_val.get()];
+    let hva = HandleValueArray {
+        length_: 2,
+        elements_: argv.as_ptr(),
+    };
+
+    let global = scope.global();
+    let ctor_val = global
+        .get_property(scope, c"DOMException")
+        .map_err(|_| ExnThrown)?;
+
+    let exception = js::Function::construct(scope, ctor_val, &hva)?;
+    exception.to_jsval(scope).map_err(|_| ExnThrown)
+}
+
+/// Create a new "AbortError" DOMException as a JS value without throwing it.
+pub(crate) fn create_abort_error<'s>(scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
+    create_dom_exception(scope, "signal is aborted without reason", "AbortError")
+}
+
+/// Create a new "TimeoutError" DOMException as a JS value without throwing it.
+fn create_timeout_error<'s>(scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
+    create_dom_exception(scope, "signal timed out", "TimeoutError")
+}
+
+/// <https://dom.spec.whatwg.org/#create-a-dependent-abort-signal>
+///
+/// To create a dependent abort signal, given a list `signals`, returns a new
+/// `AbortSignal` that is aborted when any of the source signals is aborted.
+///
+/// The spec keeps the source/dependent links as *weak* references to avoid
+/// keeping signals alive through each other. Here they are ordinary traced
+/// `Heap` fields: because they are traced as object slots rather than held as
+/// independent roots, SpiderMonkey's cycle-collecting GC still reclaims an
+/// unreachable source↔dependent pair. The only difference is `WeakRef`/
+/// `FinalizationRegistry` observability, which is not exercised by the enabled
+/// tests; revisit this if the GC-oriented abort-signal tests get enabled.
+pub(crate) fn create_dependent_abort_signal<'r>(
+    scope: &'r Scope<'_>,
+    signals: &[AbortSignal<'_>],
+) -> Result<AbortSignal<'r>, ExnThrown> {
+    // Step 1: Let _resultSignal_ be a new object implementing _signalInterface_ using _realm_.
+    let result = AbortSignal::new(scope)?;
+
+    // Step 2: `For each` _signal_ of _signals_: if _signal_ is `aborted`, then set
+    //         _resultSignal_'s `abort reason` to _signal_'s `abort reason` and return
+    //         _resultSignal_.
+    for signal in signals {
+        if !signal.data().abort_reason.is_undefined() {
+            let reason = signal.data().abort_reason.get(scope);
+            result.data_mut().abort_reason.set(reason.get());
+            return Ok(result);
+        }
+    }
+
+    // Step 3: Set _resultSignal_'s `dependent` to true.
+    result.data_mut().dependent = true;
+
+    // Step 4: `For each` _signal_ of _signals_:
+    for signal in signals {
+        // Step 4.1: If _signal_'s `dependent` is false, then:
+        if !signal.data().dependent {
+            // Step 4.1.1: `Append` _signal_ to _resultSignal_'s `source signals`.
+            result.data_mut().source_signals.push(Heap::from(*signal));
+            // Step 4.1.2: `Append` _resultSignal_ to _signal_'s `dependent signals`.
+            signal.data_mut().dependent_signals.push(Heap::from(result));
+        } else {
+            // Step 4.2: Otherwise, `for each` _sourceSignal_ of _signal_'s `source signals`:
+            let sources: Vec<AbortSignal<'_>> = signal
+                .data()
+                .source_signals
+                .iter()
+                .map(|h| h.get(scope))
+                .collect();
+            for source in sources {
+                // Step 4.2.1: `Assert`: _sourceSignal_ is not `aborted` and not `dependent`.
+                // Step 4.2.2: If _resultSignal_'s `source signals` `does not contain`
+                //             _sourceSignal_, then:
+                let contains = result
+                    .data()
+                    .source_signals
+                    .iter()
+                    .any(|h| source.eq_heap(h));
+                if !contains {
+                    // Step 4.2.2.1: `Append` _sourceSignal_ to _resultSignal_'s `source signals`.
+                    result.data_mut().source_signals.push(Heap::from(source));
+                    // Step 4.2.2.2: `Append` _resultSignal_ to _sourceSignal_'s
+                    //               `dependent signals`.
+                    source.data_mut().dependent_signals.push(Heap::from(result));
+                }
+            }
+        }
+    }
+
+    // Step 5: Return _resultSignal_.
+    Ok(result)
+}
+
+/// <https://dom.spec.whatwg.org/#abortsignal-signal-abort>
+///
+/// To signal abort, given an AbortSignal object signal and an optional reason.
+pub(crate) fn signal_abort(
+    scope: &Scope<'_>,
+    signal: &AbortSignal<'_>,
+    reason: Option<HandleValue<'_>>,
+) -> Result<(), ExnThrown> {
+    // Step 1: If _signal_ is `aborted`, then return.
+    if !signal.data().abort_reason.is_undefined() {
+        return Ok(());
+    }
+
+    // Step 2: Set _signal_'s `abort reason` to _reason_ if it is given; otherwise to a new
+    //         "``AbortError``" ``DOMException``.
+    match reason {
+        Some(r) => signal.data_mut().abort_reason.set(r.get()),
+        None => {
+            let err_val = create_abort_error(scope)?;
+            signal.data_mut().abort_reason.set(err_val.get());
+        }
+    }
+
+    // Step 3: Let _dependentSignalsToAbort_ be a new `list`.
+    let mut dependent_signals_to_abort: Vec<AbortSignal<'_>> = Vec::new();
+
+    // Step 4: `For each` _dependentSignal_ of _signal_'s `dependent signals`: If
+    //         _dependentSignal_ is not `aborted`: Set _dependentSignal_'s `abort reason` to
+    //         _signal_'s `abort reason`. `Append` _dependentSignal_ to _dependentSignalsToAbort_.
+    let abort_reason = signal.data().abort_reason.get(scope);
+    let dependents: Vec<AbortSignal<'_>> = signal
+        .data()
+        .dependent_signals
+        .iter()
+        .map(|h| h.get(scope))
+        .collect();
+    for dependent in dependents {
+        if dependent.data().abort_reason.is_undefined() {
+            dependent.data_mut().abort_reason.set(abort_reason.get());
+            dependent_signals_to_abort.push(dependent);
+        }
+    }
+
+    // Step 5: `Run the abort steps` for _signal_.
+    run_the_abort_steps(scope, signal)?;
+
+    // Step 6: `For each` _dependentSignal_ of _dependentSignalsToAbort_, `run the abort steps` for
+    //         _dependentSignal_.
+    for dependent in &dependent_signals_to_abort {
+        run_the_abort_steps(scope, dependent)?;
+    }
+
+    Ok(())
+}
+
+/// <https://dom.spec.whatwg.org/#abortsignal-abort-algorithms>
+///
+/// To run the abort steps for an AbortSignal signal.
+fn run_the_abort_steps(scope: &Scope<'_>, signal: &AbortSignal<'_>) -> Result<(), ExnThrown> {
+    // Step 1: `For each` _algorithm_ of _signal_'s `abort algorithms`: run _algorithm_.
+    // Each registered algorithm removes the event listener it was added for.
+    let algorithms: Vec<AbortAlgorithm> = signal.data_mut().abort_algorithms.drain(..).collect();
+    for algo in algorithms {
+        let target = algo.held.get::<EventTarget<'_>>(scope);
+        events::algorithms::remove_an_event_listener_by_id(&target, algo.listener_id);
+    }
+
+    // Step 2: `Empty` _signal_'s `abort algorithms`.
+    // (Already emptied by `drain` above.)
+
+    // Step 3: `Fire an event` named ``abort`` at _signal_.
+    events::algorithms::fire_an_event(scope, "abort", signal)?;
+    Ok(())
+}
+
+/// <https://dom.spec.whatwg.org/#abortsignal-aborted>
+///
+/// Whether the signal is aborted (its abort reason is set).
+pub(crate) fn is_aborted(signal: &AbortSignal<'_>) -> bool {
+    !signal.data().abort_reason.is_undefined()
+}
+
+/// <https://dom.spec.whatwg.org/#abortsignal-add>
+///
+/// Add an abort algorithm to `signal` that removes the event listener
+/// identified by `listener_id` from `target` when the signal is aborted. This
+/// is the abort step registered by "add an event listener" step 6.
+pub(crate) fn add_listener_removal_algorithm(
+    signal: &AbortSignal<'_>,
+    target: &EventTarget<'_>,
+    listener_id: u64,
+) {
+    // Step 1: If _signal_ is `aborted`, then return.
+    if is_aborted(signal) {
+        return;
+    }
+
+    // Step 2: `Append` _algorithm_ to _signal_'s `abort algorithms`.
+    signal.data_mut().abort_algorithms.push(AbortAlgorithm {
+        held: Heap::from(*target),
+        listener_id,
+    });
+}
+
+/// An event-loop task that signals abort on a timeout signal with a
+/// "TimeoutError" `DOMException`.
+///
+/// Holding the signal here keeps it alive until the timeout fires, satisfying
+/// the spec requirement that there be a strong reference from the global to a
+/// timeout signal for the duration of the timeout.
+///
+/// The `Heap` is kept alive by the event loop tracing live tasks via
+/// [`Task::trace`], so the task itself lives unrooted in the task queue.
+#[js::allow_unrooted_interior]
+struct AbortTimeoutTask {
+    signal: Heap<AbortSignalImpl>,
+}
+
+impl Task for AbortTimeoutTask {
+    fn kind(&self) -> &'static str {
+        "abort-timeout"
+    }
+
+    fn run(self: Box<Self>, scope: &Scope<'_>, _id: TaskId) -> Result<(), ()> {
+        let signal: AbortSignal<'_> = self.signal.get(scope);
+        // `Queue a global task` [...] to `signal abort` given _signal_ and a new
+        // "``TimeoutError``" ``DOMException``.
+        let reason = create_timeout_error(scope).map_err(|_| ())?;
+        signal_abort(scope, &signal, Some(reason)).map_err(|_| ())
+    }
+
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn trace(&self, trc: *mut JSTracer) {
+        unsafe {
+            self.signal.trace(trc);
+        }
+    }
+}
+
+/// <https://dom.spec.whatwg.org/#dom-abortsignal-timeout>
+///
+/// Steps 2-3 of the `AbortSignal.timeout()` algorithm: run steps after a
+/// timeout to signal abort with a "TimeoutError" DOMException.
+pub(crate) fn schedule_abort_timeout(
+    _scope: &Scope<'_>,
+    signal: &AbortSignal<'_>,
+    milliseconds: f64,
+) {
+    let delay = Duration::from_millis(milliseconds.max(0.0) as u64);
+    let deadline = Instant::now() + delay;
+    let task = AbortTimeoutTask {
+        signal: Heap::from(*signal),
+    };
+    // If there is no active event loop (e.g. outside a runtime invocation), the
+    // timeout simply never fires.
+    with_active_event_loop(|el| {
+        el.queue_timer(Box::new(task), deadline);
+    });
+}

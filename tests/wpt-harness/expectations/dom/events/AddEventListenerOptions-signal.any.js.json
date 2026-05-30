@@ -1,0 +1,35 @@
+{
+  "Passing an AbortSignal to addEventListener options should allow removing a listener": {
+    "status": "PASS"
+  },
+  "Passing an AbortSignal to addEventListener does not prevent removeEventListener": {
+    "status": "PASS"
+  },
+  "Passing an AbortSignal to addEventListener works with the once flag": {
+    "status": "PASS"
+  },
+  "Removing a once listener works with a passed signal": {
+    "status": "PASS"
+  },
+  "Passing an AbortSignal to multiple listeners": {
+    "status": "PASS"
+  },
+  "Passing an AbortSignal to addEventListener works with the capture flag": {
+    "status": "PASS"
+  },
+  "Aborting from a listener does not call future listeners": {
+    "status": "PASS"
+  },
+  "Adding then aborting a listener in another listener does not call it": {
+    "status": "PASS"
+  },
+  "Aborting from a nested listener should remove it": {
+    "status": "PASS"
+  },
+  "Passing null as the signal should throw": {
+    "status": "PASS"
+  },
+  "Passing null as the signal should throw (listener is also null)": {
+    "status": "PASS"
+  }
+}

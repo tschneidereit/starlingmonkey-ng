@@ -15,6 +15,8 @@ pub mod base64;
 // pub mod console;
 pub mod dom_exception;
 pub mod encoding;
+pub mod events;
+pub mod signals;
 mod structured_clone;
 pub mod worker_location;
 
@@ -23,6 +25,8 @@ pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
     // console::console_ns::add_to_global(scope, global);
     dom_exception::DOMException::add_to_global(scope, global);
     encoding::add_to_global(scope, global);
+    events::add_to_global(scope, global);
+    signals::add_to_global(scope, global);
     base64::base64_globals::add_to_global(scope, global);
     structured_clone::structured_clone_globals::add_to_global(scope, global);
     worker_location::add_to_global(scope, global);

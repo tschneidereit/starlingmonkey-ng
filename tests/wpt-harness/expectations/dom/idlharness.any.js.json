@@ -1,0 +1,2273 @@
+{
+  "idl_test setup": {
+    "status": "PASS"
+  },
+  "idl_test validation": {
+    "status": "PASS"
+  },
+  "Partial interface Window: original interface defined": {
+    "status": "PASS"
+  },
+  "Partial interface Window: member names are unique": {
+    "status": "PASS"
+  },
+  "Partial interface Document: member names are unique": {
+    "status": "PASS"
+  },
+  "Partial interface Element: member names are unique": {
+    "status": "PASS"
+  },
+  "Partial interface Document[2]: member names are unique": {
+    "status": "PASS"
+  },
+  "Partial interface Window[2]: member names are unique": {
+    "status": "PASS"
+  },
+  "Document includes NonElementParentNode: member names are unique": {
+    "status": "PASS"
+  },
+  "DocumentFragment includes NonElementParentNode: member names are unique": {
+    "status": "PASS"
+  },
+  "Document includes DocumentOrShadowRoot: member names are unique": {
+    "status": "PASS"
+  },
+  "ShadowRoot includes DocumentOrShadowRoot: member names are unique": {
+    "status": "PASS"
+  },
+  "Document includes ParentNode: member names are unique": {
+    "status": "PASS"
+  },
+  "DocumentFragment includes ParentNode: member names are unique": {
+    "status": "PASS"
+  },
+  "Element includes ParentNode: member names are unique": {
+    "status": "PASS"
+  },
+  "Element includes NonDocumentTypeChildNode: member names are unique": {
+    "status": "PASS"
+  },
+  "CharacterData includes NonDocumentTypeChildNode: member names are unique": {
+    "status": "PASS"
+  },
+  "DocumentType includes ChildNode: member names are unique": {
+    "status": "PASS"
+  },
+  "Element includes ChildNode: member names are unique": {
+    "status": "PASS"
+  },
+  "CharacterData includes ChildNode: member names are unique": {
+    "status": "PASS"
+  },
+  "Element includes Slottable: member names are unique": {
+    "status": "PASS"
+  },
+  "Text includes Slottable: member names are unique": {
+    "status": "PASS"
+  },
+  "Document includes XPathEvaluatorBase: member names are unique": {
+    "status": "PASS"
+  },
+  "XPathEvaluator includes XPathEvaluatorBase: member names are unique": {
+    "status": "PASS"
+  },
+  "Document includes GlobalEventHandlers: member names are unique": {
+    "status": "PASS"
+  },
+  "HTMLElement includes GlobalEventHandlers: member names are unique": {
+    "status": "PASS"
+  },
+  "HTMLElement includes ElementContentEditable: member names are unique": {
+    "status": "PASS"
+  },
+  "HTMLElement includes HTMLOrSVGElement: member names are unique": {
+    "status": "PASS"
+  },
+  "Window includes GlobalEventHandlers: member names are unique": {
+    "status": "PASS"
+  },
+  "Window includes WindowEventHandlers: member names are unique": {
+    "status": "PASS"
+  },
+  "Window includes WindowOrWorkerGlobalScope: member names are unique": {
+    "status": "PASS"
+  },
+  "Window includes AnimationFrameProvider: member names are unique": {
+    "status": "PASS"
+  },
+  "Window includes WindowSessionStorage: member names are unique": {
+    "status": "PASS"
+  },
+  "Window includes WindowLocalStorage: member names are unique": {
+    "status": "PASS"
+  },
+  "Event interface: existence and properties of interface object": {
+    "status": "PASS"
+  },
+  "Event interface object length": {
+    "status": "PASS"
+  },
+  "Event interface object name": {
+    "status": "PASS"
+  },
+  "Event interface: existence and properties of interface prototype object": {
+    "status": "PASS"
+  },
+  "Event interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "PASS"
+  },
+  "Event interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "PASS"
+  },
+  "Event interface: attribute type": {
+    "status": "PASS"
+  },
+  "Event interface: attribute target": {
+    "status": "PASS"
+  },
+  "Event interface: attribute srcElement": {
+    "status": "PASS"
+  },
+  "Event interface: attribute currentTarget": {
+    "status": "PASS"
+  },
+  "Event interface: operation composedPath()": {
+    "status": "PASS"
+  },
+  "Event interface: constant NONE on interface object": {
+    "status": "PASS"
+  },
+  "Event interface: constant NONE on interface prototype object": {
+    "status": "PASS"
+  },
+  "Event interface: constant CAPTURING_PHASE on interface object": {
+    "status": "PASS"
+  },
+  "Event interface: constant CAPTURING_PHASE on interface prototype object": {
+    "status": "PASS"
+  },
+  "Event interface: constant AT_TARGET on interface object": {
+    "status": "PASS"
+  },
+  "Event interface: constant AT_TARGET on interface prototype object": {
+    "status": "PASS"
+  },
+  "Event interface: constant BUBBLING_PHASE on interface object": {
+    "status": "PASS"
+  },
+  "Event interface: constant BUBBLING_PHASE on interface prototype object": {
+    "status": "PASS"
+  },
+  "Event interface: attribute eventPhase": {
+    "status": "PASS"
+  },
+  "Event interface: operation stopPropagation()": {
+    "status": "PASS"
+  },
+  "Event interface: attribute cancelBubble": {
+    "status": "PASS"
+  },
+  "Event interface: operation stopImmediatePropagation()": {
+    "status": "PASS"
+  },
+  "Event interface: attribute bubbles": {
+    "status": "PASS"
+  },
+  "Event interface: attribute cancelable": {
+    "status": "PASS"
+  },
+  "Event interface: attribute returnValue": {
+    "status": "PASS"
+  },
+  "Event interface: operation preventDefault()": {
+    "status": "PASS"
+  },
+  "Event interface: attribute defaultPrevented": {
+    "status": "PASS"
+  },
+  "Event interface: attribute composed": {
+    "status": "PASS"
+  },
+  "Event interface: attribute timeStamp": {
+    "status": "PASS"
+  },
+  "Event interface: operation initEvent(DOMString, optional boolean, optional boolean)": {
+    "status": "PASS"
+  },
+  "Event must be primary interface of new Event(\"foo\")": {
+    "status": "PASS"
+  },
+  "Stringification of new Event(\"foo\")": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"type\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"target\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"srcElement\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"currentTarget\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"composedPath()\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"NONE\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"CAPTURING_PHASE\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"AT_TARGET\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"BUBBLING_PHASE\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"eventPhase\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"stopPropagation()\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"cancelBubble\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"stopImmediatePropagation()\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"bubbles\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"cancelable\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"returnValue\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"preventDefault()\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"defaultPrevented\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"composed\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must have own property \"isTrusted\"": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"timeStamp\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new Event(\"foo\") must inherit property \"initEvent(DOMString, optional boolean, optional boolean)\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: calling initEvent(DOMString, optional boolean, optional boolean) on new Event(\"foo\") with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: existence and properties of interface object": {
+    "status": "PASS"
+  },
+  "CustomEvent interface object length": {
+    "status": "PASS"
+  },
+  "CustomEvent interface object name": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: existence and properties of interface prototype object": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: attribute detail": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: operation initCustomEvent(DOMString, optional boolean, optional boolean, optional any)": {
+    "status": "PASS"
+  },
+  "CustomEvent must be primary interface of new CustomEvent(\"foo\")": {
+    "status": "PASS"
+  },
+  "Stringification of new CustomEvent(\"foo\")": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: new CustomEvent(\"foo\") must inherit property \"detail\" with the proper type": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: new CustomEvent(\"foo\") must inherit property \"initCustomEvent(DOMString, optional boolean, optional boolean, optional any)\" with the proper type": {
+    "status": "PASS"
+  },
+  "CustomEvent interface: calling initCustomEvent(DOMString, optional boolean, optional boolean, optional any) on new CustomEvent(\"foo\") with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"type\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"target\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"srcElement\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"currentTarget\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"composedPath()\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"NONE\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"CAPTURING_PHASE\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"AT_TARGET\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"BUBBLING_PHASE\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"eventPhase\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"stopPropagation()\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"cancelBubble\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"stopImmediatePropagation()\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"bubbles\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"cancelable\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"returnValue\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"preventDefault()\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"defaultPrevented\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"composed\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must have own property \"isTrusted\"": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"timeStamp\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: new CustomEvent(\"foo\") must inherit property \"initEvent(DOMString, optional boolean, optional boolean)\" with the proper type": {
+    "status": "PASS"
+  },
+  "Event interface: calling initEvent(DOMString, optional boolean, optional boolean) on new CustomEvent(\"foo\") with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "EventTarget interface: existence and properties of interface object": {
+    "status": "PASS"
+  },
+  "EventTarget interface object length": {
+    "status": "PASS"
+  },
+  "EventTarget interface object name": {
+    "status": "PASS"
+  },
+  "EventTarget interface: existence and properties of interface prototype object": {
+    "status": "PASS"
+  },
+  "EventTarget interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "PASS"
+  },
+  "EventTarget interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "PASS"
+  },
+  "EventTarget interface: operation addEventListener(DOMString, EventListener?, optional (AddEventListenerOptions or boolean))": {
+    "status": "PASS"
+  },
+  "EventTarget interface: operation removeEventListener(DOMString, EventListener?, optional (EventListenerOptions or boolean))": {
+    "status": "PASS"
+  },
+  "EventTarget interface: operation dispatchEvent(Event)": {
+    "status": "PASS"
+  },
+  "EventTarget must be primary interface of new EventTarget()": {
+    "status": "PASS"
+  },
+  "Stringification of new EventTarget()": {
+    "status": "PASS"
+  },
+  "EventTarget interface: new EventTarget() must inherit property \"addEventListener(DOMString, EventListener?, optional (AddEventListenerOptions or boolean))\" with the proper type": {
+    "status": "PASS"
+  },
+  "EventTarget interface: calling addEventListener(DOMString, EventListener?, optional (AddEventListenerOptions or boolean)) on new EventTarget() with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "EventTarget interface: new EventTarget() must inherit property \"removeEventListener(DOMString, EventListener?, optional (EventListenerOptions or boolean))\" with the proper type": {
+    "status": "PASS"
+  },
+  "EventTarget interface: calling removeEventListener(DOMString, EventListener?, optional (EventListenerOptions or boolean)) on new EventTarget() with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "EventTarget interface: new EventTarget() must inherit property \"dispatchEvent(Event)\" with the proper type": {
+    "status": "PASS"
+  },
+  "EventTarget interface: calling dispatchEvent(Event) on new EventTarget() with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "EventListener interface: existence and properties of interface object": {
+    "status": "PASS"
+  },
+  "EventListener interface: existence and properties of interface prototype object": {
+    "status": "PASS"
+  },
+  "EventListener interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "PASS"
+  },
+  "EventListener interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "PASS"
+  },
+  "EventListener interface: operation handleEvent(Event)": {
+    "status": "PASS"
+  },
+  "AbortController interface: existence and properties of interface object": {
+    "status": "PASS"
+  },
+  "AbortController interface object length": {
+    "status": "PASS"
+  },
+  "AbortController interface object name": {
+    "status": "PASS"
+  },
+  "AbortController interface: existence and properties of interface prototype object": {
+    "status": "PASS"
+  },
+  "AbortController interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "PASS"
+  },
+  "AbortController interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "PASS"
+  },
+  "AbortController interface: attribute signal": {
+    "status": "PASS"
+  },
+  "AbortController interface: operation abort(optional any)": {
+    "status": "PASS"
+  },
+  "AbortController must be primary interface of new AbortController()": {
+    "status": "PASS"
+  },
+  "Stringification of new AbortController()": {
+    "status": "PASS"
+  },
+  "AbortController interface: new AbortController() must inherit property \"signal\" with the proper type": {
+    "status": "PASS"
+  },
+  "AbortController interface: new AbortController() must inherit property \"abort(optional any)\" with the proper type": {
+    "status": "PASS"
+  },
+  "AbortController interface: calling abort(optional any) on new AbortController() with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: existence and properties of interface object": {
+    "status": "PASS"
+  },
+  "AbortSignal interface object length": {
+    "status": "PASS"
+  },
+  "AbortSignal interface object name": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: existence and properties of interface prototype object": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: operation abort(optional any)": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: operation timeout(unsigned long long)": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: operation any(sequence<AbortSignal>)": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: attribute aborted": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: attribute reason": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: operation throwIfAborted()": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: attribute onabort": {
+    "status": "PASS"
+  },
+  "AbortSignal must be primary interface of new AbortController().signal": {
+    "status": "PASS"
+  },
+  "Stringification of new AbortController().signal": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: new AbortController().signal must inherit property \"abort(optional any)\" with the proper type": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: calling abort(optional any) on new AbortController().signal with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: new AbortController().signal must inherit property \"timeout(unsigned long long)\" with the proper type": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: calling timeout(unsigned long long) on new AbortController().signal with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: new AbortController().signal must inherit property \"any(sequence<AbortSignal>)\" with the proper type": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: calling any(sequence<AbortSignal>) on new AbortController().signal with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: new AbortController().signal must inherit property \"aborted\" with the proper type": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: new AbortController().signal must inherit property \"reason\" with the proper type": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: new AbortController().signal must inherit property \"throwIfAborted()\" with the proper type": {
+    "status": "PASS"
+  },
+  "AbortSignal interface: new AbortController().signal must inherit property \"onabort\" with the proper type": {
+    "status": "PASS"
+  },
+  "EventTarget interface: new AbortController().signal must inherit property \"addEventListener(DOMString, EventListener?, optional (AddEventListenerOptions or boolean))\" with the proper type": {
+    "status": "PASS"
+  },
+  "EventTarget interface: calling addEventListener(DOMString, EventListener?, optional (AddEventListenerOptions or boolean)) on new AbortController().signal with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "EventTarget interface: new AbortController().signal must inherit property \"removeEventListener(DOMString, EventListener?, optional (EventListenerOptions or boolean))\" with the proper type": {
+    "status": "PASS"
+  },
+  "EventTarget interface: calling removeEventListener(DOMString, EventListener?, optional (EventListenerOptions or boolean)) on new AbortController().signal with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "EventTarget interface: new AbortController().signal must inherit property \"dispatchEvent(Event)\" with the proper type": {
+    "status": "PASS"
+  },
+  "EventTarget interface: calling dispatchEvent(Event) on new AbortController().signal with too few arguments must throw TypeError": {
+    "status": "PASS"
+  },
+  "NodeList interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "NodeList interface object length": {
+    "status": "FAIL"
+  },
+  "NodeList interface object name": {
+    "status": "FAIL"
+  },
+  "NodeList interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeList interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "NodeList interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "NodeList interface: operation item(unsigned long)": {
+    "status": "FAIL"
+  },
+  "NodeList interface: attribute length": {
+    "status": "FAIL"
+  },
+  "NodeList interface: iterable<Node>": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface object length": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface object name": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface: attribute length": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface: operation item(unsigned long)": {
+    "status": "FAIL"
+  },
+  "HTMLCollection interface: operation namedItem(DOMString)": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface object length": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface object name": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface: operation observe(Node, optional MutationObserverInit)": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface: operation disconnect()": {
+    "status": "FAIL"
+  },
+  "MutationObserver interface: operation takeRecords()": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface object length": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface object name": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute type": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute target": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute addedNodes": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute removedNodes": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute previousSibling": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute nextSibling": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute attributeName": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute attributeNamespace": {
+    "status": "FAIL"
+  },
+  "MutationRecord interface: attribute oldValue": {
+    "status": "FAIL"
+  },
+  "Node interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "Node interface object length": {
+    "status": "FAIL"
+  },
+  "Node interface object name": {
+    "status": "FAIL"
+  },
+  "Node interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "Node interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "Node interface: constant ELEMENT_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant ELEMENT_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant ATTRIBUTE_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant ATTRIBUTE_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant TEXT_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant TEXT_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant CDATA_SECTION_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant CDATA_SECTION_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant ENTITY_REFERENCE_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant ENTITY_REFERENCE_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant ENTITY_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant ENTITY_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant PROCESSING_INSTRUCTION_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant PROCESSING_INSTRUCTION_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant COMMENT_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant COMMENT_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_TYPE_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_TYPE_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_FRAGMENT_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_FRAGMENT_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant NOTATION_NODE on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant NOTATION_NODE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute nodeType": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute nodeName": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute baseURI": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute isConnected": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute ownerDocument": {
+    "status": "FAIL"
+  },
+  "Node interface: operation getRootNode(optional GetRootNodeOptions)": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute parentNode": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute parentElement": {
+    "status": "FAIL"
+  },
+  "Node interface: operation hasChildNodes()": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute childNodes": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute firstChild": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute lastChild": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute previousSibling": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute nextSibling": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute nodeValue": {
+    "status": "FAIL"
+  },
+  "Node interface: attribute textContent": {
+    "status": "FAIL"
+  },
+  "Node interface: operation normalize()": {
+    "status": "FAIL"
+  },
+  "Node interface: operation cloneNode(optional boolean)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation isEqualNode(Node?)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation isSameNode(Node?)": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_DISCONNECTED on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_DISCONNECTED on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_PRECEDING on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_PRECEDING on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_FOLLOWING on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_FOLLOWING on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_CONTAINS on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_CONTAINS on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_CONTAINED_BY on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_CONTAINED_BY on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC on interface object": {
+    "status": "FAIL"
+  },
+  "Node interface: constant DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Node interface: operation compareDocumentPosition(Node)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation contains(Node?)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation lookupPrefix(DOMString?)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation lookupNamespaceURI(DOMString?)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation isDefaultNamespace(DOMString?)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation insertBefore(Node, Node?)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation appendChild(Node)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation replaceChild(Node, Node)": {
+    "status": "FAIL"
+  },
+  "Node interface: operation removeChild(Node)": {
+    "status": "FAIL"
+  },
+  "Document interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "Document interface object length": {
+    "status": "FAIL"
+  },
+  "Document interface object name": {
+    "status": "FAIL"
+  },
+  "Document interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "Document interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "Document interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute implementation": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute URL": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute documentURI": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute compatMode": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute characterSet": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute charset": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute inputEncoding": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute contentType": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute doctype": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute documentElement": {
+    "status": "FAIL"
+  },
+  "Document interface: operation getElementsByTagName(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation getElementsByTagNameNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation getElementsByClassName(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createElement(DOMString, optional (DOMString or ElementCreationOptions))": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createElementNS(DOMString?, DOMString, optional (DOMString or ElementCreationOptions))": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createDocumentFragment()": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createTextNode(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createCDATASection(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createComment(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createProcessingInstruction(DOMString, DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation importNode(Node, optional (boolean or ImportNodeOptions))": {
+    "status": "FAIL"
+  },
+  "Document interface: operation adoptNode(Node)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createAttribute(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createAttributeNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createEvent(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createRange()": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createNodeIterator(Node, optional unsigned long, optional NodeFilter?)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createTreeWalker(Node, optional unsigned long, optional NodeFilter?)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation getElementById(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute customElementRegistry": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute children": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute firstElementChild": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute lastElementChild": {
+    "status": "FAIL"
+  },
+  "Document interface: attribute childElementCount": {
+    "status": "FAIL"
+  },
+  "Document interface: operation prepend((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation append((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation replaceChildren((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation moveBefore(Node, Node?)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation querySelector(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation querySelectorAll(DOMString)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createExpression(DOMString, optional XPathNSResolver?)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation createNSResolver(Node)": {
+    "status": "FAIL"
+  },
+  "Document interface: operation evaluate(DOMString, Node, optional XPathNSResolver?, optional unsigned short, optional XPathResult?)": {
+    "status": "FAIL"
+  },
+  "XMLDocument interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "XMLDocument interface object length": {
+    "status": "FAIL"
+  },
+  "XMLDocument interface object name": {
+    "status": "FAIL"
+  },
+  "XMLDocument interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "XMLDocument interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "XMLDocument interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface object length": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface object name": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface: operation createDocumentType(DOMString, DOMString, DOMString)": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface: operation createDocument(DOMString?, DOMString, optional DocumentType?)": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface: operation createHTMLDocument(optional DOMString)": {
+    "status": "FAIL"
+  },
+  "DOMImplementation interface: operation hasFeature()": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "DocumentType interface object length": {
+    "status": "FAIL"
+  },
+  "DocumentType interface object name": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: attribute name": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: attribute publicId": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: attribute systemId": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: operation before((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: operation after((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: operation replaceWith((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "DocumentType interface: operation remove()": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface object length": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface object name": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: operation getElementById(DOMString)": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: attribute children": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: attribute firstElementChild": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: attribute lastElementChild": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: attribute childElementCount": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: operation prepend((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: operation append((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: operation replaceChildren((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: operation moveBefore(Node, Node?)": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: operation querySelector(DOMString)": {
+    "status": "FAIL"
+  },
+  "DocumentFragment interface: operation querySelectorAll(DOMString)": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface object length": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface object name": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: attribute mode": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: attribute delegatesFocus": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: attribute slotAssignment": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: attribute clonable": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: attribute serializable": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: attribute host": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: attribute onslotchange": {
+    "status": "FAIL"
+  },
+  "ShadowRoot interface: attribute customElementRegistry": {
+    "status": "FAIL"
+  },
+  "Element interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "Element interface object length": {
+    "status": "FAIL"
+  },
+  "Element interface object name": {
+    "status": "FAIL"
+  },
+  "Element interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "Element interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "Element interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute namespaceURI": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute prefix": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute localName": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute tagName": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute id": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute className": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute classList": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute slot": {
+    "status": "FAIL"
+  },
+  "Element interface: operation hasAttributes()": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute attributes": {
+    "status": "FAIL"
+  },
+  "Element interface: operation getAttributeNames()": {
+    "status": "FAIL"
+  },
+  "Element interface: operation getAttribute(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation getAttributeNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation setAttribute(DOMString, (TrustedType or DOMString))": {
+    "status": "FAIL"
+  },
+  "Element interface: operation setAttributeNS(DOMString?, DOMString, (TrustedType or DOMString))": {
+    "status": "FAIL"
+  },
+  "Element interface: operation removeAttribute(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation removeAttributeNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation toggleAttribute(DOMString, optional boolean)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation hasAttribute(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation hasAttributeNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation getAttributeNode(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation getAttributeNodeNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation setAttributeNode(Attr)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation setAttributeNodeNS(Attr)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation removeAttributeNode(Attr)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation attachShadow(ShadowRootInit)": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute shadowRoot": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute customElementRegistry": {
+    "status": "FAIL"
+  },
+  "Element interface: operation closest(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation matches(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation webkitMatchesSelector(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation getElementsByTagName(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation getElementsByTagNameNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation getElementsByClassName(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation insertAdjacentElement(DOMString, Element)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation insertAdjacentText(DOMString, DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute children": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute firstElementChild": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute lastElementChild": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute childElementCount": {
+    "status": "FAIL"
+  },
+  "Element interface: operation prepend((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation append((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation replaceChildren((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation moveBefore(Node, Node?)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation querySelector(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation querySelectorAll(DOMString)": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute previousElementSibling": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute nextElementSibling": {
+    "status": "FAIL"
+  },
+  "Element interface: operation before((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation after((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation replaceWith((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "Element interface: operation remove()": {
+    "status": "FAIL"
+  },
+  "Element interface: attribute assignedSlot": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface object length": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface object name": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: attribute length": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: operation item(unsigned long)": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: operation getNamedItem(DOMString)": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: operation getNamedItemNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: operation setNamedItem(Attr)": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: operation setNamedItemNS(Attr)": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: operation removeNamedItem(DOMString)": {
+    "status": "FAIL"
+  },
+  "NamedNodeMap interface: operation removeNamedItemNS(DOMString?, DOMString)": {
+    "status": "FAIL"
+  },
+  "Attr interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "Attr interface object length": {
+    "status": "FAIL"
+  },
+  "Attr interface object name": {
+    "status": "FAIL"
+  },
+  "Attr interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "Attr interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "Attr interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "Attr interface: attribute namespaceURI": {
+    "status": "FAIL"
+  },
+  "Attr interface: attribute prefix": {
+    "status": "FAIL"
+  },
+  "Attr interface: attribute localName": {
+    "status": "FAIL"
+  },
+  "Attr interface: attribute name": {
+    "status": "FAIL"
+  },
+  "Attr interface: attribute value": {
+    "status": "FAIL"
+  },
+  "Attr interface: attribute ownerElement": {
+    "status": "FAIL"
+  },
+  "Attr interface: attribute specified": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "CharacterData interface object length": {
+    "status": "FAIL"
+  },
+  "CharacterData interface object name": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: attribute data": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: attribute length": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation substringData(unsigned long, unsigned long)": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation appendData(DOMString)": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation insertData(unsigned long, DOMString)": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation deleteData(unsigned long, unsigned long)": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation replaceData(unsigned long, unsigned long, DOMString)": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: attribute previousElementSibling": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: attribute nextElementSibling": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation before((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation after((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation replaceWith((Node or DOMString)...)": {
+    "status": "FAIL"
+  },
+  "CharacterData interface: operation remove()": {
+    "status": "FAIL"
+  },
+  "Text interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "Text interface object length": {
+    "status": "FAIL"
+  },
+  "Text interface object name": {
+    "status": "FAIL"
+  },
+  "Text interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "Text interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "Text interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "Text interface: operation splitText(unsigned long)": {
+    "status": "FAIL"
+  },
+  "Text interface: attribute wholeText": {
+    "status": "FAIL"
+  },
+  "Text interface: attribute assignedSlot": {
+    "status": "FAIL"
+  },
+  "CDATASection interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "CDATASection interface object length": {
+    "status": "FAIL"
+  },
+  "CDATASection interface object name": {
+    "status": "FAIL"
+  },
+  "CDATASection interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "CDATASection interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "CDATASection interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "ProcessingInstruction interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "ProcessingInstruction interface object length": {
+    "status": "FAIL"
+  },
+  "ProcessingInstruction interface object name": {
+    "status": "FAIL"
+  },
+  "ProcessingInstruction interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "ProcessingInstruction interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "ProcessingInstruction interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "ProcessingInstruction interface: attribute target": {
+    "status": "FAIL"
+  },
+  "Comment interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "Comment interface object length": {
+    "status": "FAIL"
+  },
+  "Comment interface object name": {
+    "status": "FAIL"
+  },
+  "Comment interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "Comment interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "Comment interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface object length": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface object name": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: attribute startContainer": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: attribute startOffset": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: attribute endContainer": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: attribute endOffset": {
+    "status": "FAIL"
+  },
+  "AbstractRange interface: attribute collapsed": {
+    "status": "FAIL"
+  },
+  "StaticRange interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "StaticRange interface object length": {
+    "status": "FAIL"
+  },
+  "StaticRange interface object name": {
+    "status": "FAIL"
+  },
+  "StaticRange interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "StaticRange interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "StaticRange interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "Range interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "Range interface object length": {
+    "status": "FAIL"
+  },
+  "Range interface object name": {
+    "status": "FAIL"
+  },
+  "Range interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "Range interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "Range interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "Range interface: attribute commonAncestorContainer": {
+    "status": "FAIL"
+  },
+  "Range interface: operation setStart(Node, unsigned long)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation setEnd(Node, unsigned long)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation setStartBefore(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation setStartAfter(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation setEndBefore(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation setEndAfter(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation collapse(optional boolean)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation selectNode(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation selectNodeContents(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: constant START_TO_START on interface object": {
+    "status": "FAIL"
+  },
+  "Range interface: constant START_TO_START on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Range interface: constant START_TO_END on interface object": {
+    "status": "FAIL"
+  },
+  "Range interface: constant START_TO_END on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Range interface: constant END_TO_END on interface object": {
+    "status": "FAIL"
+  },
+  "Range interface: constant END_TO_END on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Range interface: constant END_TO_START on interface object": {
+    "status": "FAIL"
+  },
+  "Range interface: constant END_TO_START on interface prototype object": {
+    "status": "FAIL"
+  },
+  "Range interface: operation compareBoundaryPoints(unsigned short, Range)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation deleteContents()": {
+    "status": "FAIL"
+  },
+  "Range interface: operation extractContents()": {
+    "status": "FAIL"
+  },
+  "Range interface: operation cloneContents()": {
+    "status": "FAIL"
+  },
+  "Range interface: operation insertNode(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation surroundContents(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation cloneRange()": {
+    "status": "FAIL"
+  },
+  "Range interface: operation detach()": {
+    "status": "FAIL"
+  },
+  "Range interface: operation isPointInRange(Node, unsigned long)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation comparePoint(Node, unsigned long)": {
+    "status": "FAIL"
+  },
+  "Range interface: operation intersectsNode(Node)": {
+    "status": "FAIL"
+  },
+  "Range interface: stringifier": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface object length": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface object name": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: attribute root": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: attribute referenceNode": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: attribute pointerBeforeReferenceNode": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: attribute whatToShow": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: attribute filter": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: operation nextNode()": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: operation previousNode()": {
+    "status": "FAIL"
+  },
+  "NodeIterator interface: operation detach()": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface object length": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface object name": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: attribute root": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: attribute whatToShow": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: attribute filter": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: attribute currentNode": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: operation parentNode()": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: operation firstChild()": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: operation lastChild()": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: operation previousSibling()": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: operation nextSibling()": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: operation previousNode()": {
+    "status": "FAIL"
+  },
+  "TreeWalker interface: operation nextNode()": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface object name": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant FILTER_ACCEPT on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant FILTER_ACCEPT on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant FILTER_REJECT on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant FILTER_REJECT on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant FILTER_SKIP on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant FILTER_SKIP on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ALL on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ALL on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ELEMENT on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ELEMENT on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ATTRIBUTE on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ATTRIBUTE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_TEXT on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_TEXT on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_CDATA_SECTION on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_CDATA_SECTION on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ENTITY_REFERENCE on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ENTITY_REFERENCE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ENTITY on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_ENTITY on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_PROCESSING_INSTRUCTION on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_PROCESSING_INSTRUCTION on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_COMMENT on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_COMMENT on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_DOCUMENT on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_DOCUMENT on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_DOCUMENT_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_DOCUMENT_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_DOCUMENT_FRAGMENT on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_DOCUMENT_FRAGMENT on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_NOTATION on interface object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: constant SHOW_NOTATION on interface prototype object": {
+    "status": "FAIL"
+  },
+  "NodeFilter interface: operation acceptNode(Node)": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface object length": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface object name": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: attribute length": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: operation item(unsigned long)": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: operation contains(DOMString)": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: operation add(DOMString...)": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: operation remove(DOMString...)": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: operation toggle(DOMString, optional boolean)": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: operation replace(DOMString, DOMString)": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: operation supports(DOMString)": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: attribute value": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: stringifier": {
+    "status": "FAIL"
+  },
+  "DOMTokenList interface: iterable<DOMString>": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface object length": {
+    "status": "FAIL"
+  },
+  "XPathResult interface object name": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant ANY_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant ANY_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant NUMBER_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant NUMBER_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant STRING_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant STRING_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant BOOLEAN_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant BOOLEAN_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant UNORDERED_NODE_ITERATOR_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant UNORDERED_NODE_ITERATOR_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant ORDERED_NODE_ITERATOR_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant ORDERED_NODE_ITERATOR_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant UNORDERED_NODE_SNAPSHOT_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant UNORDERED_NODE_SNAPSHOT_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant ORDERED_NODE_SNAPSHOT_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant ORDERED_NODE_SNAPSHOT_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant ANY_UNORDERED_NODE_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant ANY_UNORDERED_NODE_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant FIRST_ORDERED_NODE_TYPE on interface object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: constant FIRST_ORDERED_NODE_TYPE on interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: attribute resultType": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: attribute numberValue": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: attribute stringValue": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: attribute booleanValue": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: attribute singleNodeValue": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: attribute invalidIteratorState": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: attribute snapshotLength": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: operation iterateNext()": {
+    "status": "FAIL"
+  },
+  "XPathResult interface: operation snapshotItem(unsigned long)": {
+    "status": "FAIL"
+  },
+  "XPathExpression interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "XPathExpression interface object length": {
+    "status": "FAIL"
+  },
+  "XPathExpression interface object name": {
+    "status": "FAIL"
+  },
+  "XPathExpression interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathExpression interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "XPathExpression interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "XPathExpression interface: operation evaluate(Node, optional unsigned short, optional XPathResult?)": {
+    "status": "FAIL"
+  },
+  "XPathNSResolver interface: existence and properties of interface object": {
+    "status": "PASS"
+  },
+  "XPathNSResolver interface: existence and properties of interface prototype object": {
+    "status": "PASS"
+  },
+  "XPathNSResolver interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "PASS"
+  },
+  "XPathNSResolver interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "PASS"
+  },
+  "XPathNSResolver interface: operation lookupNamespaceURI(DOMString?)": {
+    "status": "PASS"
+  },
+  "XPathEvaluator interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "XPathEvaluator interface object length": {
+    "status": "FAIL"
+  },
+  "XPathEvaluator interface object name": {
+    "status": "FAIL"
+  },
+  "XPathEvaluator interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "XPathEvaluator interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "XPathEvaluator interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "XPathEvaluator interface: operation createExpression(DOMString, optional XPathNSResolver?)": {
+    "status": "FAIL"
+  },
+  "XPathEvaluator interface: operation createNSResolver(Node)": {
+    "status": "FAIL"
+  },
+  "XPathEvaluator interface: operation evaluate(DOMString, Node, optional XPathNSResolver?, optional unsigned short, optional XPathResult?)": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: existence and properties of interface object": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface object length": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface object name": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: existence and properties of interface prototype object": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: existence and properties of interface prototype object's \"constructor\" property": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: existence and properties of interface prototype object's @@unscopables property": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: operation importStylesheet(Node)": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: operation transformToFragment(Node, Document)": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: operation transformToDocument(Node)": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: operation setParameter(DOMString, DOMString, any)": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: operation getParameter(DOMString, DOMString)": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: operation removeParameter(DOMString, DOMString)": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: operation clearParameters()": {
+    "status": "FAIL"
+  },
+  "XSLTProcessor interface: operation reset()": {
+    "status": "FAIL"
+  },
+  "Window interface: attribute event": {
+    "status": "FAIL"
+  }
+}
