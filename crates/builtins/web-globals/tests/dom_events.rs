@@ -1,0 +1,345 @@
+// SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
+
+//! Integration tests for the DOM Event interfaces: Event, EventTarget, CustomEvent.
+//!
+//! These tests deliberately cover only behavior that the enabled, passing WPT
+//! suite (see `tests/wpt-harness/tests.json`) doesn't exercise. What remains is
+//! coverage for behaviors whose only WPT home is a `.html` test (which this
+//! headless harness cannot run), an idlharness test that is not enabled, or —
+//! in the case of GC interaction — something WPT cannot express at all.
+
+use core_runtime::test_util::eval_with_setup;
+
+fn setup() {
+    core_runtime::runtime::register_global_initializer(|scope, global| {
+        web_globals::add_to_global(scope, global);
+    });
+}
+
+fn eval(code: &str) -> String {
+    eval_with_setup(setup, code)
+}
+
+// ── Event properties not covered by enabled WPT ──
+
+#[test]
+fn event_composed_default() {
+    // `composed` is not checked by Event-constructors.any.js.
+    assert_eq!(eval("new Event('x').composed"), "false");
+}
+
+#[test]
+fn event_phase_constants() {
+    // Only Event-constants.html asserts the numeric values; the enabled
+    // any.js tests reference Event.NONE without pinning it to 0.
+    assert_eq!(eval("Event.NONE"), "0");
+    assert_eq!(eval("Event.CAPTURING_PHASE"), "1");
+    assert_eq!(eval("Event.AT_TARGET"), "2");
+    assert_eq!(eval("Event.BUBBLING_PHASE"), "3");
+}
+
+#[test]
+fn event_instance_phase_constants() {
+    assert_eq!(eval("new Event('x').NONE"), "0");
+    assert_eq!(eval("new Event('x').AT_TARGET"), "2");
+}
+
+#[test]
+fn event_prevent_default_non_cancelable() {
+    // preventDefault on a non-cancelable event has no effect. The passive WPT
+    // test only exercises the cancelable case.
+    assert_eq!(
+        eval("var e = new Event('x'); e.preventDefault(); e.defaultPrevented"),
+        "false"
+    );
+}
+
+#[test]
+fn event_stop_propagation() {
+    // stopPropagation()/cancelBubble live only in Event-cancelBubble.html.
+    assert_eq!(
+        eval("var e = new Event('x'); e.stopPropagation(); e.cancelBubble"),
+        "true"
+    );
+}
+
+#[test]
+fn event_cancel_bubble_setter() {
+    assert_eq!(
+        eval("var e = new Event('x'); e.cancelBubble = true; e.cancelBubble"),
+        "true"
+    );
+}
+
+#[test]
+fn event_to_string_tag() {
+    // No idlharness for dom/events is enabled, so the brand check lives here.
+    assert_eq!(
+        eval("Object.prototype.toString.call(new Event('x'))"),
+        "[object Event]"
+    );
+}
+
+// ── Event.initEvent (only Event-initEvent.html otherwise) ──
+
+#[test]
+fn event_init_event() {
+    assert_eq!(
+        eval("var e = new Event(''); e.initEvent('click', true, true); e.type"),
+        "click"
+    );
+}
+
+#[test]
+fn event_init_event_bubbles() {
+    assert_eq!(
+        eval("var e = new Event(''); e.initEvent('click', true, false); e.bubbles"),
+        "true"
+    );
+}
+
+// ── EventTarget ──
+
+#[test]
+fn event_target_to_string_tag() {
+    assert_eq!(
+        eval("Object.prototype.toString.call(new EventTarget())"),
+        "[object EventTarget]"
+    );
+}
+
+#[test]
+fn dispatch_event_at_target_phase() {
+    // eventPhase during dispatch is only asserted by Event-dispatch-*.html.
+    assert_eq!(
+        eval(
+            r#"
+            var target = new EventTarget();
+            var phase = -1;
+            target.addEventListener('test', function(e) { phase = e.eventPhase; });
+            target.dispatchEvent(new Event('test'));
+            phase
+            "#
+        ),
+        "2"
+    );
+}
+
+#[test]
+fn multiple_listeners_called_in_order() {
+    // Listener invocation order is only asserted by the non-enabled
+    // Event-dispatch-listener-order.window.js.
+    assert_eq!(
+        eval(
+            r#"
+            var target = new EventTarget();
+            var order = [];
+            target.addEventListener('test', function() { order.push(1); });
+            target.addEventListener('test', function() { order.push(2); });
+            target.addEventListener('test', function() { order.push(3); });
+            target.dispatchEvent(new Event('test'));
+            order.join(',')
+            "#
+        ),
+        "1,2,3"
+    );
+}
+
+#[test]
+fn listener_only_type_match() {
+    assert_eq!(
+        eval(
+            r#"
+            var target = new EventTarget();
+            var called = false;
+            target.addEventListener('click', function() { called = true; });
+            target.dispatchEvent(new Event('other'));
+            called
+            "#
+        ),
+        "false"
+    );
+}
+
+#[test]
+fn remove_nonexistent_listener_is_noop() {
+    // Should not throw or error.
+    assert_eq!(
+        eval(
+            r#"
+            var target = new EventTarget();
+            target.removeEventListener('click', function() {});
+            "ok"
+            "#
+        ),
+        "ok"
+    );
+}
+
+#[test]
+fn dispatch_already_dispatching_throws_in_listener() {
+    // The inner dispatchEvent throws InvalidStateError because the event's
+    // dispatch flag is already set. The outer dispatch completes normally
+    // because listener exceptions are caught per the spec. Only covered by
+    // Event-dispatch-reenter.html otherwise.
+    assert_eq!(
+        eval(
+            r#"
+        var target = new EventTarget();
+        var event = new Event('test');
+        var caught = false;
+        target.addEventListener('test', function() {
+            try {
+                target.dispatchEvent(event);
+            } catch(e) {
+                caught = e instanceof DOMException && e.name === 'InvalidStateError';
+            }
+        });
+        target.dispatchEvent(event);
+        caught
+        "#
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn dispatch_redispatch_used_event() {
+    // Re-dispatching an already-dispatched event must succeed; only covered by
+    // Event-dispatch-redispatch.html otherwise.
+    assert_eq!(
+        eval(
+            r#"
+            var target = new EventTarget();
+            var event = new Event('test');
+            target.dispatchEvent(event);
+            target.dispatchEvent(event);
+            "ok"
+            "#
+        ),
+        "ok"
+    );
+}
+
+// ── CustomEvent ──
+//
+// The only enabled WPT touching CustomEvent is one assertion in
+// Event-constructors.any.js (`detail: 54`) plus a subclass dispatch in
+// EventTarget-constructible.any.js. CustomEvent.html is not runnable here, so
+// detail typing, defaults, the brand, and initCustomEvent are covered below.
+
+#[test]
+fn custom_event_construct() {
+    assert_eq!(eval("new CustomEvent('x') instanceof CustomEvent"), "true");
+}
+
+#[test]
+fn custom_event_extends_event() {
+    assert_eq!(eval("new CustomEvent('x') instanceof Event"), "true");
+}
+
+#[test]
+fn custom_event_detail_default_is_null() {
+    assert_eq!(eval("new CustomEvent('x').detail"), "null");
+}
+
+#[test]
+fn custom_event_detail_string() {
+    assert_eq!(
+        eval("new CustomEvent('x', { detail: 'hello' }).detail"),
+        "hello"
+    );
+}
+
+#[test]
+fn custom_event_detail_object() {
+    assert_eq!(
+        eval("JSON.stringify(new CustomEvent('x', { detail: { a: 1 } }).detail)"),
+        r#"{"a":1}"#
+    );
+}
+
+#[test]
+fn custom_event_to_string_tag() {
+    assert_eq!(
+        eval("Object.prototype.toString.call(new CustomEvent('x'))"),
+        "[object CustomEvent]"
+    );
+}
+
+#[test]
+fn custom_event_init_custom_event() {
+    assert_eq!(
+        eval(
+            r#"
+            var e = new CustomEvent('');
+            e.initCustomEvent('test', true, true, 99);
+            e.type + ',' + e.bubbles + ',' + e.detail
+            "#
+        ),
+        "test,true,99"
+    );
+}
+
+/// Listener identity must survive a compacting GC.
+///
+/// Listeners are compared by the live, barrier-updated pointer of their stored
+/// `Heap<Function>` rather than a cached raw pointer. A full GC promotes the
+/// callback out of the nursery and may compact it, changing its address — so a
+/// cached pointer captured at registration time would go stale. This drives a
+/// real collection *between* listener operations and checks that both
+/// deduplication and removal still match the relocated callback. (With a cached
+/// raw pointer this would observe a count of 4: dedup fails, both listeners
+/// fire twice, and removal matches neither.)
+///
+/// WPT cannot express this: it has no control over garbage collection.
+#[test]
+fn listener_identity_survives_compacting_gc() {
+    use core_runtime::config::RuntimeConfig;
+    use core_runtime::runtime::Runtime;
+    use js::compile::evaluate_with_filename;
+    use js::conversion::FromJSVal;
+    use js::gc::{self, GCOptions, GCReason};
+
+    setup();
+    let rt = Runtime::init(&RuntimeConfig::default());
+    let scope = rt.default_global();
+
+    // Register one listener. State lives on `globalThis` so it survives across
+    // evaluations and the intervening collection.
+    evaluate_with_filename(
+        &scope,
+        r#"
+        globalThis.t = new EventTarget();
+        globalThis.count = 0;
+        globalThis.handler = function() { globalThis.count++; };
+        globalThis.t.addEventListener('e', globalThis.handler);
+        "#,
+        "test.js",
+        1,
+    )
+    .expect("listener setup should evaluate");
+
+    // Force a full, compacting GC. This relocates `handler`.
+    gc::prepare_for_full_gc(&scope);
+    gc::non_incremental_gc(&scope, GCOptions::Shrink, GCReason::API);
+
+    // After relocation: a duplicate add must still be recognised (dedup), a
+    // dispatch must fire the single listener once, and removal must match the
+    // relocated callback so the final dispatch fires nothing.
+    let val = evaluate_with_filename(
+        &scope,
+        r#"
+        globalThis.t.addEventListener('e', globalThis.handler); // dedup
+        globalThis.t.dispatchEvent(new Event('e'));             // fires once
+        globalThis.t.removeEventListener('e', globalThis.handler);
+        globalThis.t.dispatchEvent(new Event('e'));             // fires nothing
+        String(globalThis.count)
+        "#,
+        "test.js",
+        1,
+    )
+    .expect("dispatch should evaluate");
+
+    assert_eq!(String::from_jsval(&scope, val, ()).unwrap(), "1");
+}
