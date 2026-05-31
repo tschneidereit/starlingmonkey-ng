@@ -34,6 +34,11 @@ wpt-test *PATTERN:
     @just build
     node tests/wpt-harness/run-wpt.mjs {{PATTERN}}
 
+# Run WPT tests, optionally filtering by pattern.
+wpt-test-release *PATTERN:
+    @just build-release
+    node tests/wpt-harness/run-wpt.mjs --runtime=target/release/starling {{PATTERN}}
+
 # Run WPT tests with verbose output.
 wpt-test-verbose *PATTERN:
     @just build
