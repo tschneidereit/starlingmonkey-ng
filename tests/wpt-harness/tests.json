@@ -1,4 +1,6 @@
 [
+  "hr-time/basic.any.js",
+  "hr-time/monotonic-clock.any.js",
   "console/console-is-a-namespace.any.js",
   "console/console-label-conversion.any.js",
   "SKIP console/console-log-large-array.any.js",
