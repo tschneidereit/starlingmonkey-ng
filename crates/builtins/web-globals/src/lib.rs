@@ -19,6 +19,7 @@ pub mod events;
 pub mod performance;
 pub mod signals;
 mod structured_clone;
+pub mod navigator;
 pub mod worker_location;
 
 pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
@@ -32,4 +33,5 @@ pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
     base64::base64_globals::add_to_global(scope, global);
     structured_clone::structured_clone_globals::add_to_global(scope, global);
     worker_location::add_to_global(scope, global);
+    navigator::add_to_global(scope, global);
 }

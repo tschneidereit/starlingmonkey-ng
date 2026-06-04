@@ -1,6 +1,7 @@
 [
   "hr-time/basic.any.js",
   "hr-time/monotonic-clock.any.js",
+  "html/webappapis/system-state-and-capabilities/the-navigator-object/navigator.any.js",
   "console/console-is-a-namespace.any.js",
   "console/console-label-conversion.any.js",
   "SKIP(Prints giant amounts) console/console-log-large-array.any.js",
