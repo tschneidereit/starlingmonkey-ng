@@ -1,0 +1,26 @@
+{
+  "pipeTo should stop after getting preventAbort throws": {
+    "status": "PASS"
+  },
+  "pipeThrough should stop after getting preventAbort throws": {
+    "status": "PASS"
+  },
+  "pipeTo should stop after getting preventCancel throws": {
+    "status": "PASS"
+  },
+  "pipeThrough should stop after getting preventCancel throws": {
+    "status": "PASS"
+  },
+  "pipeTo should stop after getting preventClose throws": {
+    "status": "PASS"
+  },
+  "pipeThrough should stop after getting preventClose throws": {
+    "status": "PASS"
+  },
+  "pipeTo should stop after getting signal throws": {
+    "status": "PASS"
+  },
+  "pipeThrough should stop after getting signal throws": {
+    "status": "PASS"
+  }
+}

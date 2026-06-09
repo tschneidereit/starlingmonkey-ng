@@ -1,0 +1,35 @@
+{
+  "cancelling the readable side should call transformer.cancel()": {
+    "status": "PASS"
+  },
+  "cancelling the readable side should reject if transformer.cancel() throws": {
+    "status": "PASS"
+  },
+  "aborting the writable side should call transformer.abort()": {
+    "status": "PASS"
+  },
+  "aborting the writable side should reject if transformer.cancel() throws": {
+    "status": "PASS"
+  },
+  "closing the writable side should reject if a parallel transformer.cancel() throws": {
+    "status": "PASS"
+  },
+  "readable.cancel() and a parallel writable.close() should reject if a transformer.cancel() calls controller.error()": {
+    "status": "PASS"
+  },
+  "writable.abort() and readable.cancel() should reject if a transformer.cancel() calls controller.error()": {
+    "status": "PASS"
+  },
+  "readable.cancel() should not call cancel() when flush() is already called from writable.close()": {
+    "status": "PASS"
+  },
+  "readable.cancel() should not call cancel() again when already called from writable.abort()": {
+    "status": "PASS"
+  },
+  "writable.close() should not call flush() when cancel() is already called from readable.cancel()": {
+    "status": "PASS"
+  },
+  "writable.abort() should not call cancel() again when already called from readable.cancel()": {
+    "status": "PASS"
+  }
+}
