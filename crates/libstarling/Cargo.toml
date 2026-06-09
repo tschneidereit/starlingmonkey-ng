@@ -16,6 +16,7 @@ js.workspace = true
 simple-http.workspace = true
 url.workspace = true
 web-globals.workspace = true
+web-streams.workspace = true
 web-url.workspace = true
 cpp-builtins.workspace = true
 

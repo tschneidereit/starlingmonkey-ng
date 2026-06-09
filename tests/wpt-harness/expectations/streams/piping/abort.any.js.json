@@ -1,0 +1,101 @@
+{
+  "a signal argument 'null' should cause pipeTo() to reject": {
+    "status": "PASS"
+  },
+  "a signal argument 'AbortSignal' should cause pipeTo() to reject": {
+    "status": "PASS"
+  },
+  "a signal argument 'true' should cause pipeTo() to reject": {
+    "status": "PASS"
+  },
+  "a signal argument '-1' should cause pipeTo() to reject": {
+    "status": "PASS"
+  },
+  "a signal argument '[object AbortSignal]' should cause pipeTo() to reject": {
+    "status": "PASS"
+  },
+  "an aborted signal should cause the writable stream to reject with an AbortError": {
+    "status": "PASS"
+  },
+  "(reason: 'null') all the error objects should be the same object": {
+    "status": "PASS"
+  },
+  "(reason: 'undefined') all the error objects should be the same object": {
+    "status": "PASS"
+  },
+  "(reason: 'error1: error1') all the error objects should be the same object": {
+    "status": "PASS"
+  },
+  "preventCancel should prevent canceling the readable": {
+    "status": "PASS"
+  },
+  "preventAbort should prevent aborting the readable": {
+    "status": "PASS"
+  },
+  "preventCancel and preventAbort should prevent canceling the readable and aborting the readable": {
+    "status": "PASS"
+  },
+  "(reason: 'null') abort should prevent further reads": {
+    "status": "PASS"
+  },
+  "(reason: 'undefined') abort should prevent further reads": {
+    "status": "PASS"
+  },
+  "(reason: 'error1: error1') abort should prevent further reads": {
+    "status": "PASS"
+  },
+  "(reason: 'null') all pending writes should complete on abort": {
+    "status": "PASS"
+  },
+  "(reason: 'undefined') all pending writes should complete on abort": {
+    "status": "PASS"
+  },
+  "(reason: 'error1: error1') all pending writes should complete on abort": {
+    "status": "PASS"
+  },
+  "(reason: 'null') underlyingSource.cancel() should called when abort, even with pending pull": {
+    "status": "PASS"
+  },
+  "(reason: 'undefined') underlyingSource.cancel() should called when abort, even with pending pull": {
+    "status": "PASS"
+  },
+  "(reason: 'error1: error1') underlyingSource.cancel() should called when abort, even with pending pull": {
+    "status": "PASS"
+  },
+  "a rejection from underlyingSource.cancel() should be returned by pipeTo()": {
+    "status": "PASS"
+  },
+  "a rejection from underlyingSink.abort() should be returned by pipeTo()": {
+    "status": "PASS"
+  },
+  "a rejection from underlyingSink.abort() should be preferred to one from underlyingSource.cancel()": {
+    "status": "PASS"
+  },
+  "abort signal takes priority over closed readable": {
+    "status": "PASS"
+  },
+  "abort signal takes priority over errored readable": {
+    "status": "PASS"
+  },
+  "abort signal takes priority over closed writable": {
+    "status": "PASS"
+  },
+  "abort signal takes priority over errored writable": {
+    "status": "PASS"
+  },
+  "abort should do nothing after the readable is closed": {
+    "status": "PASS"
+  },
+  "abort should do nothing after the readable is errored": {
+    "status": "PASS"
+  },
+  "abort should do nothing after the readable is errored, even with pending writes": {
+    "status": "PASS"
+  },
+  "abort should do nothing after the writable is errored": {
+    "status": "PASS"
+  },
+  "pipeTo on a teed readable byte stream should only be aborted when both branches are aborted": {
+    "status": "PASS"
+  }
+}
