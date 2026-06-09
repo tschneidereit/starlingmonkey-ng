@@ -3,7 +3,7 @@
   "hr-time/monotonic-clock.any.js",
   "console/console-is-a-namespace.any.js",
   "console/console-label-conversion.any.js",
-  "SKIP console/console-log-large-array.any.js",
+  "SKIP(Prints giant amounts) console/console-log-large-array.any.js",
   "console/console-log-symbol.any.js",
   "console/console-namespace-object-class-string.any.js",
   "console/console-tests-historical.any.js",
