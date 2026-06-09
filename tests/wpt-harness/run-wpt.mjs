@@ -39,8 +39,15 @@ function relativePath(p) {
   return new URL(p, import.meta.url).pathname;
 }
 
-const SKIP_PREFIX = "SKIP ";
-const SLOW_PREFIX = "SLOW ";
+// tests.json line prefixes:
+//   "SKIP "      — never run, on any target.
+//   "SLOW "      — skipped when --skip-slow-tests is passed.
+//   "SKIP-WASM " — run on native, skipped on the wasm target. For tests that
+//                  depend on JS APIs the wasm build does not expose (e.g.
+//                  `WebAssembly`, which the SpiderMonkey-in-wasm build omits).
+const SKIP_PREFIX = "SKIP";
+const SLOW_PREFIX = "SLOW";
+const SKIP_WASM_PREFIX = "SKIP-WASM";
 
 const LogLevel = { Quiet: 0, Verbose: 1, VeryVerbose: 2 };
 
@@ -352,17 +359,45 @@ function toEvalScriptCall(source, url) {
 // Test execution
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract and strip all prefixes from `path`, returning the set of prefixes and the stripped path.
+ *
+ * Prefixes have the format "PREFIX[(comment)]", and can be repeated.
+ * The returned prefixes map will contain the prefix as the key and the optional comment as the value (`undefined` if no comment).
+ */
+function extractPrefixes(path) {
+  const prefixes = new Map();
+  let remaining = path;
+  while (true) {
+    const match = remaining.match(/^([A-Z-]+)(\(([^)]+)\))?[, ]/);
+    if (!match) break;
+    const prefix = match[1];
+    const comment = match[3];
+    console.log(`Found prefix: ${prefix} (comment: ${comment || "none"}) in path: ${path}`);
+    prefixes.set(prefix, comment);
+    remaining = remaining.slice(match[0].length);
+  }
+  return { prefixes, path: remaining };
+}
+
 function getTests(pattern) {
   const raw = JSON.parse(readFileSync(config.tests.list, "utf-8"));
-  let testPaths = raw.filter((p) => !p.startsWith(SKIP_PREFIX));
-  const totalCount = testPaths.length;
-
-  if (config.skipSlowTests) {
-    testPaths = testPaths.filter((p) => !p.startsWith(SLOW_PREFIX));
+  const totalCount = raw.length;
+  let testPaths = [];
+   for (const rawPath of raw) {
+    const { prefixes, path } = extractPrefixes(rawPath);
+    if (prefixes.has(SKIP_PREFIX) ||
+      (config.target === "wasm" && prefixes.has(SKIP_WASM_PREFIX)) ||
+      (config.skipSlowTests && prefixes.has(SLOW_PREFIX))) {
+      continue;
+    }
+    testPaths.push(path);
   }
 
+  const stripPrefix = (p, prefix) =>
+    p.startsWith(prefix) ? p.slice(prefix.length) : p;
   testPaths = testPaths
-    .map((p) => (p.startsWith(SLOW_PREFIX) ? p.slice(SLOW_PREFIX.length) : p))
+    .map((p) => stripPrefix(stripPrefix(p, SLOW_PREFIX), SKIP_WASM_PREFIX))
     .filter((p) => p.includes(pattern));
 
   return { testPaths, totalCount };
@@ -542,7 +577,7 @@ async function run() {
       }
 
       totalStats.duration += duration;
-      totalStats.missing += Math.max(Object.keys(expectations).length, 1);
+      totalStats.missing += Object.keys(expectations).length;
       continue;
     }
 
