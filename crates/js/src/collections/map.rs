@@ -26,6 +26,7 @@ use crate::Object;
 pub struct Map;
 
 impl JSType for Map {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "Map";
 
     fn js_class() -> *const mozjs::jsapi::JSClass {

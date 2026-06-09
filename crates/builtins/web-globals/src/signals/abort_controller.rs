@@ -25,24 +25,24 @@ pub struct AbortController {
 impl AbortController {
     /// <https://dom.spec.whatwg.org/#dom-abortcontroller-abortcontroller>
     #[constructor]
-    fn new(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
+    pub fn new(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
         // Step 1: Let _signal_ be a new ``AbortSignal`` object.
         let signal = AbortSignal::new(scope)?;
         // Step 2: Set `this`'s `signal` to _signal_.
-        self.data_mut().signal = Heap::from(signal);
+        self.data_mut().signal.set(signal);
         Ok(())
     }
 
     /// <https://dom.spec.whatwg.org/#dom-abortcontroller-signal>
     #[getter]
-    fn signal<'r>(&self, scope: &'r Scope<'_>) -> AbortSignal<'r> {
+    pub fn signal<'r>(&self, scope: &'r Scope<'_>) -> AbortSignal<'r> {
         // Step 1: Return this's signal.
         self.data().signal.get(scope)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-abortcontroller-abort>
-    #[method]
-    fn abort(&self, scope: &Scope<'_>, reason: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
+    #[method(length = 0)]
+    pub fn abort(&self, scope: &Scope<'_>, reason: HandleValue<'_>) -> Result<(), ExnThrown> {
         // Step 1: Signal abort on this with reason if it is given.
         let signal: AbortSignal<'_> = self.data().signal.get(scope);
         algorithms::signal_abort(scope, &signal, reason)

@@ -26,6 +26,7 @@ use crate::Object;
 pub struct WeakMap;
 
 impl JSType for WeakMap {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "WeakMap";
 
     fn js_class() -> *const mozjs::jsapi::JSClass {

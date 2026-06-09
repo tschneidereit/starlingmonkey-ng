@@ -385,8 +385,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
 
     // Set the module private so the resolve hook receives a valid
     // referencing module when this module's imports are resolved.
-    let private = unsafe { value::from_object(module.as_raw()) };
-    unsafe { SetModulePrivate(module.as_raw(), &private) };
+    unsafe { SetModulePrivate(module.as_raw(), &value::from_object(module.as_raw())) };
 
     // 3. Store in registry before linking (resolve hook must find it)
     MODULE_REGISTRY.with(|reg| {
@@ -481,8 +480,7 @@ pub unsafe fn evaluate_module<'s>(
 
     // Set the module private so the resolve hook receives a valid
     // referencing module when this module's imports are resolved.
-    let private = unsafe { value::from_object(module.as_raw()) };
-    unsafe { SetModulePrivate(module.as_raw(), &private) };
+    unsafe { SetModulePrivate(module.as_raw(), &value::from_object(module.as_raw())) };
 
     // If the filename is a real path, update the base path for relative
     // imports. The empty-path guard prevents WASI from treating

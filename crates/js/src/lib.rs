@@ -207,7 +207,20 @@ pub mod module_raw {
     };
 }
 
-pub use macros::{allow_unrooted, allow_unrooted_interior, must_root};
+pub use macros::must_root;
+
+/// Derive a scope-rooted mirror of a `#[must_root]` aggregate plus a
+/// `root(self, scope)` method. See the macro's own docs for the rooting strategy.
+pub use macros::ScopeRoot;
+
+/// Silences crown's GC-rooting lint on an item.
+///
+/// `#[doc(hidden)]`: this escape hatch is meant for proc-macro-generated code
+/// (trampolines, constructor registrars) and a small set of carefully audited
+/// callsites. All other code should root values properly rather than reach
+/// for this.
+#[doc(hidden)]
+pub use macros::{allow_unrooted, allow_unrooted_interior};
 
 pub use conversion::AsyncSequence;
 pub use conversion::Record;

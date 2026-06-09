@@ -2,7 +2,6 @@
 
 //! <https://url.spec.whatwg.org/>
 
-use crate::url::URL;
 use crate::url_search_params_iterator::{
     IteratorKind, URLSearchParamsIterator, URLSearchParamsIteratorImpl,
 };
@@ -12,7 +11,6 @@ use js::conversion::{Record, ToJSVal};
 use js::error::{throw_type_error, ExnThrown, TypeError};
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
-use js::native::HandleValueArray;
 use js::prelude::HandleValue;
 
 /// WebIDL: `(sequence<sequence<USVString>> or record<USVString, USVString> or USVString)`
@@ -248,17 +246,12 @@ impl URLSearchParams<'_> {
             let value_js = value.as_str().to_jsval(scope).map_err(|e| e.throw(scope))?;
             let name_js = name.as_str().to_jsval(scope).map_err(|e| e.throw(scope))?;
             let self_js = scope.root_value(self.as_value());
-            let argv = [value_js.get(), name_js.get(), self_js.get()];
-            let fn_args = HandleValueArray {
-                length_: 3,
-                elements_: argv.as_ptr(),
-            };
 
             js::Function::call(
                 scope,
                 this_arg.unwrap_or(HandleValue::undefined()),
                 callback,
-                &fn_args,
+                &[value_js, name_js, self_js],
             )?;
             index += 1;
         }
@@ -310,11 +303,7 @@ pub fn install_symbol_iterator(scope: &Scope<'_>) {
         |scope, args, _payload| {
             let this_obj = js::Object::from_value(scope, args.this())
                 .map_err(|_| throw_type_error(scope, c"Invalid URLSearchParams receiver"))?;
-            let args = HandleValueArray {
-                length_: 0,
-                elements_: std::ptr::null(),
-            };
-            js::Function::call_by_name(scope, this_obj.handle(), c"entries", &args)
+            js::Function::call_by_name(scope, this_obj.handle(), c"entries", &[])
                 .map(|value| *value)
         },
         js::value::undefined(),
@@ -335,7 +324,7 @@ impl URLSearchParams<'_> {
             return Ok(());
         };
 
-        let url_object: URL = url_object_heap.get(scope);
+        let url_object = url_object_heap.get(scope);
 
         let mut serializer = form_urlencoded::Serializer::new(String::new());
         for (name, value) in &self.data().list {

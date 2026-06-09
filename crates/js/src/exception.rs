@@ -54,6 +54,15 @@ pub fn get_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static
     Ok(vp.handle())
 }
 
+/// Get and clear the pending exception value.
+///
+/// Returns `Err` if no exception is pending or retrieval fails.
+pub fn get_and_clear_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static str> {
+    let result = get_pending(scope)?;
+    clear(scope);
+    Ok(result)
+}
+
 /// Set a pending exception on the context.
 pub fn set_pending(
     scope: &Scope<'_>,

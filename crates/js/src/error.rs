@@ -532,7 +532,6 @@ pub fn throw_error(scope: &Scope<'_>, msg: &str) -> ExnThrown {
 ///
 pub fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
     use crate::class_spec::JSProtoKey;
-    use crate::native::HandleValueArray;
 
     // Create `new Error()` to capture the current stack.
     let error_ctor = match crate::class::get_class_object(scope, JSProtoKey::JSProto_Error) {
@@ -541,12 +540,8 @@ pub fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
     };
 
     let ctor_val = scope.root_value(unsafe { crate::value::from_object(error_ctor.get()) });
-    let empty_args = HandleValueArray {
-        length_: 0,
-        elements_: ptr::null(),
-    };
 
-    let error_obj = match crate::Function::construct(scope, ctor_val, &empty_args) {
+    let error_obj = match crate::Function::construct(scope, ctor_val, &[]) {
         Ok(obj) => obj,
         Err(_) => return,
     };

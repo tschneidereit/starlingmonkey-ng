@@ -96,6 +96,14 @@ fn is_unrooted_ty<'tcx>(
     cx: &LateContext<'tcx>,
     ty: ty::Ty<'tcx>,
     in_new_function: bool,
+    // Whether a bare `JS::Value` should be treated as unrooted. A `Value` only
+    // becomes a rooting hazard when it is *held* — as a parameter, a `let`
+    // binding, or a struct/enum field — across an allocation. In return position
+    // it is produced and handed straight to the caller (typically a native
+    // callback handing its result to the engine), which consumes it
+    // immediately; flagging that would be a false positive on every callback, so
+    // callers pass `false` for return-type checks.
+    flag_value: bool,
 ) -> bool {
     let mut ret = false;
     let mut walker = ty.walk();
@@ -187,6 +195,19 @@ fn is_unrooted_ty<'tcx>(
                 {
                     // Structures which are semantically similar to an &ptr.
                     false
+                } else if match_def_path(
+                    cx,
+                    did.did(),
+                    &[sym.mozjs_sys, sym.generated, sym.root, sym.JS, sym.Value],
+                ) {
+                    // Allow unrooted `JS::Value` in `mozjs` and `js` crates, but
+                    // not downstream.
+                    let krate = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
+                    let name = krate.as_str();
+                    if flag_value && name != "js" && !name.starts_with("mozjs") {
+                        ret = true;
+                    }
+                    false
                 } else if did.is_box() && in_new_function {
                     // box in new() is okay
                     false
@@ -266,7 +287,7 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
         if let hir::ItemKind::Struct(_, _, variant_data) = &item.kind {
             for field in variant_data.fields() {
                 let field_type = cx.tcx.type_of(field.def_id);
-                if is_unrooted_ty(&self.symbols, cx, field_type.skip_binder(), false) {
+                if is_unrooted_ty(&self.symbols, cx, field_type.skip_binder(), false, true) {
                     cx.lint(UNROOTED_MUST_ROOT, |lint| {
                         lint.primary_message(
                             "Type must be rooted, use #[js::must_root] \
@@ -289,24 +310,22 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
             parent_item.hir_id().expect_owner(),
             &[sym.crown, sym.unrooted_must_root_lint, sym.must_root],
         ) {
-            #[allow(clippy::single_match)]
-            match var.data {
-                hir::VariantData::Tuple(fields, ..) => {
-                    for field in fields {
-                        let field_type = cx.tcx.type_of(field.def_id);
-                        if is_unrooted_ty(&self.symbols, cx, field_type.skip_binder(), false) {
-                            cx.lint(UNROOTED_MUST_ROOT, |lint| {
-                                lint.primary_message(
-                                    "Type must be rooted, \
-                                      use #[js::must_root] \
-                                      on the enum definition to propagate.",
-                                );
-                                lint.span(field.ty.span);
-                            })
-                        }
-                    }
-                },
-                _ => (), // Struct variants already caught by check_struct_def
+            // `VariantData::fields()` yields the fields of both tuple-like
+            // (`V(Heap<T>)`) and struct-like (`V { f: Heap<T> }`) variants, and
+            // is empty for unit variants. Checking every field here closes a gap
+            // where an unrooted field in a struct-like variant went unflagged.
+            for field in var.data.fields() {
+                let field_type = cx.tcx.type_of(field.def_id);
+                if is_unrooted_ty(&self.symbols, cx, field_type.skip_binder(), false, true) {
+                    cx.lint(UNROOTED_MUST_ROOT, |lint| {
+                        lint.primary_message(
+                            "Type must be rooted, \
+                              use #[js::must_root] \
+                              on the enum definition to propagate.",
+                        );
+                        lint.span(field.ty.span);
+                    })
+                }
             }
         }
     }
@@ -431,7 +450,7 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
             let sig = cx.tcx.type_of(def_id).skip_binder().fn_sig(cx.tcx);
 
             for (arg, ty) in decl.inputs.iter().zip(sig.inputs().skip_binder().iter()) {
-                if is_unrooted_ty(&self.symbols, cx, *ty, in_new_function) {
+                if is_unrooted_ty(&self.symbols, cx, *ty, in_new_function, true) {
                     cx.lint(UNROOTED_MUST_ROOT, |lint| {
                         lint.primary_message("Type must be rooted.");
                         lint.span(arg.span);
@@ -440,7 +459,7 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
             }
 
             if !in_new_function
-                && is_unrooted_ty(&self.symbols, cx, sig.output().skip_binder(), false)
+                && is_unrooted_ty(&self.symbols, cx, sig.output().skip_binder(), false, false)
             {
                 cx.lint(UNROOTED_MUST_ROOT, |lint| {
                     lint.primary_message("Type must be rooted.");
@@ -479,7 +498,7 @@ impl<'a, 'tcx> visit::Visitor<'tcx> for FnDefVisitor<'a, 'tcx> {
 
         let require_rooted = |cx: &LateContext, in_new_function: bool, subexpr: &hir::Expr| {
             let ty = cx.typeck_results().expr_ty(subexpr);
-            if is_unrooted_ty(self.symbols, cx, ty, in_new_function) {
+            if is_unrooted_ty(self.symbols, cx, ty, in_new_function, true) {
                 cx.lint(UNROOTED_MUST_ROOT, |lint| {
                     lint.primary_message(format!("Expression of type {:?} must be rooted.", ty));
                     lint.span(subexpr.span);
@@ -520,7 +539,7 @@ impl<'a, 'tcx> visit::Visitor<'tcx> for FnDefVisitor<'a, 'tcx> {
             hir::PatKind::Binding(hir::BindingMode::NONE, ..)
             | hir::PatKind::Binding(hir::BindingMode::MUT, ..) => {
                 let ty = cx.typeck_results().pat_ty(pat);
-                if is_unrooted_ty(self.symbols, cx, ty, self.in_new_function) {
+                if is_unrooted_ty(self.symbols, cx, ty, self.in_new_function, true) {
                     cx.lint(UNROOTED_MUST_ROOT, |lint| {
                         lint.primary_message(format!(
                             "Expression of type {:?} must be rooted.",
@@ -562,6 +581,7 @@ symbols! {
     OccupiedEntry
     VacantEntry
     JSObject
+    Value
     mozjs
     mozjs_sys
     gc

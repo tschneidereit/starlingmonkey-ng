@@ -13,8 +13,8 @@ use core_runtime::class::{create_instance, get_private_mut, throw_error};
 use core_runtime::runtime::Runtime;
 use core_runtime::{jsclass, jsmethods};
 use js::gc::scope::RootScope;
-use js::heap::Heap;
-use js::native::{HandleValueArray, JSContext, JSObject, Value};
+use js::gc::handle::Heap;
+use js::native::JSContext;
 use js::value;
 
 use wasip3::http::types::{ErrorCode, Fields, Method, Response as WasiResponse};
@@ -26,14 +26,14 @@ use wasip3::{wit_bindgen, wit_future, wit_stream};
 
 thread_local! {
     /// The stored JS listener callback (set by `listen(cb)` from JS).
-    static LISTENER_CALLBACK: RefCell<Option<Box<Heap<*mut JSObject>>>> =
+    static LISTENER_CALLBACK: RefCell<Option<Heap<js::object::Object>>> =
         RefCell::new(None);
 
     /// The raw JSContext pointer, stored after runtime init.
     static JS_CX: RefCell<Option<*mut JSContext>> = RefCell::new(None);
 
     /// The global object, stored after runtime init.
-    static JS_GLOBAL: RefCell<Option<Box<Heap<*mut JSObject>>>> =
+    static JS_GLOBAL: RefCell<Option<Heap<js::object::Object>>> =
         RefCell::new(None);
 
     /// The runtime instance, lazily initialized on first request.
@@ -91,8 +91,8 @@ impl JSRequest {
 
         let callback_obj = args.get(0).to_object();
 
-        let heap = Box::new(Heap::default());
-        heap.set(callback_obj);
+        // SAFETY: callback_obj is a non-null JS object (checked via is_object above).
+        let heap = unsafe { Heap::<js::object::Object>::from_raw(callback_obj) };
         LISTENER_CALLBACK.with(|cb| {
             *cb.borrow_mut() = Some(heap);
         });
@@ -232,7 +232,7 @@ fn call_js_listener(
     }
 
     unsafe {
-        let global_obj = JS_GLOBAL.with(|g| g.borrow().as_ref().map(|h| h.get()));
+        let global_obj = JS_GLOBAL.with(|g| g.borrow().as_ref().map(|h| h.as_ptr()));
         let global_obj = match global_obj {
             Some(obj) if !obj.is_null() => obj,
             _ => return (500, b"No global object".to_vec()),
@@ -261,7 +261,7 @@ fn call_js_listener(
 
         // Get the callback.
         let callback_obj =
-            LISTENER_CALLBACK.with(|cb| cb.borrow().as_ref().map(|h| h.get()));
+            LISTENER_CALLBACK.with(|cb| cb.borrow().as_ref().map(|h| h.as_ptr()));
         let callback_obj = match callback_obj {
             Some(obj) if !obj.is_null() => obj,
             _ => return (500, b"Callback was collected".to_vec()),
@@ -271,13 +271,7 @@ fn call_js_listener(
         let global = scope.root_object(std::ptr::NonNull::new_unchecked(global_obj));
 
         // Call: callback(request)
-        let args = HandleValueArray {
-            length_: 1,
-            elements_: &*req_val as *const Value,
-        };
-
-        let result =
-            js::Function::call_value(&scope, global, callback_val, &args);
+        let result = js::Function::call_value(&scope, global, callback_val, &[req_val]);
 
         if result.is_err() {
             if js::exception::is_pending(&scope) {

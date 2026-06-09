@@ -74,13 +74,12 @@ impl Task for TimerTask {
     }
 
     fn run(self: Box<Self>, scope: &Scope<'_>, id: TaskId) -> Result<(), ()> {
-        let cb: Object<'_> = self.callback.get(scope);
+        let cb = self.callback.get(scope);
 
         // Call the callback with no arguments and the global as `this`.
         let result = {
             let fval = scope.root_value(cb.as_value());
-            let args = js::native::HandleValueArray::empty();
-            js::Function::call_value(scope, scope.global().handle(), fval, &args)
+            js::Function::call_value(scope, scope.global().handle(), fval, &[])
         };
 
         if result.is_err() {

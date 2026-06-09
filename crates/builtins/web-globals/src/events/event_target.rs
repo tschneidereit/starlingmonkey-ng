@@ -57,7 +57,7 @@ pub struct EventTarget {
 impl EventTarget {
     /// <https://dom.spec.whatwg.org/#dom-eventtarget-eventtarget>
     #[constructor]
-    fn new() -> Self {
+    pub fn new() -> Self {
         // Step 1: Do nothing.
         EventTargetImpl {
             event_listener_list: Vec::new(),
@@ -66,7 +66,7 @@ impl EventTarget {
 
     /// <https://dom.spec.whatwg.org/#dom-eventtarget-addeventlistener>
     #[method]
-    fn add_event_listener(
+    pub fn add_event_listener(
         &self,
         scope: &Scope<'_>,
         event_type: String,
@@ -105,7 +105,7 @@ impl EventTarget {
 
     /// <https://dom.spec.whatwg.org/#dom-eventtarget-removeeventlistener>
     #[method]
-    fn remove_event_listener(
+    pub fn remove_event_listener(
         &self,
         scope: &Scope<'_>,
         event_type: String,
@@ -133,7 +133,7 @@ impl EventTarget {
 
     /// <https://dom.spec.whatwg.org/#dom-eventtarget-dispatchevent>
     #[method]
-    fn dispatch_event(
+    pub fn dispatch_event(
         &self,
         scope: &Scope<'_>,
         event: Event<'_>,

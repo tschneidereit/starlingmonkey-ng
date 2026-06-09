@@ -11,7 +11,7 @@ use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::{
     parse_macro_input, Data, DeriveInput, Fields, FnArg, Ident, ImplItem, ImplItemFn, ItemEnum,
-    ItemImpl, ItemStruct, LitBool, LitStr, Pat, ReturnType, Token, Type, Visibility,
+    ItemImpl, ItemStruct, LitBool, LitInt, LitStr, Pat, ReturnType, Token, Type, Visibility,
 };
 
 // ============================================================================
@@ -21,7 +21,16 @@ use syn::{
 /// Parsed key-value options from attribute arguments.
 /// Used by `#[jsclass]`, `#[jsmethods]`, `#[jsmodule]`, and `#[method]`.
 struct AttrOpts {
+    /// Optional name override for the JS class or method. By default, a
+    /// camel-case version of the Rust struct or method name is used.
     name: Option<String>,
+    /// Optional length property for the class. Used by `#[method(length = N)]`
+    /// to set the `length` property on generated methods.
+    length: Option<usize>,
+    /// Optional parent class for inheritance. `#[jsclass(extends = Parent)]`
+    /// or `#[webidl_interface(extends = Parent)]` generates a JS class that
+    /// inherits from `Parent` (which must also be defined with `#[jsclass]`
+    /// or `#[webidl_interface]`).
     extends: Option<Ident>,
     /// Inherit the prototype from a built-in JS class by `JSProtoKey`.
     ///
@@ -46,6 +55,7 @@ impl Parse for AttrOpts {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut opts = Self {
             name: None,
+            length: None,
             extends: None,
             js_proto: None,
             to_string_tag: None,
@@ -72,6 +82,7 @@ impl Parse for AttrOpts {
             let _: Token![=] = input.parse()?;
             match key.to_string().as_str() {
                 "name" => opts.name = Some(input.parse::<LitStr>()?.value()),
+                "length" => opts.length = Some(input.parse::<LitInt>()?.base10_parse()?),
                 "extends" => opts.extends = Some(input.parse()?),
                 "js_proto" => opts.js_proto = Some(input.parse::<LitStr>()?.value()),
                 "to_string_tag" => opts.to_string_tag = Some(input.parse::<LitStr>()?.value()),
@@ -470,6 +481,7 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         // that are populated by #[jsmethods].
         #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl ::js::class::ClassDef for #inner_name {
+            type Rooted<'s> = #struct_name<'s>;
             const NAME: &'static str = #js_name;
             const NAME_CSTR: &'static ::core::ffi::CStr = #js_name_cstr_lit;
             const NOT_TYPE_ERROR: &'static ::core::ffi::CStr = #not_type_error_lit;
@@ -646,6 +658,13 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             }
         }
 
+        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+        impl<'s> ::std::convert::From<#struct_name<'s>> for ::js::gc::handle::Stack<'s, #inner_name> {
+            fn from(val: #struct_name<'s>) -> Self {
+                val.0
+            }
+        }
+
         impl<'s> ::std::convert::From<#struct_name<'s>> for ::js::gc::handle::Heap<#inner_name> {
             fn from(val: #struct_name<'s>) -> Self {
                 ::js::gc::handle::Heap::from(val.0)
@@ -703,11 +722,9 @@ enum MethodKind {
     Destructor,
     Method {
         js_name: String,
-        nargs: usize,
     },
     StaticMethod {
         js_name: String,
-        nargs: usize,
     },
     /// Property getter — becomes a JSPropertySpec accessor, or a per-instance
     /// own accessor when `unforgeable` (`[LegacyUnforgeable]`).
@@ -741,6 +758,13 @@ enum ReturnStyle {
     Raw,
     /// Returns `JSPromise` — creates a JS Promise and spawns the async future
     Promise,
+    /// Returns `Result<Promise<'_>, E>` — a synchronous WebIDL operation whose
+    /// return type is a promise. The `Ok` promise is returned to JS; an `Err`
+    /// (from argument conversion or the method body) is surfaced as a rejected
+    /// promise rather than a synchronous throw, per WebIDL §3.7.7 ("Operations":
+    /// when an operation whose return type is a promise type throws, return
+    /// `! Call(%Promise.reject%, %Promise%, « E »)`).
+    ResultPromise,
     /// Returns `Self` (or the class type) from a method/static_method —
     /// the result is wrapped into a new JS object via `create_instance`.
     InstanceValue,
@@ -752,6 +776,12 @@ struct MethodInfo {
     fn_item: ImplItemFn,
     /// Parameter names and types (excluding self/cx/args)
     params: Vec<(Ident, Type)>,
+    /// Number of required arguments: the explicit `length = N` override when
+    /// given, otherwise the count of non-`Option` (and non-`RestArgs`) params.
+    /// This is both the JS-visible `.length` and the threshold at and beyond
+    /// which `any`-typed (`HandleValue`/`Value`) params are extracted as
+    /// optional (missing → `undefined`) rather than throwing.
+    nargs: u32,
     /// How the return value should be handled
     return_style: ReturnStyle,
     /// Whether the method takes &self
@@ -830,6 +860,12 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
     let mut methods: Vec<MethodInfo> = Vec::new();
     let mut ctor_original_name: Option<Ident> = None;
     let mut constant_builder_calls: Vec<proc_macro2::TokenStream> = Vec::new();
+    // Names of unannotated `fn`s in the impl block. These are plain Rust
+    // helpers (not JS-exposed), but like `#[method]`s they operate on the
+    // rooted object, so they are moved onto the stack newtype `Foo<'s>`
+    // alongside the registered methods — letting them use the newtype API
+    // (`self.data()`, sibling methods) and be called as `self.helper(..)`.
+    let mut helper_fn_names: Vec<Ident> = Vec::new();
 
     // Parse each item and classify it
     for item in &mut input.items {
@@ -855,6 +891,7 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
         if let ImplItem::Fn(fn_item) = item {
             let mut kind = None;
             let mut custom_rename = None;
+            let mut custom_nargs = None;
 
             // Check for our attributes
             fn_item.attrs.retain(|attr| {
@@ -865,10 +902,10 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                     // Parse optional (name = "...")
                     if let Ok(opts) = attr.parse_args::<AttrOpts>() {
                         custom_rename = opts.name;
+                        custom_nargs = opts.length;
                     }
                     kind = Some(MethodKind::Method {
                         js_name: String::new(), // filled below
-                        nargs: 0,
                     });
                     false
                 } else if attr.path().is_ident("static_method") {
@@ -878,7 +915,6 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                     }
                     kind = Some(MethodKind::StaticMethod {
                         js_name: String::new(), // filled below
-                        nargs: 0,
                     });
                     false
                 } else if attr.path().is_ident("getter") {
@@ -924,10 +960,19 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
 
             let kind = match kind {
                 Some(k) => k,
-                None => continue, // Skip methods without our attrs
+                None => {
+                    helper_fn_names.push(fn_item.sig.ident.clone());
+                    continue;
+                }
             };
 
-            let info = parse_method_info(fn_item.clone(), kind, custom_rename, &type_name);
+            let info = parse_method_info(
+                fn_item.clone(),
+                kind,
+                custom_rename,
+                custom_nargs,
+                &type_name,
+            );
 
             if matches!(info.kind, MethodKind::Constructor) {
                 ctor_original_name = Some(fn_item.sig.ident.clone());
@@ -1023,26 +1068,24 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
             MethodKind::PostInit => {
                 new_post_init_info = Some(i);
             }
-            MethodKind::Method { js_name, nargs } => {
+            MethodKind::Method { js_name } => {
                 let (native_fn, builder_call) = gen_method_native(
                     method,
                     &inner_name,
                     &type_name,
                     js_name,
-                    *nargs,
                     config.method_flags,
                     on_newtype,
                 );
                 native_fns.push(native_fn);
                 builder_calls.push(builder_call);
             }
-            MethodKind::StaticMethod { js_name, nargs } => {
+            MethodKind::StaticMethod { js_name } => {
                 let (native_fn, builder_call) = gen_method_native(
                     method,
                     &inner_name,
                     &type_name,
                     js_name,
-                    *nargs,
                     config.method_flags,
                     false,
                 );
@@ -1148,8 +1191,10 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                 if remove_names.iter().any(|n| *ident == **n) {
                     continue; // setup ctor / post_init — dropped entirely
                 }
-                if newtype_method_names.contains(ident) {
-                    newtype_items.push(item); // Stack newtype methods — moved to newtype impl
+                if newtype_method_names.contains(ident) || helper_fn_names.contains(ident) {
+                    // Registered methods and unannotated helpers alike move to
+                    // the newtype impl.
+                    newtype_items.push(item);
                     continue;
                 }
             }
@@ -1158,18 +1203,10 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
         input.items = retained;
     }
 
-    // The constructor's `length` is its number of required arguments: the
-    // params that are neither `Option<T>` (optional) nor `RestArgs` (variadic).
     let ctor_nargs: u32 = methods
         .iter()
         .find(|m| matches!(m.kind, MethodKind::Constructor))
-        .map(|m| {
-            m.params
-                .iter()
-                .filter(|(_, ty)| !is_option_type(ty))
-                .count() as u32
-        })
-        .unwrap_or(0);
+        .map_or(0, |m| m.nargs);
     let ctor_nargs_method = quote! {
         fn nargs(&self) -> u32 {
             #ctor_nargs
@@ -1294,7 +1331,7 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
             let info = &methods[idx];
             let setup_fn_name = format_ident!("__ctor_setup");
             let arg_extractions =
-                gen_arg_extractions(&info.params, quote!(args), true, quote!(scope));
+                gen_arg_extractions(&info.params, quote!(args), true, quote!(scope), info.nargs);
             let arg_names: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
             let call = if info.has_cx {
                 quote! { #type_name::#setup_fn_name(&__typed, scope, #(#arg_names),*) }
@@ -1774,6 +1811,7 @@ fn parse_method_info(
     fn_item: ImplItemFn,
     mut kind: MethodKind,
     custom_rename: Option<String>,
+    custom_nargs: Option<usize>,
     type_name: &Ident,
 ) -> MethodInfo {
     let method_name = fn_item.sig.ident.to_string();
@@ -1794,7 +1832,7 @@ fn parse_method_info(
 
     // Collect non-self parameters, detecting cx and raw params
     let mut params = Vec::new();
-    let mut nargs = 0;
+    let mut required_args = 0;
     let mut has_cx = false;
     let mut is_raw = false;
     let mut has_rest_args = false;
@@ -1824,7 +1862,7 @@ fn parse_method_info(
             if let Pat::Ident(pat_ident) = pat_ty.pat.as_ref() {
                 params.push((pat_ident.ident.clone(), (*pat_ty.ty).clone()));
                 if !is_option_type(&pat_ty.ty) {
-                    nargs += 1;
+                    required_args += 1;
                 }
             }
         }
@@ -1847,19 +1885,11 @@ fn parse_method_info(
     });
 
     match &mut kind {
-        MethodKind::Method {
-            js_name: n,
-            nargs: na,
-        } => {
+        MethodKind::Method { js_name: n } => {
             *n = js_name;
-            *na = nargs;
         }
-        MethodKind::StaticMethod {
-            js_name: n,
-            nargs: na,
-        } => {
+        MethodKind::StaticMethod { js_name: n } => {
             *n = js_name;
-            *na = nargs;
         }
         MethodKind::Getter { js_name: n, .. } => {
             *n = js_name;
@@ -1877,6 +1907,7 @@ fn parse_method_info(
         kind,
         fn_item,
         params,
+        nargs: custom_nargs.unwrap_or(required_args) as u32,
         return_style,
         has_self,
         has_mut_self,
@@ -1967,14 +1998,37 @@ fn extract_use_leaf_ident(tree: &syn::UseTree) -> Option<&Ident> {
 }
 
 fn is_promise_type(ty: &Type) -> bool {
-    let s = quote!(#ty).to_string();
-    // TODO: Remove `JSPromise` variants once all code is migrated to `Promise`.
-    s == "JSPromise"
-        || s.ends_with(":: JSPromise")
-        || s.ends_with("::JSPromise")
-        || s == "Promise"
-        || s.ends_with(":: Promise")
-        || s.ends_with("::Promise")
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "Promise" || s.ident == "JSPromise")
+}
+
+/// Whether the return type is `Result<Promise<...>, _>`: a synchronous WebIDL
+/// operation whose declared return is a promise. The `Ok` type is the first
+/// generic argument of the `Result`; it counts as a promise when its final path
+/// segment is `Promise`/`JSPromise` (the wrapper carries a lifetime argument,
+/// e.g. `Promise<'r>`, which `is_promise_type`'s bare-identifier match rejects).
+fn is_result_promise_type(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    if seg.ident != "Result" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return false;
+    };
+    let Some(syn::GenericArgument::Type(ok_ty)) = args.args.first() else {
+        return false;
+    };
+    is_promise_type(ok_ty)
 }
 
 fn is_integer_type(ty: &Type) -> bool {
@@ -2211,6 +2265,8 @@ fn classify_return_style(
             }
             if is_promise_type(ty) {
                 ReturnStyle::Promise
+            } else if is_result_promise_type(ty) {
+                ReturnStyle::ResultPromise
             } else if is_result_unit_jserror(&ty_str) {
                 // A `Result<(), ExnThrown>` method that takes `&CallArgs` sets its
                 // own return value (Raw); otherwise the `Ok(())` value is the
@@ -2238,13 +2294,22 @@ fn classify_return_style(
 // ============================================================================
 
 /// Generate argument extraction code for a list of typed parameters.
+///
 /// When `use_question_mark` is true, extraction errors propagate via `?`;
 /// otherwise they `return false` (for use inside JSNative wrappers).
+///
+/// `required` is the method's argument count (its JS `.length`). An `any`-typed
+/// parameter (`HandleValue`/`Value`) at or beyond that index is extracted as
+/// optional: a missing argument becomes `undefined` instead of throwing "Not
+/// enough arguments". This lets `#[method(length = N)]` make trailing `any`
+/// params optional without wrapping them in `Option<…>`, matching how WebIDL
+/// `optional any` defaults to `undefined`.
 fn gen_arg_extractions(
     params: &[(Ident, Type)],
     args_expr: proc_macro2::TokenStream,
     use_question_mark: bool,
     scope_expr: proc_macro2::TokenStream,
+    required: u32,
 ) -> Vec<proc_macro2::TokenStream> {
     params
         .iter()
@@ -2286,7 +2351,7 @@ fn gen_arg_extractions(
                     quote! { __val.is_undefined() || __val.is_null() }
                 };
                 return quote! {
-                    let __val = unsafe { *#args_expr.get(#idx) };
+                    let __val = #args_expr.get(#idx);
                     let #name = if #absent_check {
                         None
                     } else {
@@ -2308,6 +2373,10 @@ fn gen_arg_extractions(
                     unsafe { ::js::class::get_arg_with_config::<#ty>(#scope_expr, #args_expr, #idx,
                         ::js::conversion::ConversionBehavior::Default) }
                 }
+            } else if is_any_value_type(ty) && idx >= required {
+                // An `any` param past the required count: a missing argument is
+                // `undefined`, an ordinary `any` value, so don't throw.
+                quote! { unsafe { ::js::class::get_arg_or_undefined(#scope_expr, #args_expr, #idx) } }
             } else {
                 quote! { unsafe { ::js::class::get_arg(#scope_expr, #args_expr, #idx) } }
             };
@@ -2328,7 +2397,8 @@ fn gen_arg_extractions(
 /// Generate the constructor body that extracts args and calls the Rust constructor fn.
 fn gen_constructor_body(info: &MethodInfo, type_name: &Ident) -> proc_macro2::TokenStream {
     let ctor_fn = &info.fn_item.sig.ident;
-    let arg_extractions = gen_arg_extractions(&info.params, quote!(args), true, quote!(scope));
+    let arg_extractions =
+        gen_arg_extractions(&info.params, quote!(args), true, quote!(scope), info.nargs);
     let arg_names: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
 
     // Build the constructor call, passing scope and/or args if the Rust
@@ -2377,63 +2447,74 @@ fn gen_method_native(
     type_name: &Ident,
     struct_name: &Ident,
     js_name: &str,
-    nargs: usize,
     flags: u16,
     on_newtype: bool,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
     let fn_name = &info.fn_item.sig.ident;
     let native_name = format_ident!("__native_{type_name}_{fn_name}");
     let name_str = format!("{}::{}", struct_name, fn_name);
-    let nargs_u32 = nargs as u32;
+    let nargs_u32 = info.nargs;
 
     // Create the C string literal for the JS name
     let js_name_cstr = std::ffi::CString::new(js_name).unwrap();
     let js_name_cstr_lit = proc_macro2::Literal::c_string(&js_name_cstr);
 
-    // Use __args internally to avoid shadowing user's rest param names
-    let this_extraction = if on_newtype && (info.has_self || info.has_mut_self) {
-        if info.has_mut_self {
-            quote! {
-                let mut __self = match ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) {
-                    Ok(v) => v,
-                    Err(::js::error::ExnThrown) => {
-                        return js::exception::check_fn_return(&scope, false, #name_str);
-                    },
-                };
-            }
-        } else {
-            quote! {
-                let __self = match ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) {
-                    Ok(v) => v,
-                    Err(::js::error::ExnThrown) => {
-                        return js::exception::check_fn_return(&scope, false, #name_str);
-                    },
-                };
-            }
-        }
+    // Use __args internally to avoid shadowing user's rest param names.
+    //
+    // The brand check (`this`-type validation) `get_this`s the receiver. For a
+    // promise-returning operation (`ResultPromise`), a brand-check failure must
+    // surface as a rejected promise, not a synchronous throw (WebIDL §3.7.7),
+    // so it runs inside the rejecting closure (`this_in_closure`, `?`-style) and
+    // nothing is emitted here. For every other return style it throws
+    // synchronously before the body.
+    let has_this = info.has_self || info.has_mut_self;
+    let self_mut = if info.has_mut_self {
+        quote! { mut }
+    } else {
+        quote! {}
+    };
+    let this_getter_expr = if on_newtype && has_this {
+        quote! { ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) }
     } else if info.has_self {
-        quote! {
-            let __self = match ::js::class::get_this_data::<#type_name>(&scope, &__args) {
-                Ok(v) => v,
-                Err(::js::error::ExnThrown) => {
-                    return js::exception::check_fn_return(&scope, false, #name_str);
-                },
-            };
-        }
+        quote! { ::js::class::get_this_data::<#type_name>(&scope, &__args) }
     } else if info.has_mut_self {
+        quote! { ::js::class::get_this_data_mut::<#type_name>(&scope, &__args) }
+    } else {
+        quote! {}
+    };
+    let is_result_promise = matches!(info.return_style, ReturnStyle::ResultPromise);
+    let this_extraction = if !has_this || is_result_promise {
+        quote! {}
+    } else {
         quote! {
-            let __self = match ::js::class::get_this_data_mut::<#type_name>(&scope, &__args) {
+            let #self_mut __self = match #this_getter_expr {
                 Ok(v) => v,
                 Err(::js::error::ExnThrown) => {
                     return js::exception::check_fn_return(&scope, false, #name_str);
                 },
             };
         }
+    };
+    let this_in_closure = if has_this && is_result_promise {
+        quote! { let #self_mut __self = #this_getter_expr?; }
     } else {
         quote! {}
     };
 
-    let arg_extractions = gen_arg_extractions(&info.params, quote!(&__args), false, quote!(&scope));
+    // For a `ResultPromise` method the argument extractions live inside the
+    // rejecting closure built in the body (so a conversion failure becomes a
+    // rejected promise, not a synchronous throw); nothing is emitted here.
+    let arg_extractions = if matches!(info.return_style, ReturnStyle::ResultPromise) {
+        Vec::new()
+    } else {
+        gen_arg_extractions(
+            &info.params,
+            quote!(&__args),
+            false,
+            quote!(&scope),
+            info.nargs,
+        )
+    };
     let call_args: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
 
     // Generate rest args collection using FromJSVal conversion
@@ -2555,6 +2636,47 @@ fn gen_method_native(
                 }
             }
         },
+        ReturnStyle::ResultPromise => {
+            // Run the brand check, argument extraction, and the method call inside
+            // a closure so that any failure (a wrong-`this` brand check, a
+            // missing/invalid argument, or an `Err` from the body) yields a
+            // rejected promise instead of a synchronous throw — WebIDL §3.7.7
+            // ("Operations") for a promise-returning operation. All three use the
+            // `?`-propagating variant; `#call` returns the `Result`.
+            let extractions = gen_arg_extractions(
+                &info.params,
+                quote!(&__args),
+                true,
+                quote!(&scope),
+                info.nargs,
+            );
+            quote! {
+                let __result = (|| -> ::core::result::Result<_, ::js::error::ExnThrown> {
+                    #this_in_closure
+                    #(#extractions)*
+                    #call
+                })();
+                match __result {
+                    Ok(__v) => {
+                        ::js::class::set_return(&scope, &__args, &__v);
+                        js::exception::check_fn_return(&scope, true, &#name_str)
+                    }
+                    Err(::js::error::ExnThrown) => {
+                        // The pending exception is the conversion/body error;
+                        // adopt it as the rejection reason.
+                        match ::js::Promise::new_rejected_with_pending_error(&scope) {
+                            Ok(__rejected) => {
+                                __args.rval().set(unsafe {
+                                    ::js::value::from_object(__rejected.as_raw())
+                                });
+                                js::exception::check_fn_return(&scope, true, &#name_str)
+                            }
+                            Err(_) => js::exception::check_fn_return(&scope, false, &#name_str),
+                        }
+                    }
+                }
+            }
+        }
         ReturnStyle::Promise => quote! {
             // Create a bare JS Promise (no executor)
             let __promise = match ::js::promise::Promise::new_pending(&scope) {
@@ -2634,46 +2756,44 @@ fn gen_accessor_native(
     };
     let name_str = format!("{}::{}", struct_name, fn_name);
 
-    let this_extraction = if on_newtype {
-        if is_getter {
-            quote! {
-                let __self = match ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) {
-                    Ok(v) => v,
-                    Err(::js::error::ExnThrown) => {
-                        return js::exception::check_fn_return(&scope, false, #name_str);
-                    },
-                };
-            }
-        } else {
-            quote! {
-                let mut __self = match ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) {
-                    Ok(v) => v,
-                    Err(::js::error::ExnThrown) => {
-                        return js::exception::check_fn_return(&scope, false, #name_str);
-                    },
-                };
-            }
-        }
-    } else if is_getter {
-        // Getter: &self
+    // A getter whose attribute type is a promise must reject on a brand-check
+    // failure, not throw, per WebIDL §3.7.7 ("Attributes").
+    let is_promise_getter = is_getter
+        && matches!(&info.fn_item.sig.output, syn::ReturnType::Type(_, ty) if is_promise_type(ty));
+    let brand_fail = if is_promise_getter {
         quote! {
-            let __self = match ::js::class::get_this_data::<#type_name>(&scope, &__args) {
-                Ok(v) => v,
-                Err(::js::error::ExnThrown) => {
-                    return js::exception::check_fn_return(&scope, false, #name_str);
-                },
+            // Adopt the pending brand-check exception (a `TypeError`) as the
+            // rejection reason; the getter still returns a value (the rejected
+            // promise), so set `rval` and report success.
+            return match ::js::Promise::new_rejected_with_pending_error(&scope) {
+                Ok(__rejected) => {
+                    __args.rval().set(unsafe { ::js::value::from_object(__rejected.as_raw()) });
+                    js::exception::check_fn_return(&scope, true, #name_str)
+                }
+                Err(_) => js::exception::check_fn_return(&scope, false, #name_str),
             };
         }
     } else {
-        // Setter: &mut self
-        quote! {
-            let __self = match ::js::class::get_this_data_mut::<#type_name>(&scope, &__args) {
-                Ok(v) => v,
-                Err(::js::error::ExnThrown) => {
-                    return js::exception::check_fn_return(&scope, false, #name_str);
-                },
-            };
-        }
+        quote! { return js::exception::check_fn_return(&scope, false, #name_str); }
+    };
+    let this_getter_expr = if on_newtype {
+        quote! { ::js::class::get_this::<#struct_name<'_>>(&scope, &__args) }
+    } else if is_getter {
+        quote! { ::js::class::get_this_data::<#type_name>(&scope, &__args) }
+    } else {
+        quote! { ::js::class::get_this_data_mut::<#type_name>(&scope, &__args) }
+    };
+    // Getters take `&self`; setters take `&mut self`.
+    let self_mut = if is_getter {
+        quote! {}
+    } else {
+        quote! { mut }
+    };
+    let this_extraction = quote! {
+        let #self_mut __self = match #this_getter_expr {
+            Ok(v) => v,
+            Err(::js::error::ExnThrown) => { #brand_fail }
+        };
     };
 
     let body = if is_getter {
@@ -2726,8 +2846,13 @@ fn gen_accessor_native(
         }
     } else {
         // Setter: extract arg[0], call method
-        let arg_extractions =
-            gen_arg_extractions(&info.params, quote!(&__args), false, quote!(&scope));
+        let arg_extractions = gen_arg_extractions(
+            &info.params,
+            quote!(&__args),
+            false,
+            quote!(&scope),
+            info.nargs,
+        );
 
         let call_args: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
         let call = if on_newtype {
@@ -2873,6 +2998,258 @@ fn has_no_trace_attr(field: &syn::Field) -> bool {
 }
 
 // ============================================================================
+// #[derive(ScopeRoot)] — scope-rooted mirror for `#[must_root]` aggregates
+// ============================================================================
+
+/// If `ty` is `Heap<INNER>`, returns `INNER`.
+fn heap_inner_ty(ty: &Type) -> Option<&Type> {
+    let Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Heap" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    match args.args.first()? {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    }
+}
+
+/// Whether `ty`'s final path segment is `Value` (the `js::native::Value` JSVal).
+fn is_value_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Path(tp) if tp.path.segments.last().is_some_and(|s| s.ident == "Value"))
+}
+
+/// One field's classification for `#[derive(ScopeRoot)]`.
+struct RootField {
+    /// Binding identifier used in destructuring patterns.
+    bind: Ident,
+    /// `Some(ident)` for a named field, `None` for a tuple field.
+    name: Option<Ident>,
+    /// `true` for any `Heap<…>` field (object or value).
+    is_heap: bool,
+    /// `true` for `Heap<T>` where `T: JSType` (rooted via `take`); `false` for
+    /// `Heap<Value>` and plain fields.
+    is_object_heap: bool,
+    /// The field type in the rooted mirror.
+    mirror_ty: proc_macro2::TokenStream,
+}
+
+fn classify_root_fields(fields: &Fields) -> Vec<RootField> {
+    fields
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let (is_heap, is_object_heap, mirror_ty) = match heap_inner_ty(&f.ty) {
+                Some(inner) if is_value_ty(inner) => {
+                    (true, false, quote! { ::js::prelude::HandleValue<'s> })
+                }
+                Some(inner) => (
+                    true,
+                    true,
+                    quote! { <#inner as ::js::builtins::JSType>::Rooted<'s> },
+                ),
+                None => {
+                    let ty = &f.ty;
+                    (false, false, quote! { #ty })
+                }
+            };
+            RootField {
+                bind: f.ident.clone().unwrap_or_else(|| format_ident!("__f{}", i)),
+                name: f.ident.clone(),
+                is_heap,
+                is_object_heap,
+                mirror_ty,
+            }
+        })
+        .collect()
+}
+
+/// Build, for one field group (an enum variant's fields or a struct's fields):
+/// the mirror field declarations, a by-value destructuring pattern, and the two
+/// rooted constructor argument lists (fast `take`-based and traced `get`-based).
+fn build_root_group(
+    fields: &Fields,
+) -> (
+    proc_macro2::TokenStream, // mirror field declarations (with braces/parens)
+    proc_macro2::TokenStream, // destructuring pattern (with braces/parens)
+    proc_macro2::TokenStream, // fast-path constructor args (with braces/parens)
+    proc_macro2::TokenStream, // traced-path constructor args (with braces/parens)
+    usize,                    // number of `Heap` fields
+    bool,                     // single object-heap field (fast path eligible)
+) {
+    let infos = classify_root_fields(fields);
+    let heap_count = infos.iter().filter(|f| f.is_heap).count();
+    let single_object =
+        heap_count == 1 && infos.iter().filter(|f| f.is_heap).all(|f| f.is_object_heap);
+
+    let named = matches!(fields, Fields::Named(_));
+    let binds: Vec<&Ident> = infos.iter().map(|f| &f.bind).collect();
+
+    let mirror_decls = infos.iter().map(|f| {
+        let ty = &f.mirror_ty;
+        match &f.name {
+            Some(n) => quote! { #n: #ty },
+            None => quote! { #ty },
+        }
+    });
+    let fast_args = infos.iter().map(|f| {
+        let bind = &f.bind;
+        let expr = if f.is_heap {
+            quote! { #bind.take(scope) }
+        } else {
+            quote! { #bind }
+        };
+        match &f.name {
+            Some(n) => quote! { #n: #expr },
+            None => quote! { #expr },
+        }
+    });
+    let traced_args = infos.iter().map(|f| {
+        let bind = &f.bind;
+        let expr = if f.is_heap {
+            quote! { #bind.get(scope) }
+        } else {
+            quote! { *#bind }
+        };
+        match &f.name {
+            Some(n) => quote! { #n: #expr },
+            None => quote! { #expr },
+        }
+    });
+
+    let (mirror, pattern, fast, traced) = if named {
+        (
+            quote! { { #(#mirror_decls),* } },
+            quote! { { #(#binds),* } },
+            quote! { { #(#fast_args),* } },
+            quote! { { #(#traced_args),* } },
+        )
+    } else {
+        (
+            quote! { ( #(#mirror_decls),* ) },
+            quote! { ( #(#binds),* ) },
+            quote! { ( #(#fast_args),* ) },
+            quote! { ( #(#traced_args),* ) },
+        )
+    };
+    (mirror, pattern, fast, traced, heap_count, single_object)
+}
+
+/// Generates a scope-rooted mirror of a `#[must_root]` aggregate plus a
+/// `root(self, scope)` method that produces it.
+///
+/// For a type `Foo` whose fields are `Heap<T>` / `Heap<Value>` / plain `Copy`
+/// values, this emits `StackFoo<'s>` with each `Heap<T>` replaced by its rooted
+/// handle (`<T as JSType>::Rooted<'s>`), each `Heap<Value>` by `HandleValue<'s>`,
+/// and plain fields unchanged. `StackFoo` holds only scope-rooted handles, so it
+/// is **not** `#[must_root]` — methods can hold it across allocations freely.
+///
+/// `Foo::root` is safe by construction. A field group with a single `Heap<T:
+/// JSType>` field roots it with [`Heap::take`](js::gc::handle::Heap::take)
+/// (drop-before-root, no allocation). A group with two or more `Heap` fields (or
+/// a `Heap<Value>`) is first moved into a `RootedTraceableBox` and each field
+/// rooted with [`Heap::get`](js::gc::handle::Heap::get) while traced, so rooting
+/// one field can never stale another. The single generated `root` carries the one
+/// `allow_unrooted` these types need (`self` is `#[must_root]`).
+///
+/// Requires the type to be `Trace` (the traced path boxes `self`). Use for
+/// settled-exactly-once consume-leaf types (read requests, queue entries, promise
+/// slots) — not for types mutated and re-queued in place.
+#[proc_macro_derive(ScopeRoot)]
+pub fn derive_scope_root(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let vis = &input.vis;
+    let rooted_name = format_ident!("Stack{}", name);
+
+    let (mirror_def, root_body) = match &input.data {
+        Data::Enum(data) => {
+            let mut mirror_variants = Vec::new();
+            let mut arms = Vec::new();
+            for v in &data.variants {
+                let vname = &v.ident;
+                let (mirror, pattern, fast, traced, heap_count, single_object) =
+                    build_root_group(&v.fields);
+                mirror_variants.push(quote! { #vname #mirror });
+                if single_object || heap_count == 0 {
+                    arms.push(quote! {
+                        #name::#vname #pattern => #rooted_name::#vname #fast,
+                    });
+                } else {
+                    let wildcard = if matches!(v.fields, Fields::Named(_)) {
+                        quote! { #name::#vname { .. } }
+                    } else {
+                        quote! { #name::#vname ( .. ) }
+                    };
+                    arms.push(quote! {
+                        __req @ #wildcard => {
+                            let __boxed = ::js::heap::RootedTraceableBox::new(__req);
+                            match &*__boxed {
+                                #name::#vname #pattern => #rooted_name::#vname #traced,
+                                _ => ::std::unreachable!(),
+                            }
+                        }
+                    });
+                }
+            }
+            (
+                quote! {
+                    #vis enum #rooted_name<'s> {
+                        #(#mirror_variants),*
+                    }
+                },
+                quote! {
+                    match self {
+                        #(#arms)*
+                    }
+                },
+            )
+        }
+        Data::Struct(data) => {
+            let (mirror, pattern, fast, traced, heap_count, single_object) =
+                build_root_group(&data.fields);
+            let semi = if matches!(data.fields, Fields::Named(_)) {
+                quote! {}
+            } else {
+                quote! { ; }
+            };
+            let body = if single_object || heap_count == 0 {
+                quote! {
+                    let #name #pattern = self;
+                    #rooted_name #fast
+                }
+            } else {
+                quote! {
+                    let __boxed = ::js::heap::RootedTraceableBox::new(self);
+                    let #name #pattern = &*__boxed;
+                    #rooted_name #traced
+                }
+            };
+            (quote! { #vis struct #rooted_name<'s> #mirror #semi }, body)
+        }
+        Data::Union(_) => panic!("#[derive(ScopeRoot)] is not supported for unions"),
+    };
+
+    quote! {
+        #mirror_def
+
+        impl #name {
+            /// Root this `#[must_root]` value into `scope`, yielding its
+            /// scope-rooted (non-`must_root`) mirror. Generated by
+            /// `#[derive(ScopeRoot)]`.
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+            #vis fn root<'s>(self, scope: &'s ::js::gc::scope::Scope<'_>) -> #rooted_name<'s> {
+                #root_body
+            }
+        }
+    }
+    .into()
+}
+
+// ============================================================================
 // #[jsmodule] attribute macro
 // ============================================================================
 
@@ -2992,7 +3369,7 @@ pub fn jsmodule(attr: TokenStream, item: TokenStream) -> TokenStream {
         let nargs = exp.params.len() as u32;
 
         let arg_extractions =
-            gen_arg_extractions(&exp.params, quote!(&args), false, quote!(&scope));
+            gen_arg_extractions(&exp.params, quote!(&args), false, quote!(&scope), nargs);
         let call_args: Vec<_> = exp.params.iter().map(|(name, _)| quote!(#name)).collect();
 
         let call = if exp.is_raw {
@@ -3279,7 +3656,7 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
         let nargs = exp.params.len() as u32;
 
         let arg_extractions =
-            gen_arg_extractions(&exp.params, quote!(&args), false, quote!(&scope));
+            gen_arg_extractions(&exp.params, quote!(&args), false, quote!(&scope), nargs);
         let call_args: Vec<_> = exp.params.iter().map(|(name, _)| quote!(#name)).collect();
 
         let call = if exp.is_raw {
@@ -3562,7 +3939,7 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
         let nargs = exp.params.len() as u32;
 
         let arg_extractions =
-            gen_arg_extractions(&exp.params, quote!(&args), false, quote!(&scope));
+            gen_arg_extractions(&exp.params, quote!(&args), false, quote!(&scope), nargs);
         let call_args: Vec<_> = exp.params.iter().map(|(name, _)| quote!(#name)).collect();
 
         let call = if exp.is_raw {
@@ -4516,5 +4893,33 @@ mod tests {
     fn is_self_or_instance_type_rejects_substring_match() {
         assert!(!is_self_or_instance_type("URLSearchParams", "URL"));
         assert!(!is_self_or_instance_type("URLSearchParams<'s>", "URL"));
+    }
+
+    #[test]
+    fn is_result_promise_type_detects_promise_ok() {
+        let parse = |s: &str| syn::parse_str::<Type>(s).unwrap();
+        // The `Ok` type carries a lifetime argument, which the bare-identifier
+        // `is_promise_type` rejects — the dedicated check must still match.
+        assert!(is_result_promise_type(&parse(
+            "Result<Promise<'r>, ExnThrown>"
+        )));
+        assert!(is_result_promise_type(&parse(
+            "Result<js::Promise<'r>, ExnThrown>"
+        )));
+        assert!(is_result_promise_type(&parse(
+            "Result<JSPromise, ExnThrown>"
+        )));
+    }
+
+    #[test]
+    fn is_result_promise_type_rejects_non_promise() {
+        let parse = |s: &str| syn::parse_str::<Type>(s).unwrap();
+        assert!(!is_result_promise_type(&parse("Result<String, ExnThrown>")));
+        assert!(!is_result_promise_type(&parse("Result<(), ExnThrown>")));
+        assert!(!is_result_promise_type(&parse("Promise<'r>")));
+        // A `Promise` nested inside another `Ok` type is not a promise return.
+        assert!(!is_result_promise_type(&parse(
+            "Result<Vec<Promise<'r>>, ExnThrown>"
+        )));
     }
 }

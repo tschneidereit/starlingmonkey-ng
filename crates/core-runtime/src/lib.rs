@@ -54,9 +54,14 @@ pub fn run(
 ///
 /// Returns:
 /// - `Ok(Some((runtime, invocation)))` if the script left work in the event
-///   loop. The caller drives [`event_loop::run_to_completion`] (or an
-///   equivalent) to completion and then calls
-///   [`Runtime::unregister_invocation`] before dropping the runtime.
+///   loop. The returned `invocation` is **not** registered with the runtime's
+///   GC tracer: `setup` registers it only for the synchronous eval phase and
+///   unregisters it before handing it back, because moving it out of this
+///   function invalidates any raw pointer to it. The caller must call
+///   [`Runtime::register_invocation`] once the invocation reaches its final
+///   (stable) location, drive [`event_loop::run_to_completion`] (or an
+///   equivalent) to completion, then call [`Runtime::unregister_invocation`]
+///   before dropping the runtime.
 /// - `Ok(None)` if the script completed without scheduling any async work.
 ///   The invocation is already cleaned up.
 /// - `Err(_)` if the script failed to parse or threw during top-level
@@ -84,10 +89,17 @@ pub fn setup(
 
     let mut invocation = invocation::InvocationState::new();
 
-    // SAFETY: `invocation` is owned by this function until we either move it
-    // out in the `Some` return or unregister and drop it in the `None` /
-    // error paths. It is never freed while the runtime tracer holds the
-    // raw pointer.
+    // Register `invocation` for GC tracing during the synchronous eval and
+    // initial-microtask phase below. This registration covers only that phase:
+    // the registry stores a raw pointer to `invocation`'s current address, and
+    // returning it by value (the `Ok(Some(..))` path) moves it elsewhere — so
+    // the pointer is unregistered again before any such move (here on the error
+    // paths, and just before the `Some` return). The driver re-registers it at
+    // its final location.
+    //
+    // SAFETY: `invocation` lives at this address until it is unregistered on
+    // every path out of this function, so the tracer never dereferences a
+    // freed or moved-from slot.
     unsafe { runtime.register_invocation(&invocation) };
 
     {
@@ -112,8 +124,14 @@ pub fn setup(
 
         // Always drain microtasks first — promise reactions (e.g. from
         // `Promise.resolve().then(...)`) must run even if no event-loop
-        // tasks are queued.
-        event_loop::run_microtasks(&scope);
+        // tasks are queued. Keep the event loop active while draining: a
+        // microtask may itself call `setTimeout`/`queueMicrotask`, which need
+        // the current event loop set.
+        unsafe {
+            event_loop::with_event_loop(invocation.event_loop_mut(), |_| {
+                event_loop::run_microtasks(&scope);
+            });
+        }
     }
 
     if !invocation.event_loop().is_alive() {
@@ -121,6 +139,9 @@ pub fn setup(
         return Ok(None);
     }
 
+    // Unregister before moving `invocation` out: the move invalidates the raw
+    // pointer the registry holds. The driver re-registers at the final address.
+    runtime.unregister_invocation(&invocation);
     Ok(Some((runtime, invocation)))
 }
 

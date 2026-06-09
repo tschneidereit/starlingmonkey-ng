@@ -58,6 +58,15 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
         None => return Ok(()),
     };
 
+    // Register `invocation` for GC tracing now that it has reached its final,
+    // stable location (it is not moved again before `unregister` below). `setup`
+    // hands it back unregistered precisely because moving it here would have
+    // invalidated any earlier registration.
+    //
+    // SAFETY: `invocation` lives at this address until `unregister_invocation`
+    // below, so the tracer never dereferences a freed or moved-from slot.
+    unsafe { runtime.register_invocation(&invocation) };
+
     // Enter the default global's realm for the lifetime of the event loop.
     // Tasks running inside `run_to_completion` (timers, promise reactions,
     // etc.) need an active realm to call into JS.
@@ -93,6 +102,15 @@ fn drive_event_loop_native(
         .enable_time()
         .build()
         .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+
+    // Register `invocation` for GC tracing now that it has reached its final,
+    // stable location (it is not moved again before `unregister` below). `setup`
+    // hands it back unregistered precisely because moving it here would have
+    // invalidated any earlier registration.
+    //
+    // SAFETY: `invocation` lives at this address until `unregister_invocation`
+    // below, so the tracer never dereferences a freed or moved-from slot.
+    unsafe { runtime.register_invocation(&invocation) };
 
     // Enter the default global's realm for the lifetime of the event loop.
     // Tasks running inside `run_to_completion` (timers, promise reactions,

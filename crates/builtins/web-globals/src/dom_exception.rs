@@ -14,7 +14,7 @@
 use core_runtime::{jsmethods, webidl_interface};
 use js::error::{ExnThrown, ThrowException};
 use js::gc::scope::Scope;
-use js::native::{ExceptionStackBehavior, HandleValueArray};
+use js::native::ExceptionStackBehavior;
 use js::prelude::ToJSVal;
 
 // ---------------------------------------------------------------------------
@@ -156,40 +156,13 @@ impl DOMException {
 
 /// Throw a DOMException with the given name and message.
 ///
-/// This creates a new DOMException object via the JS constructor and sets it
-/// as the pending exception. Returns `false` to indicate an exception has
-/// been thrown (for use in JSNative return values).
+/// This creates a new DOMException object and sets it as the pending exception.
+/// Returns `false` to indicate an exception has been thrown (for use in
+/// JSNative return values).
 pub fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) -> ExnThrown {
-    // Build the constructor arguments: [message, name].
-    let name_val = match name.to_jsval(scope) {
-        Ok(s) => s,
-        Err(_) => return ExnThrown,
-    };
-    let msg_val = match message.to_jsval(scope) {
-        Ok(s) => s,
-        Err(_) => return ExnThrown,
-    };
-
-    let argv = [msg_val.get(), name_val.get()];
-    let hva = HandleValueArray {
-        length_: 2,
-        elements_: argv.as_ptr(),
-    };
-
     // Get the DOMException constructor from the global.
-    let global = scope.global();
-    let ctor_val = match global.get_property(scope, c"DOMException") {
-        Ok(v) => v,
-        Err(_) => return ExnThrown,
-    };
-
-    if !ctor_val.is_object() {
-        js::error::throw_type_error(scope, c"DOMException constructor not found");
-        return ExnThrown;
-    }
-
-    let exception = match js::Function::construct(scope, ctor_val, &hva) {
-        Ok(obj) => obj,
+    let exception = match DOMException::new(scope, Some(message.into()), Some(name.into())) {
+        Ok(exc) => exc,
         Err(_) => return ExnThrown,
     };
 

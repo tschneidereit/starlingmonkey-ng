@@ -11,7 +11,6 @@ use js::conversion::{ConversionError, FromJSVal};
 use js::error::{throw_type_error, ExnThrown};
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
-use js::native::HandleValueArray;
 use js::prelude::HandleValue;
 use js::{Function, Object};
 
@@ -57,11 +56,10 @@ pub(crate) fn flatten_options(scope: &Scope<'_>, options: Option<HandleValue<'_>
     match options {
         None => false,
         Some(val) => {
-            let raw = val.get();
             // Step 1: If _options_ is a boolean, then return _options_.
-            if raw.is_boolean() {
-                raw.to_boolean()
-            } else if raw.is_object() {
+            if val.is_boolean() {
+                val.to_boolean()
+            } else if val.is_object() {
                 // Step 2: Return _options_["``capture``"].
                 let obj = js::Object::from_value(scope, *val).expect("options should be an object");
                 if let Ok(capture_val) = obj.get_property(scope, c"capture") {
@@ -401,14 +399,9 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
             };
             let callback_val = scope.root_value(callback.as_value());
             let this_val = scope.root_value(target.as_value());
+            let event_val = scope.root_value(event.as_value());
 
-            let argv = [event.as_value()];
-            let args = HandleValueArray {
-                length_: 1,
-                elements_: argv.as_ptr(),
-            };
-
-            if Function::call(scope, this_val, callback_val, &args).is_err() {
+            if Function::call(scope, this_val, callback_val, &[event_val]).is_err() {
                 // Per the spec, exceptions from event listeners are "reported"
                 // but do not stop event dispatch. Clear the pending exception
                 // so it doesn't leak out of the dispatch call.

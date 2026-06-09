@@ -215,24 +215,50 @@ impl<T: JSType> Heap<T> {
 
     /// Root the referenced object, returning a stack-rooted handle.
     ///
-    /// The return type is inferred from context. For user-defined classes
-    /// with a stack newtype (e.g. `Item<'s>`), annotate the binding:
-    ///
-    /// ```ignore
-    /// let item: Item<'_> = heap_ref.get(scope);
-    /// ```
-    ///
-    /// Without annotation, returns `Stack<'s, T>`.
+    /// Returns `T::Rooted<'s>`, the stack-rooted type for `Heap<T>`.
     ///
     /// # Panics
     ///
     /// Panics if called on a default-constructed (null) `Heap`.
-    pub fn get<'s, N: From<Stack<'s, T>>>(&self, scope: &'s Scope<'_>) -> N {
+    pub fn get<'s>(&self, scope: &'s Scope<'_>) -> T::Rooted<'s> {
         let obj = self.heap.get();
         let handle = scope.root_object(
             NonNull::new(obj).expect("Heap::get called on a null (default-constructed) Heap"),
         );
-        N::from(Stack {
+        T::Rooted::from(Stack {
+            handle,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Consume the heap reference, returning its referent rooted in `scope`.
+    ///
+    /// Use this when a `Heap` (often a field of a struct) has been moved out of a
+    /// traced location into a Rust local and the next step can GC. A traced `Heap`
+    /// has its stored pointer updated by a moving GC and reclaimed cleanly; an
+    /// *untraced* one left to drop after a GC would run its drop write barrier on a
+    /// pointer the GC has since moved or freed — a use-after-free.
+    ///
+    /// The subtlety is that *rooting itself* can GC (e.g. under `RootsChange`
+    /// zeal), so it is not enough to `get` and then drop: that drop would still
+    /// run after GC has invalidated the pointer. `take` instead reads the
+    /// pointer, drops the `Heap` (running its barrier on the still-valid pointer),
+    /// and only *then* roots.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a default-constructed (null) `Heap`.
+    pub fn take<'s>(self, scope: &'s Scope<'_>) -> T::Rooted<'s> {
+        let obj = NonNull::new(self.heap.get())
+            .expect("Heap::take called on a null (default-constructed) Heap");
+        // Drop the `Heap` now, while its stored pointer is still live, so its
+        // barrier never runs on a pointer a later (rooting-triggered) GC moved.
+        drop(self);
+        // Rooting may trigger a GC that moves `obj`; `root_object` installs it
+        // into a traced slot first, so the returned handle tracks the new
+        // location even though the local `obj` becomes stale.
+        let handle = scope.root_object(obj);
+        T::Rooted::from(Stack {
             handle,
             _marker: PhantomData,
         })
@@ -248,8 +274,8 @@ impl<T: JSType> Heap<T> {
     }
 
     /// Store a new referent, replacing any previous one.
-    pub fn set(&self, value: Stack<'_, T>) {
-        (*self.heap).set(value.as_raw());
+    pub fn set<'a>(&self, value: impl Into<Stack<'a, T>>) {
+        (*self.heap).set(value.into().as_raw());
     }
 
     /// The current raw object pointer, for identity comparison only.
