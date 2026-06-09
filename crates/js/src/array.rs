@@ -33,6 +33,7 @@ use super::error::ExnThrown;
 pub struct Array;
 
 impl JSType for Array {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "Array";
 
     fn js_class() -> *const mozjs::jsapi::JSClass {

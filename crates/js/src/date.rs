@@ -31,6 +31,7 @@ use crate::Object;
 pub struct Date;
 
 impl JSType for Date {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "Date";
 
     fn js_class() -> *const mozjs::jsapi::JSClass {

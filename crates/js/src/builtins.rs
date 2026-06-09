@@ -27,9 +27,17 @@ use crate::gc::handle::Stack;
 /// type's identity tag. For builtin types this comes from SpiderMonkey's
 /// `ProtoKeyToClass`; for user-defined classes from the generated
 /// `static JSClass`.
-pub trait JSType: 'static {
+pub trait JSType: Sized + 'static {
     /// The JavaScript-visible name of this type (e.g. `"Object"`, `"Array"`, `"Counter"`).
     const JS_NAME: &'static str;
+
+    /// The canonical scope-rooted handle type for this `JSType`.
+    ///
+    /// For builtin marker types this is `Stack<'s, Self>`; for user-defined
+    /// classes it's the generated stack newtype (e.g. `Dog<'s>`). `Rooted<'s>`
+    /// is what [`Heap::get`](crate::gc::handle::Heap::get) and
+    /// [`Heap::take`](crate::gc::handle::Heap::take) return.
+    type Rooted<'s>: From<Stack<'s, Self>>;
 
     /// The `JSClass` pointer that identifies objects of this type.
     ///

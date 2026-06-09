@@ -52,6 +52,25 @@ use mozjs::jsapi::{
 use mozjs::jsval::UndefinedValue;
 use mozjs::rust::wrappers2;
 
+/// Backing buffer for a call's arguments.
+///
+/// `Function::call` and friends take `&[HandleValue]` and copy their values
+/// into this `Vec` so SpiderMonkey can be handed a `HandleValueArray` view.
+struct ArgBuffer(Vec<Value>);
+
+impl ArgBuffer {
+    fn new(args: &[HandleValue]) -> Self {
+        ArgBuffer(args.iter().map(|h| h.get()).collect())
+    }
+
+    fn handles(&self) -> HandleValueArray {
+        HandleValueArray {
+            length_: self.0.len(),
+            elements_: self.0.as_ptr(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Function marker type
 // ---------------------------------------------------------------------------
@@ -69,10 +88,19 @@ use mozjs::rust::wrappers2;
 pub struct Function;
 
 impl JSType for Function {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "Function";
 
     fn js_class() -> *const JSClass {
         crate::class::proto_key_to_class(mozjs::jsapi::JSProtoKey::JSProto_Function)
+    }
+
+    /// Checks if `obj` is a `JSFunction`.
+    ///
+    /// Note that this is not the same as `IsCallable`: some callable objects (bound functions, proxies) are not `JSFunction`s. Callsites that need to accept any callable should use `Object::is_callable` instead of this method, and represent the function
+    /// as an `Object` rather than a `Function`.
+    unsafe fn is_instance(obj: *mut mozjs::jsapi::JSObject) -> bool {
+        unsafe { mozjs::jsapi::JS_ObjectIsFunction(obj) }
     }
 }
 
@@ -176,11 +204,18 @@ impl<'s> Stack<'s, Function> {
         scope: &Scope<'a>,
         this: HandleObject,
         fval: HandleValue,
-        args: &HandleValueArray,
+        args: &[HandleValue],
     ) -> Result<HandleValue<'a>, ExnThrown> {
+        let args = ArgBuffer::new(args);
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
-            wrappers2::JS_CallFunctionValue(scope.cx_mut(), this, fval, args, rval.reborrow())
+            wrappers2::JS_CallFunctionValue(
+                scope.cx_mut(),
+                this,
+                fval,
+                &args.handles(),
+                rval.reborrow(),
+            )
         };
         ExnThrown::check(ok)?;
         Ok(rval.handle())
@@ -191,15 +226,16 @@ impl<'s> Stack<'s, Function> {
         scope: &Scope<'a>,
         obj: HandleObject,
         name: &CStr,
-        args: &HandleValueArray,
+        args: &[HandleValue],
     ) -> Result<HandleValue<'a>, ExnThrown> {
+        let args = ArgBuffer::new(args);
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
             wrappers2::JS_CallFunctionName(
                 scope.cx_mut(),
                 obj,
                 name.as_ptr(),
-                args,
+                &args.handles(),
                 rval.reborrow(),
             )
         };
@@ -212,10 +248,13 @@ impl<'s> Stack<'s, Function> {
         scope: &Scope<'a>,
         thisv: HandleValue,
         fun: HandleValue,
-        args: &HandleValueArray,
+        args: &[HandleValue],
     ) -> Result<HandleValue<'a>, ExnThrown> {
+        let args = ArgBuffer::new(args);
         let mut rval = scope.root_value_mut(UndefinedValue());
-        let ok = unsafe { wrappers2::Call(scope.cx_mut(), thisv, fun, args, rval.reborrow()) };
+        let ok = unsafe {
+            wrappers2::Call(scope.cx_mut(), thisv, fun, &args.handles(), rval.reborrow())
+        };
         ExnThrown::check(ok)?;
         Ok(rval.handle())
     }
@@ -224,10 +263,13 @@ impl<'s> Stack<'s, Function> {
     pub fn construct(
         scope: &'s Scope<'_>,
         fun: HandleValue,
-        args: &HandleValueArray,
+        args: &[HandleValue],
     ) -> Result<Object<'s>, ExnThrown> {
+        let args = ArgBuffer::new(args);
         let mut result = scope.root_object_mut(std::ptr::null_mut());
-        let ok = unsafe { wrappers2::Construct1(scope.cx_mut(), fun, args, result.reborrow()) };
+        let ok = unsafe {
+            wrappers2::Construct1(scope.cx_mut(), fun, &args.handles(), result.reborrow())
+        };
         ExnThrown::check(ok)?;
         Object::from_raw_obj(scope, result.get()).ok_or(ExnThrown)
     }
@@ -237,11 +279,18 @@ impl<'s> Stack<'s, Function> {
         scope: &'s Scope<'_>,
         fun: HandleValue,
         new_target: HandleObject,
-        args: &HandleValueArray,
+        args: &[HandleValue],
     ) -> Result<Object<'s>, ExnThrown> {
+        let args = ArgBuffer::new(args);
         let mut result = scope.root_object_mut(std::ptr::null_mut());
         let ok = unsafe {
-            wrappers2::Construct(scope.cx_mut(), fun, new_target, args, result.reborrow())
+            wrappers2::Construct(
+                scope.cx_mut(),
+                fun,
+                new_target,
+                &args.handles(),
+                result.reborrow(),
+            )
         };
         ExnThrown::check(ok)?;
         Object::from_raw_obj(scope, result.get()).ok_or(ExnThrown)

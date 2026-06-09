@@ -54,6 +54,7 @@ use super::error::ExnThrown;
 pub struct Object;
 
 impl JSType for Object {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "Object";
 
     fn js_class() -> *const JSClass {
@@ -433,6 +434,20 @@ impl<'s> Stack<'s, Object> {
         ExnThrown::check(ok)
     }
 
+    /// Whether this object is callable, which is true for functions, bound
+    /// functions, and callable proxies.
+    ///
+    /// This is the WebIDL `IsCallable` test: it accepts any callable, unlike
+    /// the [`Function`](crate::function::Function) brand check, which is
+    /// restricted to objects with a backing `JSFunction`. Use this to validate
+    /// values for callback function types, then invoke them by value with
+    /// [`Function::call`](crate::function::Function::call).
+    #[inline]
+    pub fn is_callable(&self) -> bool {
+        // SAFETY: `self` is a live, rooted object.
+        unsafe { mozjs::jsapi::JS::IsCallable(self.handle().get()) }
+    }
+
     /// Check whether this object is extensible.
     #[inline]
     pub fn is_extensible(&self, scope: &Scope<'_>) -> Result<bool, ExnThrown> {
@@ -563,10 +578,17 @@ impl<'s> Stack<'s, Object> {
 
     /// Convert a value to an object.
     pub fn from_value_coerce(scope: &'s Scope<'_>, val: HandleValue) -> Result<Self, ExnThrown> {
+        if val.is_null_or_undefined() {
+            return Err(crate::error::throw_type_error(
+                scope,
+                c"can't convert null or undefined to object",
+            ));
+        }
+
         let mut objp = scope.root_object_mut(std::ptr::null_mut());
         let ok = unsafe { wrappers2::JS_ValueToObject(scope.cx_mut(), val, objp.reborrow()) };
         ExnThrown::check(ok)?;
-        unsafe { Self::from_raw(scope, objp.get()).ok_or(ExnThrown) }
+        Self::from_handle(objp.handle()).ok_or(ExnThrown)
     }
 
     /// Set an immutable prototype on this object.

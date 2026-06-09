@@ -96,19 +96,16 @@ impl AbortSignal {
 
     /// <https://dom.spec.whatwg.org/#dom-abortsignal-aborted>
     #[getter]
-    fn aborted(&self) -> bool {
+    pub fn aborted(&self) -> bool {
         // Step 1: Return true if this is aborted; otherwise false.
         !self.data().abort_reason.is_undefined()
     }
 
     /// <https://dom.spec.whatwg.org/#dom-abortsignal-reason>
     #[getter]
-    fn reason(&self, _scope: &Scope<'_>, args: &CallArgs) -> Result<(), ExnThrown> {
+    pub fn reason<'r>(&self, scope: &'r Scope<'_>) -> HandleValue<'r> {
         // Step 1: Return this's abort reason.
-        // SAFETY: the value is consumed immediately into rval; no allocation occurs in between.
-        args.rval()
-            .set(unsafe { self.data().abort_reason.as_raw() });
-        Ok(())
+        self.data().abort_reason.get(scope)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-abortsignal-throwifaborted>
@@ -130,7 +127,7 @@ impl AbortSignal {
     fn onabort(&self, scope: &Scope<'_>, args: &CallArgs) -> Result<(), ExnThrown> {
         match &self.data().onabort_handler {
             Some(heap) => {
-                let func: Function<'_> = heap.get(scope);
+                let func = heap.get(scope);
                 args.rval().set(func.as_value());
             }
             None => {
@@ -149,7 +146,7 @@ impl AbortSignal {
             .data()
             .onabort_handler
             .as_ref()
-            .map(|heap| heap.get::<Function<'_>>(scope));
+            .map(|heap| heap.get(scope));
 
         if let Some(func) = old_callback {
             event_algorithms::remove_an_event_listener(

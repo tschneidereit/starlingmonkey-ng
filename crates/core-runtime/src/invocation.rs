@@ -112,9 +112,12 @@ impl InvocationRegistry {
 
     /// Unregister a previously registered invocation.
     ///
-    /// Removes the pointer from the registry. Does nothing if the pointer
-    /// is not found (idempotent).
+    /// Removes the pointer from the registry. Asserts that the pointer is currently registered.
     pub fn unregister(&mut self, state: *const InvocationState) {
+        debug_assert!(
+            self.invocations.contains(&state),
+            "Unregistering InvocationState that was not registered or has been moved or already unregistered"
+        );
         self.invocations.retain(|&p| p != state);
     }
 
@@ -175,18 +178,6 @@ mod tests {
         assert_eq!(registry.len(), 1);
 
         registry.unregister(&state2 as *const _);
-        assert!(registry.is_empty());
-    }
-
-    #[test]
-    fn registry_unregister_idempotent() {
-        let mut registry = InvocationRegistry::new();
-        let state = InvocationState::new();
-
-        unsafe { registry.register(&state as *const _) };
-        registry.unregister(&state as *const _);
-        // Second unregister is a no-op.
-        registry.unregister(&state as *const _);
         assert!(registry.is_empty());
     }
 }

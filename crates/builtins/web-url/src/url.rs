@@ -58,7 +58,7 @@ impl URL<'_> {
 
         // Step 4: Empty `this`’s `query object`’s `list`.
         if let Some(query_object_heap) = self.data().query_object.as_ref() {
-            let query_object: URLSearchParams = query_object_heap.get(scope);
+            let query_object = query_object_heap.get(scope);
             query_object.data_mut().list.clear();
 
             // Step 5: Let _query_ be `this`’s `URL`’s `query`.
@@ -305,7 +305,7 @@ impl URL<'_> {
 
         // Step 6: Set `this`’s `query object`’s `list` to the result of `parsing` _input_.
         if let Some(query_object_heap) = self.data().query_object.as_ref() {
-            let query_object: URLSearchParams = query_object_heap.get(scope);
+            let query_object = query_object_heap.get(scope);
             if value.is_empty() {
                 query_object.data_mut().list.clear();
             } else {

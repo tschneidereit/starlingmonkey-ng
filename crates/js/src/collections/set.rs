@@ -26,6 +26,7 @@ use crate::Object;
 pub struct Set;
 
 impl JSType for Set {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "Set";
 
     fn js_class() -> *const mozjs::jsapi::JSClass {

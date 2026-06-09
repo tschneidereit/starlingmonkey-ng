@@ -8,8 +8,8 @@ use core_runtime::event_loop::{with_active_event_loop, Task, TaskId};
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
+use js::heap::RootedTraceableBox;
 use js::heap::Trace;
-use js::native::HandleValueArray;
 use js::native::JSTracer;
 use js::prelude::HandleValue;
 use js::prelude::ToJSVal;
@@ -28,18 +28,12 @@ fn create_dom_exception<'s>(
     let name_val = name.to_jsval(scope).map_err(|_| ExnThrown)?;
     let msg_val = message.to_jsval(scope).map_err(|_| ExnThrown)?;
 
-    let argv = [msg_val.get(), name_val.get()];
-    let hva = HandleValueArray {
-        length_: 2,
-        elements_: argv.as_ptr(),
-    };
-
     let global = scope.global();
     let ctor_val = global
         .get_property(scope, c"DOMException")
         .map_err(|_| ExnThrown)?;
 
-    let exception = js::Function::construct(scope, ctor_val, &hva)?;
+    let exception = js::Function::construct(scope, ctor_val, &[msg_val, name_val])?;
     exception.to_jsval(scope).map_err(|_| ExnThrown)
 }
 
@@ -132,7 +126,7 @@ pub(crate) fn create_dependent_abort_signal<'r>(
 pub(crate) fn signal_abort(
     scope: &Scope<'_>,
     signal: &AbortSignal<'_>,
-    reason: Option<HandleValue<'_>>,
+    reason: HandleValue<'_>,
 ) -> Result<(), ExnThrown> {
     // Step 1: If _signal_ is `aborted`, then return.
     if !signal.data().abort_reason.is_undefined() {
@@ -141,12 +135,11 @@ pub(crate) fn signal_abort(
 
     // Step 2: Set _signal_'s `abort reason` to _reason_ if it is given; otherwise to a new
     //         "``AbortError``" ``DOMException``.
-    match reason {
-        Some(r) => signal.data_mut().abort_reason.set(r.get()),
-        None => {
-            let err_val = create_abort_error(scope)?;
-            signal.data_mut().abort_reason.set(err_val.get());
-        }
+    if !reason.is_undefined() {
+        signal.data_mut().abort_reason.set(reason.get());
+    } else {
+        let err_val = create_abort_error(scope)?;
+        signal.data_mut().abort_reason.set(err_val.get());
     }
 
     // Step 3: Let _dependentSignalsToAbort_ be a new `list`.
@@ -187,14 +180,15 @@ pub(crate) fn signal_abort(
 fn run_the_abort_steps(scope: &Scope<'_>, signal: &AbortSignal<'_>) -> Result<(), ExnThrown> {
     // Step 1: `For each` _algorithm_ of _signal_'s `abort algorithms`: run _algorithm_.
     // Each registered algorithm removes the event listener it was added for.
-    let algorithms: Vec<AbortAlgorithm> = signal.data_mut().abort_algorithms.drain(..).collect();
-    for algo in algorithms {
-        let target = algo.held.get::<EventTarget<'_>>(scope);
+    let algorithms =
+        RootedTraceableBox::new(std::mem::take(&mut signal.data_mut().abort_algorithms));
+    for algo in algorithms.iter() {
+        let target = algo.held.get(scope);
         events::algorithms::remove_an_event_listener_by_id(&target, algo.listener_id);
     }
 
     // Step 2: `Empty` _signal_'s `abort algorithms`.
-    // (Already emptied by `drain` above.)
+    // (Emptied by `mem::take` above.)
 
     // Step 3: `Fire an event` named ``abort`` at _signal_.
     events::algorithms::fire_an_event(scope, "abort", signal)?;
@@ -250,11 +244,11 @@ impl Task for AbortTimeoutTask {
     }
 
     fn run(self: Box<Self>, scope: &Scope<'_>, _id: TaskId) -> Result<(), ()> {
-        let signal: AbortSignal<'_> = self.signal.get(scope);
+        let signal: AbortSignal<'_> = self.signal.take(scope);
         // `Queue a global task` [...] to `signal abort` given _signal_ and a new
         // "``TimeoutError``" ``DOMException``.
         let reason = create_timeout_error(scope).map_err(|_| ())?;
-        signal_abort(scope, &signal, Some(reason)).map_err(|_| ())
+        signal_abort(scope, &signal, reason).map_err(|_| ())
     }
 
     #[allow(clippy::not_unsafe_ptr_arg_deref)]

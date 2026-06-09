@@ -33,6 +33,7 @@ use crate::Object;
 pub struct RegExp;
 
 impl JSType for RegExp {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "RegExp";
 
     fn js_class() -> *const mozjs::jsapi::JSClass {

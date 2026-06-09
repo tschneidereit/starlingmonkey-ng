@@ -65,6 +65,7 @@ use super::error::ExnThrown;
 pub struct ArrayBuffer;
 
 impl JSType for ArrayBuffer {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "ArrayBuffer";
 
     fn js_class() -> *const JSClass {
@@ -176,6 +177,57 @@ impl<'s> Stack<'s, ArrayBuffer> {
     pub fn copy_bytes(self) -> Vec<u8> {
         unsafe { self.bytes() }.to_vec()
     }
+
+    /// Transfer this buffer's contents into a new `ArrayBuffer`, detaching the
+    /// receiver.
+    ///
+    /// This is the WHATWG abstract operation `TransferArrayBuffer`: the returned
+    /// buffer holds the receiver's bytes and the receiver is left detached
+    /// (zero-length). The receiver must not already be detached.
+    ///
+    /// The contents are copied rather than moved. A zero-copy steal/adopt is
+    /// possible (`StealArrayBufferContents` + `NewArrayBufferWithContents`) but
+    /// the adopt half lives in an awkward-to-reach glue module; the copy is
+    /// correct and the streams paths transfer small chunks.
+    pub fn transfer(self, scope: &'s Scope<'_>) -> Result<Self, ExnThrown> {
+        // `CopyArrayBuffer` of a zero-length buffer can yield null (no pending
+        // exception), which would surface as a spurious `ExnThrown`; hand back a
+        // fresh empty buffer instead. The receiver is still detached, matching
+        // `TransferArrayBuffer`'s observable effect.
+        if self.byte_length() == 0 {
+            self.detach(scope)?;
+            return Self::new(scope, 0);
+        }
+        let copy = Self::copy_from(scope, self.handle())?;
+        self.detach(scope)?;
+        Ok(copy)
+    }
+
+    /// Clone the region `[byte_offset, byte_offset + length)` of this buffer into
+    /// a new `ArrayBuffer`.
+    ///
+    /// This is the streams spec's `CloneArrayBuffer(buffer, byteOffset, length,
+    /// %ArrayBuffer%)`. The region must lie within this buffer, which must not be
+    /// detached.
+    pub fn clone_region(
+        self,
+        scope: &'s Scope<'_>,
+        byte_offset: usize,
+        length: usize,
+    ) -> Result<Self, ExnThrown> {
+        let out = Self::new(scope, length)?;
+        if length != 0 {
+            // SAFETY: both buffers are live and non-detached, the source region
+            // is within bounds (caller-validated), and no GC runs between the
+            // two borrows because no allocation happens here.
+            unsafe {
+                let src = self.bytes();
+                let dst = out.bytes_mut();
+                dst.copy_from_slice(&src[byte_offset..byte_offset + length]);
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl<'s> std::ops::Deref for Stack<'s, ArrayBuffer> {
@@ -210,6 +262,7 @@ impl<'s> FromJSVal<'s> for Stack<'s, ArrayBuffer> {
 pub struct SharedArrayBuffer;
 
 impl JSType for SharedArrayBuffer {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "SharedArrayBuffer";
 
     fn js_class() -> *const JSClass {
@@ -264,6 +317,7 @@ impl<'s> FromJSVal<'s> for Stack<'s, SharedArrayBuffer> {
 pub struct ArrayBufferView;
 
 impl JSType for ArrayBufferView {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "ArrayBufferView";
 
     fn js_class() -> *const JSClass {
@@ -273,6 +327,47 @@ impl JSType for ArrayBufferView {
     #[inline]
     unsafe fn is_instance(obj: *mut JSObject) -> bool {
         unsafe { mozjs::jsapi::JS_IsArrayBufferViewObject(obj) }
+    }
+}
+
+/// The element kind of an [`ArrayBufferView`]: one of the typed-array element
+/// types, or `DataView`.
+///
+/// This captures the "typed array constructors table" distinctions the streams
+/// spec needs (`element size` and `view constructor`) without exposing the raw
+/// SpiderMonkey `Scalar::Type` tags.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float16,
+    Float32,
+    Float64,
+    BigInt64,
+    BigUint64,
+    DataView,
+}
+
+impl ViewKind {
+    /// The size in bytes of one element of this view kind. `DataView` has an
+    /// element size of 1, matching the streams spec.
+    pub fn element_size(self) -> usize {
+        match self {
+            ViewKind::Int8 | ViewKind::Uint8 | ViewKind::Uint8Clamped | ViewKind::DataView => 1,
+            ViewKind::Int16 | ViewKind::Uint16 | ViewKind::Float16 => 2,
+            ViewKind::Int32 | ViewKind::Uint32 | ViewKind::Float32 => 4,
+            ViewKind::Float64 | ViewKind::BigInt64 | ViewKind::BigUint64 => 8,
+        }
+    }
+
+    /// Whether this kind is a typed array (i.e. not `DataView`).
+    pub fn is_typed_array(self) -> bool {
+        self != ViewKind::DataView
     }
 }
 
@@ -291,6 +386,54 @@ impl<'s> Stack<'s, ArrayBufferView> {
     /// Get the byte offset of this view into its underlying buffer.
     pub fn byte_offset(self) -> usize {
         unsafe { mozjs::jsapi::JS_GetArrayBufferViewByteOffset(self.as_raw()) }
+    }
+
+    /// Get this view's underlying `ArrayBuffer` (its `[[ViewedArrayBuffer]]`).
+    ///
+    /// Materialising the buffer can allocate (a view created over inline data
+    /// gets a buffer object on demand), so a context is required and the result
+    /// is rooted.
+    pub fn viewed_buffer(self, scope: &'s Scope<'_>) -> Result<Stack<'s, ArrayBuffer>, ExnThrown> {
+        let mut is_shared = false;
+        // SAFETY: `self` is a live, rooted array buffer view.
+        let obj = unsafe {
+            wrappers2::JS_GetArrayBufferViewBuffer(scope.cx_mut(), self.handle(), &mut is_shared)
+        };
+        root_or_throw(scope, obj)
+    }
+
+    /// The element kind of this view ([`ViewKind`]).
+    pub fn view_kind(self) -> ViewKind {
+        use mozjs::jsapi::JS::Scalar::Type;
+        // SAFETY: `self` is a live, rooted array buffer view.
+        if !unsafe { mozjs::jsapi::JS_IsTypedArrayObject(self.as_raw()) } {
+            return ViewKind::DataView;
+        }
+        // SAFETY: `self` is a typed array (checked above), so its element type is
+        // one of the typed-array `Scalar::Type` tags.
+        match unsafe { mozjs::jsapi::JS_GetArrayBufferViewType(self.as_raw()) } {
+            Type::Int8 => ViewKind::Int8,
+            Type::Uint8 => ViewKind::Uint8,
+            Type::Uint8Clamped => ViewKind::Uint8Clamped,
+            Type::Int16 => ViewKind::Int16,
+            Type::Uint16 => ViewKind::Uint16,
+            Type::Int32 => ViewKind::Int32,
+            Type::Uint32 => ViewKind::Uint32,
+            Type::Float16 => ViewKind::Float16,
+            Type::Float32 => ViewKind::Float32,
+            Type::Float64 => ViewKind::Float64,
+            Type::BigInt64 => ViewKind::BigInt64,
+            Type::BigUint64 => ViewKind::BigUint64,
+            _ => unreachable!(
+                "JS_GetArrayBufferViewType returned non-typed-array type for a typed array view"
+            ),
+        }
+    }
+
+    /// The number of elements in this view: its `[[ArrayLength]]` for a typed
+    /// array, or its byte length for a `DataView` (which has element size 1).
+    pub fn array_length(self) -> usize {
+        self.byte_length() / self.view_kind().element_size()
     }
 
     /// Borrow the view's bytes.
@@ -341,6 +484,50 @@ impl<'s> Stack<'s, ArrayBufferView> {
     pub fn copy_bytes(self) -> Vec<u8> {
         unsafe { self.bytes() }.to_vec()
     }
+}
+
+/// Construct an [`ArrayBufferView`] of the given [`ViewKind`] over the region of
+/// `buffer` starting at `byte_offset`.
+///
+/// For a typed array, `length` is the element count; for a `DataView`, it is the
+/// byte length. This is the streams spec's `Construct(view constructor, «buffer,
+/// byteOffset, length»)`.
+pub fn construct_view<'s>(
+    scope: &'s Scope<'_>,
+    kind: ViewKind,
+    buffer: Stack<'_, ArrayBuffer>,
+    byte_offset: usize,
+    length: usize,
+) -> Result<Object<'s>, ExnThrown> {
+    let cx = scope.cx_mut();
+    let buf = buffer.handle();
+    let len = length as i64;
+    // SAFETY: `buffer` is a live, rooted, non-detached `ArrayBuffer`; the region
+    // is validated by the caller (the streams pull-into machinery).
+    let obj = unsafe {
+        match kind {
+            ViewKind::Int8 => wrappers2::JS_NewInt8ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::Uint8 => wrappers2::JS_NewUint8ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::Uint8Clamped => {
+                wrappers2::JS_NewUint8ClampedArrayWithBuffer(cx, buf, byte_offset, len)
+            }
+            ViewKind::Int16 => wrappers2::JS_NewInt16ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::Uint16 => wrappers2::JS_NewUint16ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::Float16 => wrappers2::JS_NewFloat16ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::Int32 => wrappers2::JS_NewInt32ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::Uint32 => wrappers2::JS_NewUint32ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::Float32 => wrappers2::JS_NewFloat32ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::Float64 => wrappers2::JS_NewFloat64ArrayWithBuffer(cx, buf, byte_offset, len),
+            ViewKind::BigInt64 => {
+                wrappers2::JS_NewBigInt64ArrayWithBuffer(cx, buf, byte_offset, len)
+            }
+            ViewKind::BigUint64 => {
+                wrappers2::JS_NewBigUint64ArrayWithBuffer(cx, buf, byte_offset, len)
+            }
+            ViewKind::DataView => wrappers2::JS_NewDataView(cx, buf, byte_offset, length),
+        }
+    };
+    root_or_throw(scope, obj)
 }
 
 impl<'s> std::ops::Deref for Stack<'s, ArrayBufferView> {
@@ -500,12 +687,38 @@ impl<'s, T: TypedArrayKind> Stack<'s, T> {
     }
 }
 
+impl<'s> Stack<'s, Uint8Array> {
+    /// Construct a `Uint8Array` viewing the region `[byte_offset,
+    /// byte_offset + length)` of `buffer`, without copying.
+    ///
+    /// This is the streams spec's `Construct(%Uint8Array%, « buffer, byteOffset,
+    /// length »)`. The region must lie within `buffer`'s byte length.
+    pub fn with_buffer(
+        scope: &'s Scope<'_>,
+        buffer: Stack<'_, ArrayBuffer>,
+        byte_offset: usize,
+        length: usize,
+    ) -> Result<Self, ExnThrown> {
+        // SAFETY: `buffer` is a live, rooted, non-detached `ArrayBuffer`.
+        let obj = unsafe {
+            wrappers2::JS_NewUint8ArrayWithBuffer(
+                scope.cx_mut(),
+                buffer.handle(),
+                byte_offset,
+                length as i64,
+            )
+        };
+        root_or_throw(scope, obj)
+    }
+}
+
 macro_rules! typed_array_marker {
     ($Marker:ident, $name:literal, $proto:ident, $tag:ty) => {
         #[doc = concat!("Marker type for JavaScript `", $name, "` objects.")]
         pub struct $Marker;
 
         impl JSType for $Marker {
+            type Rooted<'s> = Stack<'s, Self>;
             const JS_NAME: &'static str = $name;
 
             fn js_class() -> *const JSClass {

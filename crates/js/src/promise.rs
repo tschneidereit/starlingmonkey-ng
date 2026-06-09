@@ -30,6 +30,7 @@ use crate::Object;
 pub struct Promise;
 
 impl JSType for Promise {
+    type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "Promise";
 
     fn js_class() -> *const mozjs::jsapi::JSClass {
@@ -54,13 +55,19 @@ impl<'s> Stack<'s, Promise> {
     /// resolved or rejected later via [`resolve`](Self::resolve) /
     /// [`reject`](Self::reject).
     pub fn new_pending(scope: &'s Scope<'_>) -> Result<Self, ExnThrown> {
-        let obj = unsafe { wrappers2::NewPromiseObject(scope.cx_mut(), HandleObject::null()) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        Object::from_raw_obj(scope, unsafe {
+            wrappers2::NewPromiseObject(scope.cx_mut(), HandleObject::null())
+        })
+        .ok_or(ExnThrown)
+        .map(|obj| obj.cast::<Self>().unwrap())
     }
 
-    /// Create a new `Promise` that is immediately resolved with the given `value`.
+    /// Create a new `Promise` resolved with the given `value`.
+    ///
+    /// This always creates a new `Promise` and resolves it with `value`.
+    /// Use [`call_original_resolve`](Self::call_original_resolve) to get the
+    /// behavior of `Promise.resolve(value)`, where if `value` already is a
+    /// `Promise`, it's returned unchanged.
     pub fn new_resolved_with_value(
         scope: &'s Scope<'_>,
         value: HandleValue,
@@ -75,20 +82,18 @@ impl<'s> Stack<'s, Promise> {
         scope: &'s Scope<'_>,
         error: HandleValue,
     ) -> Result<Self, ExnThrown> {
-        let promise = Self::new_pending(scope)?;
-        promise.reject(scope, error)?;
-        Ok(promise)
+        Object::from_raw_obj(scope, unsafe {
+            wrappers2::CallOriginalPromiseReject(scope.cx_mut(), error)
+        })
+        .ok_or(ExnThrown)
+        .map(|obj| obj.cast::<Self>().unwrap())
     }
 
     /// Create a new `Promise` that is immediately rejected with the pending exception.
     pub fn new_rejected_with_pending_error(scope: &'s Scope<'_>) -> Result<Self, &'static str> {
-        let pending_exception = crate::exception::get_pending(scope)?;
-        crate::exception::clear(scope);
-        let promise = Self::new_pending(scope).map_err(|_| "Failed to create promise")?;
-        promise
-            .reject(scope, pending_exception)
-            .map_err(|_| "Failed to reject promise with pending exception")?;
-        Ok(promise)
+        let error = crate::exception::get_and_clear_pending(scope)?;
+        Self::new_rejected_with_error(scope, error)
+            .map_err(|_| "Failed to reject promise with pending exception")
     }
 
     /// Check whether an object is a `Promise`.
@@ -106,6 +111,11 @@ impl<'s> Stack<'s, Promise> {
     /// Check whether this promise is already rejected.
     pub fn is_rejected(&self) -> bool {
         self.state() == PromiseState::Rejected
+    }
+
+    /// Check whether this promise is still pending (not settled).
+    pub fn is_pending(&self) -> bool {
+        self.state() == PromiseState::Pending
     }
 
     /// Get the result value of a settled promise.
@@ -170,11 +180,16 @@ impl<'s> Stack<'s, Promise> {
     pub fn add_reactions(
         &self,
         scope: &Scope<'_>,
-        on_fulfilled: HandleObject,
-        on_rejected: HandleObject,
+        on_fulfilled: Option<Object<'_>>,
+        on_rejected: Option<Object<'_>>,
     ) -> Result<(), ExnThrown> {
         let ok = unsafe {
-            wrappers2::AddPromiseReactions(scope.cx_mut(), self.handle(), on_fulfilled, on_rejected)
+            wrappers2::AddPromiseReactions(
+                scope.cx_mut(),
+                self.handle(),
+                on_fulfilled.map_or(HandleObject::null(), |o| o.handle()),
+                on_rejected.map_or(HandleObject::null(), |o| o.handle()),
+            )
         };
         ExnThrown::check(ok)
     }
@@ -183,21 +198,25 @@ impl<'s> Stack<'s, Promise> {
     pub fn add_reactions_ignoring_unhandled_rejection(
         &self,
         scope: &Scope<'_>,
-        on_fulfilled: HandleObject,
-        on_rejected: HandleObject,
+        on_fulfilled: Option<Object<'_>>,
+        on_rejected: Option<Object<'_>>,
     ) -> Result<(), ExnThrown> {
         let ok = unsafe {
             wrappers2::AddPromiseReactionsIgnoringUnhandledRejection(
                 scope.cx_mut(),
                 self.handle(),
-                on_fulfilled,
-                on_rejected,
+                on_fulfilled.map_or(HandleObject::null(), |o| o.handle()),
+                on_rejected.map_or(HandleObject::null(), |o| o.handle()),
             )
         };
         ExnThrown::check(ok)
     }
 
     /// Call `Promise.resolve(value)` using the original `Promise` constructor.
+    ///
+    /// If `resolution_value` is already a `Promise`, this returns it unchanged.
+    /// Use [`new_resolved_with_value`](Self::new_resolved_with_value) if you
+    /// need to ensure a fresh promise.
     pub fn call_original_resolve(
         scope: &'s Scope<'_>,
         resolution_value: HandleValue,
@@ -226,15 +245,15 @@ impl<'s> Stack<'s, Promise> {
     pub fn call_original_then(
         &self,
         scope: &'s Scope<'_>,
-        on_fulfilled: HandleObject,
-        on_rejected: HandleObject,
+        on_fulfilled: Option<Object<'_>>,
+        on_rejected: Option<Object<'_>>,
     ) -> Result<Self, ExnThrown> {
         let obj = unsafe {
             wrappers2::CallOriginalPromiseThen(
                 scope.cx_mut(),
                 self.handle(),
-                on_fulfilled,
-                on_rejected,
+                on_fulfilled.map_or(HandleObject::null(), |o| o.handle()),
+                on_rejected.map_or(HandleObject::null(), |o| o.handle()),
             )
         };
         NonNull::new(obj)
@@ -255,6 +274,26 @@ impl<'s> Stack<'s, Promise> {
         NonNull::new(obj)
             .map(|nn| Self::from_handle_unchecked(scope.root_object(nn)))
             .ok_or(ExnThrown)
+    }
+
+    /// Create a `Promise.all`-style promise that settles once every promise in
+    /// `promises` settles: it fulfills with their values, or rejects as soon as
+    /// one of them rejects. This is the spec's "getting a promise to wait for
+    /// all" operation.
+    pub fn wait_for_all_from(
+        scope: &'s Scope<'_>,
+        promises: &[HandleObject],
+    ) -> Result<Self, ExnThrown> {
+        let cx = unsafe { scope.raw_cx_no_gc() };
+        let vector = mozjs::rust::RootedObjectVectorWrapper::new(cx);
+        for promise in promises {
+            if !vector.append(promise.get()) {
+                return Err(ExnThrown);
+            }
+        }
+        // SAFETY: `vector` is a live, valid ObjectVector for the duration of the call;
+        // `GetWaitForAllPromise` reads it synchronously.
+        unsafe { Self::wait_for_all(scope, vector.handle()) }
     }
 
     /// Get the `Promise` constructor for the current realm.

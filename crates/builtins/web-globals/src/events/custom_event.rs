@@ -28,7 +28,7 @@ pub struct CustomEvent {
 impl CustomEvent {
     /// <https://dom.spec.whatwg.org/#dom-customevent-customevent>
     #[constructor]
-    fn new(event_type: String, event_init_dict: Option<CustomEventInit>) -> Self {
+    fn new(event_type: String, event_init_dict: Option<CustomEventInit<'_>>) -> Self {
         let opts = event_init_dict.unwrap_or_default();
         let parent_init = EventInit {
             bubbles: opts.bubbles.unwrap_or(false),
@@ -37,7 +37,7 @@ impl CustomEvent {
         };
         CustomEventImpl {
             parent: Event::init(event_type, Some(parent_init)),
-            detail: Heap::from(opts.detail.unwrap_or_else(value::null)),
+            detail: Heap::from(opts.detail.map_or(value::null(), |h| h.get())),
         }
     }
 
@@ -83,9 +83,9 @@ impl CustomEvent {
 /// Includes inherited members from EventInit: bubbles, cancelable, composed.
 #[derive(Default)]
 #[webidl_dictionary]
-pub struct CustomEventInit {
+pub struct CustomEventInit<'a> {
     pub bubbles: Option<bool>,
     pub cancelable: Option<bool>,
     pub composed: Option<bool>,
-    pub detail: Option<Value>,
+    pub detail: Option<HandleValue<'a>>,
 }

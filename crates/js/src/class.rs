@@ -132,6 +132,19 @@ pub fn get_class_object<'s>(
     Ok(objp.handle())
 }
 
+/// Get the realm's `%AsyncIteratorPrototype%` — the object that supplies the
+/// `[Symbol.asyncIterator]` method (returning `this`) inherited by all async
+/// iterators.
+pub fn get_async_iterator_prototype<'s>(
+    scope: &'s Scope<'_>,
+) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
+    let cx = unsafe { scope.raw_cx_no_gc() };
+    let obj = unsafe { mozjs::jsapi::GetRealmAsyncIteratorPrototype(cx) };
+    std::ptr::NonNull::new(obj)
+        .map(|p| scope.root_object(p))
+        .ok_or(ExnThrown)
+}
+
 /// Get the prototype for a standard class by `JSProtoKey`.
 pub fn get_class_prototype<'s>(
     scope: &'s Scope<'_>,
@@ -239,6 +252,7 @@ impl<'s, T: JSType + ClassDef> Stack<'s, T> {
 
 // Blanket impl: every ClassDef is automatically a JSType.
 impl<T: ClassDef> JSType for T {
+    type Rooted<'s> = <T as ClassDef>::Rooted<'s>;
     const JS_NAME: &'static str = T::NAME;
 
     fn js_class() -> *const JSClass {
@@ -509,18 +523,19 @@ const CLASS_REGISTRY_SLOT: u32 = JSCLASS_GLOBAL_SLOT_COUNT;
 #[crate::allow_unrooted_interior]
 struct ClassRegistry {
     map: HashMap<TypeId, Box<MozHeap<*mut JSObject>>>,
-    /// Shared getter functions for `[LegacyUnforgeable]` accessors, keyed by the
-    /// getter's native function pointer so the same `JSFunction` is reused for
-    /// every instance (WebIDL requires the getter to be identical across
-    /// instances). Traced like prototypes.
-    unforgeable_getters: HashMap<usize, Box<MozHeap<*mut JSObject>>>,
+    /// Per-global shared functions keyed by the function's native pointer, so the
+    /// same `JSFunction` is reused for every caller on a given global. Used for
+    /// `[LegacyUnforgeable]` accessor getters (WebIDL requires the getter to be
+    /// identical across instances) and for functions for which the relevant spec
+    /// requires per-global identity. Traced like prototypes.
+    shared_functions: HashMap<usize, Box<MozHeap<*mut JSObject>>>,
 }
 
 impl ClassRegistry {
     fn new() -> Self {
         Self {
             map: HashMap::new(),
-            unforgeable_getters: HashMap::new(),
+            shared_functions: HashMap::new(),
         }
     }
 
@@ -536,25 +551,25 @@ impl ClassRegistry {
         self.map.get(&type_id).map(|h| h.get())
     }
 
-    fn get_unforgeable_getter(&self, key: usize) -> Option<*mut JSObject> {
-        self.unforgeable_getters.get(&key).map(|h| h.get())
+    fn get_shared_function(&self, key: usize) -> Option<*mut JSObject> {
+        self.shared_functions.get(&key).map(|h| h.get())
     }
 
-    fn set_unforgeable_getter(&mut self, key: usize, func: *mut JSObject) {
+    fn set_shared_function(&mut self, key: usize, func: *mut JSObject) {
         let entry = self
-            .unforgeable_getters
+            .shared_functions
             .entry(key)
             .or_insert_with(|| MozHeap::boxed(ptr::null_mut()));
         entry.set(func);
     }
 
-    /// Trace all prototype and getter heap values so moving GC can update them.
+    /// Trace all prototype and shared-function heap values so moving GC can update them.
     #[crate::allow_unrooted]
     unsafe fn trace(&self, trc: *mut JSTracer) {
         for heap in self.map.values() {
             heap.trace(trc);
         }
-        for heap in self.unforgeable_getters.values() {
+        for heap in self.shared_functions.values() {
             heap.trace(trc);
         }
     }
@@ -668,6 +683,13 @@ pub unsafe fn trace_class_registry_for_global(trc: *mut JSTracer, global: *mut J
 #[doc(hidden)]
 pub fn get_prototype_for<T: 'static>(scope: &Scope<'_>) -> Option<*mut JSObject> {
     get_prototype::<T>(scope.global())
+}
+
+/// Get the registered prototype for a class type as a rooted [`Object`].
+pub fn get_prototype_object_for<'s, T: 'static>(scope: &'s Scope<'_>) -> Option<Object<'s>> {
+    // SAFETY: the pointer comes straight from the registry into a rooted Object,
+    // with no intervening allocation.
+    unsafe { Object::from_raw(scope, get_prototype::<T>(scope.global())?) }
 }
 
 // ============================================================================
@@ -852,6 +874,13 @@ pub unsafe fn get_private_or_ancestor_mut<'a, T: ClassDef>(
 /// - [`register_class_methods`](ClassDef::register_class_methods): Define prototype methods
 /// - [`register_static_methods`](ClassDef::register_static_methods): Define static methods
 pub trait ClassDef: Sized + Trace + 'static {
+    /// The generated stack newtype for this class (e.g. `Dog<'s>`).
+    ///
+    /// The blanket `impl<T: ClassDef> JSType for T` forwards this as
+    /// [`JSType::Rooted`](crate::builtins::JSType::Rooted), so rooting a
+    /// `Heap<DogImpl>` yields a `Dog<'s>` without a call-site annotation.
+    type Rooted<'s>: From<Stack<'s, Self>>;
+
     /// The name of the class as it appears in JavaScript.
     const NAME: &'static str;
     /// The name as a CStr for compile-time formatting.
@@ -1404,6 +1433,30 @@ pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
     })
 }
 
+/// Extract an argument like [`get_arg`], but treat a missing argument as
+/// `undefined` rather than throwing "Not enough arguments".
+///
+/// Used for optional `any` parameters (typed `HandleValue`/`Value`), where a
+/// missing argument is indistinguishable from an explicit `undefined` and both
+/// are valid values. `CallArgs::get` already yields `undefined` for an
+/// out-of-range index, so the conversion is an identity for those types.
+///
+/// # Safety
+///
+/// - `scope` must be in a valid realm.
+/// - `args` must be from a valid JSNative call.
+pub unsafe fn get_arg_or_undefined<'s, T: FromJSVal<'s, Config = ()>>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    index: u32,
+) -> Result<T, ExnThrown> {
+    let val = crate::native::Handle::from_raw(args.get(index));
+    T::from_jsval(scope, val, ()).map_err(|e| match e {
+        ConversionError::ExnPending => ExnThrown,
+        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
+    })
+}
+
 /// Extract an integer argument with configurable conversion behavior.
 ///
 /// # Safety
@@ -1824,6 +1877,37 @@ pub unsafe fn create_instance_with<'s, T: ClassDef>(
 }
 
 // ---------------------------------------------------------------------------
+// Per-global shared functions
+// ---------------------------------------------------------------------------
+
+/// Get a per-global shared function, keyed by `key` (typically the native
+/// callback's function pointer cast to `usize`), creating it via `init` and
+/// caching it on first use.
+///
+/// The cached `JSFunction` is traced and finalized with the global, so every
+/// call on a given global returns the same function object. Use this where a
+/// function's identity must be stable per global, such as WebIDL
+/// `[LegacyUnforgeable]` getters, or the streams spec's queuing-strategy
+/// `size` functions ("the relevant global object's … size function").
+pub fn get_or_init_shared_function<'s>(
+    scope: &'s Scope<'_>,
+    key: usize,
+    init: impl FnOnce(&'s Scope<'_>) -> Result<crate::Function<'s>, ExnThrown>,
+) -> Result<crate::Function<'s>, ExnThrown> {
+    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
+    if let Some(f) = registry.get_shared_function(key) {
+        // SAFETY: `f` is a live JSFunction cached for this global and kept alive
+        // by the registry's tracer.
+        if let Some(func) = unsafe { crate::Function::from_raw(scope, f) } {
+            return Ok(func);
+        }
+    }
+    let func = init(scope)?;
+    registry.set_shared_function(key, func.as_raw());
+    Ok(func)
+}
+
+// ---------------------------------------------------------------------------
 // LegacyUnforgeable accessors
 // ---------------------------------------------------------------------------
 
@@ -1839,29 +1923,15 @@ pub fn define_unforgeable_accessor(
     getter: crate::native::JSNative,
 ) -> Result<(), ExnThrown> {
     let key = getter.map(|f| f as usize).unwrap_or(0);
-    let global = scope.global();
     let name_str = name.to_str().map_err(|_| ExnThrown)?;
 
     // Reuse the cached getter if present; otherwise create it once and store it.
-    let getter_obj = {
-        let registry = unsafe { get_or_init_class_registry(global.as_raw()) };
-        match registry.get_unforgeable_getter(key) {
-            Some(f) if !f.is_null() => f,
-            _ => {
-                // WebIDL names accessor getter functions "get <attribute>".
-                let getter_name =
-                    std::ffi::CString::new(format!("get {name_str}")).map_err(|_| ExnThrown)?;
-                let func = crate::Function::new(scope, getter, 0, 0, &getter_name)?;
-                let raw = func.as_raw();
-                registry.set_unforgeable_getter(key, raw);
-                raw
-            }
-        }
-    };
-
-    // SAFETY: `getter_obj` is a live JSFunction object — either freshly created
-    // and rooted above, or read from the traced registry cache.
-    let getter_handle = unsafe { Object::from_raw(scope, getter_obj) }.ok_or(ExnThrown)?;
+    let getter_fn = get_or_init_shared_function(scope, key, |scope| {
+        // WebIDL names accessor getter functions "get <attribute>".
+        let getter_name =
+            std::ffi::CString::new(format!("get {name_str}")).map_err(|_| ExnThrown)?;
+        crate::Function::new(scope, getter, 0, 0, &getter_name)
+    })?;
 
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let desc = crate::native::PropertyDescriptor {
         _bitfield_align_1: [0; 0],
@@ -1877,7 +1947,7 @@ pub fn define_unforgeable_accessor(
             false, // hasSetter
             false, // resolving
         ),
-        getter_: getter_handle.as_raw(),
+        getter_: getter_fn.as_raw(),
         setter_: ptr::null_mut(),
         value_: mozjs::jsval::UndefinedValue(),
     });

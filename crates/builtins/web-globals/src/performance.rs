@@ -82,6 +82,7 @@ impl Performance {
     /// <https://www.w3.org/TR/hr-time-3/#tojson-method>
     ///
     /// Return a plain object with `timeOrigin` property.
+    #[allow(clippy::wrong_self_convention)]
     #[method(name = "toJSON")]
     fn to_json<'a>(&self, scope: &'a Scope<'a>) -> Result<Object<'a>, ExnThrown> {
         let obj = Object::new_plain(scope)?;
@@ -103,12 +104,9 @@ pub fn add_to_global<'s>(scope: &'s Scope<'_>, global: Object<'s>) {
     Performance::add_to_global(scope, global);
 
     let performance = unsafe {
-        js::class::create_instance_with::<PerformanceImpl>(
-            scope,
-            |_| PerformanceImpl {
-                parent: EventTargetImpl::default(),
-            },
-        )
+        js::class::create_instance_with::<PerformanceImpl>(scope, |_| PerformanceImpl {
+            parent: EventTargetImpl::default(),
+        })
     }
     .expect("failed to allocate Performance singleton");
 
