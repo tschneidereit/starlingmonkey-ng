@@ -47,6 +47,7 @@ simple-http = { path = "crates/builtins/simple-http" }
 web-globals = { path = "crates/builtins/web-globals" }
 web-streams = { path = "crates/builtins/web-streams" }
 web-url = { path = "crates/builtins/web-url" }
+web-url-pattern = { path = "crates/builtins/web-url-pattern" }
 cpp-builtins = { path = "crates/builtins/cpp-builtins" }
 
 

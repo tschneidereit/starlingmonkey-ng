@@ -247,7 +247,29 @@ const WPT_PATH_ALIASES = {
   "/resources/WebIDLParser.js": "/resources/webidl2/lib/webidl2.js",
 };
 
-function assembleTestScript(testPath) {
+/**
+   * Resolve a WPT relative or absolute path against the test file location.
+   */
+function resolveWptPath(testPath, relPath) {
+  const fullPath = path.join(config.wptRoot, testPath);
+  return relPath.startsWith("/")
+    ? path.join(config.wptRoot, relPath)
+    : path.join(path.dirname(fullPath), relPath);
+}
+
+/**
+ * Scan a script source for `fetch()` calls and collect file URLs to serve
+ * via a polyfill.
+ */
+function collectFetchUrls(testPath, source, fileMap) {
+  const fetchRegex = /fetch\s*\(\s*(['"`])(.*?)\1\s*(?:,[^)]*)?\)/g;
+  for (const m of source.matchAll(fetchRegex)) {
+    const fp = resolveWptPath(testPath, m[2]);
+    if (existsSync(fp)) fileMap[m[2]] = readFileSync(fp, "utf-8");
+  }
+}
+
+  function assembleTestScript(testPath) {
   const fullPath = path.join(config.wptRoot, testPath);
   const testSource = readFileSync(fullPath, "utf-8");
 
@@ -310,6 +332,40 @@ function assembleTestScript(testPath) {
       script += `  var content = globalThis.__wpt_idl_files[url];\n`;
       script += `  if (content !== undefined) {\n`;
       script += `    return Promise.resolve({ ok: true, text: function() { return Promise.resolve(content); } });\n`;
+      script += `  }\n`;
+      script += `  return Promise.reject(new Error("fetch not available for: " + url));\n`;
+      script += `};\n`;
+    }
+  }
+
+  // Scan for fetch() calls in test + META sources, injecting a polyfill for
+  // any referenced files found on disk (e.g. urlpattern JSON test data).
+  {
+    const fetchFileMap = {};
+    collectFetchUrls(testPath, testSource, fetchFileMap);
+    for (const metaPath of metaScripts) {
+      const effectivePath = WPT_PATH_ALIASES[metaPath] || metaPath;
+      let resolvedPath;
+      if (effectivePath.startsWith("/")) {
+        resolvedPath = path.join(config.wptRoot, effectivePath);
+      } else {
+        resolvedPath = path.join(path.dirname(fullPath), effectivePath);
+      }
+      if (existsSync(resolvedPath)) {
+        collectFetchUrls(testPath, readFileSync(resolvedPath, "utf-8"), fetchFileMap);
+      }
+    }
+    if (Object.keys(fetchFileMap).length > 0) {
+      script += `// Fetch polyfill — serves pre-inlined files from WPT root.\n`;
+      script += `globalThis.__wpt_fetch_files = ${JSON.stringify(fetchFileMap)};\n`;
+      script += `globalThis.fetch = function(url) {\n`;
+      script += `  var content = globalThis.__wpt_fetch_files[url];\n`;
+      script += `  if (content !== undefined) {\n`;
+      script += `    return Promise.resolve({\n`;
+      script += `      ok: true, status: 200,\n`;
+      script += `      text: () => Promise.resolve(content),\n`;
+      script += `      json: () => Promise.resolve(JSON.parse(content)),\n`;
+      script += `    });\n`;
       script += `  }\n`;
       script += `  return Promise.reject(new Error("fetch not available for: " + url));\n`;
       script += `};\n`;
