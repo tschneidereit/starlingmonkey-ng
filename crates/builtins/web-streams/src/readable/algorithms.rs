@@ -581,7 +581,7 @@ pub(crate) fn cancel_steps<'r>(
     reason: HandleValue<'_>,
 ) -> Promise<'r> {
     // Step 1: Perform ! `ResetQueue`(`this`).
-    reset_queue(controller.data_mut());
+    reset_queue(&mut *controller.data_mut());
     // Step 2: Let _result_ be the result of performing `this`.`[[cancelAlgorithm]]`, passing
     //         _reason_.
     let cancel_algorithm = controller.data().cancel_algorithm.get(scope);
@@ -609,7 +609,7 @@ pub(crate) fn pull_steps(
     //         `DefaultControllerCallPullIfNeeded`(`this`). Perform _readRequest_’s
     //         `chunk steps`, given _chunk_.
     if !controller.data().queue.is_empty() {
-        let chunk = dequeue_value(scope, controller.data_mut());
+        let chunk = dequeue_value(scope, &mut *controller.data_mut());
         if controller.data().close_requested && controller.data().queue.is_empty() {
             readable_stream_default_controller_clear_algorithms(controller);
             readable_stream_close(scope, &stream);
@@ -738,7 +738,7 @@ pub(crate) fn byte_release_steps(controller: &ReadableByteStreamController<'_>) 
     if !controller.data().pending_pull_intos.is_empty() {
         // Set the first descriptor's reader type and drop the rest in place,
         // without moving a `#[must_root]` descriptor out of the traced list.
-        let data = controller.data_mut();
+        let mut data = controller.data_mut();
         data.pending_pull_intos[0].reader_type = ReaderType::None;
         data.pending_pull_intos.truncate(1);
     }
@@ -864,7 +864,7 @@ pub(crate) fn create_readable_byte_stream<'r>(
 /// <https://streams.spec.whatwg.org/#initialize-readable-stream>
 /// InitializeReadableStream(stream) performs the following steps:
 pub(crate) fn initialize_readable_stream(stream: &ReadableStream<'_>) {
-    let data = stream.data_mut();
+    let mut data = stream.data_mut();
     // Step 1: Set _stream_.`[[state]]` to "`readable`".
     data.state = ReadableStreamState::Readable;
     // Step 2: Set _stream_.`[[reader]]` and _stream_.`[[storedError]]` to undefined.
@@ -1365,7 +1365,9 @@ pub(crate) fn readable_stream_pipe_to<'r>(
     pipe_setup_propagation_and_start(scope, state)?;
 
     // Step 16: Return _promise_.
-    Ok(state.data().promise.get(scope))
+    // Bind to a local so the `data()` guard drops before `state` does.
+    let promise = state.data().promise.get(scope);
+    Ok(promise)
 }
 
 // ---------------------------------------------------------------------------
@@ -2269,10 +2271,9 @@ pub(crate) fn readable_byte_stream_tee<'r>(
     // (Steps 3-24 implemented in `ByteTeeState::new` and the `byte_tee_*` helpers.)
     let state = ByteTeeState::new(scope, *stream)?;
     // Step 25: Return « _branch1_, _branch2_ ».
-    Ok(vec![
-        state.data().branch1.get(scope),
-        state.data().branch2.get(scope),
-    ])
+    let branch1 = state.data().branch1.get(scope);
+    let branch2 = state.data().branch2.get(scope);
+    Ok(vec![branch1, branch2])
 }
 
 /// The shared state backing `ReadableByteStreamTee`. Not exposed to JS
@@ -2932,7 +2933,10 @@ pub(crate) fn readable_stream_add_read_into_request(
         stream.data().state,
         ReadableStreamState::Readable | ReadableStreamState::Closed
     ));
-    reader.data_mut().read_into_requests.push(read_into_request);
+    reader
+        .data_mut()
+        .read_into_requests
+        .push_back(read_into_request);
 }
 
 /// <https://streams.spec.whatwg.org/#readable-stream-add-read-request>
@@ -2950,7 +2954,7 @@ pub(crate) fn readable_stream_add_read_request(
     // Step 2: Assert: _stream_.`[[state]]` is "`readable`".
     // Step 3: `Append` _readRequest_ to _stream_.`[[reader]]`.`[[readRequests]]`.
     let reader = stream_default_reader(scope, stream).expect("stream has a default reader");
-    reader.data_mut().read_requests.push(read_request);
+    reader.data_mut().read_requests.push_back(read_request);
 }
 
 /// <https://streams.spec.whatwg.org/#readable-stream-cancel>
@@ -2988,7 +2992,11 @@ pub(crate) fn readable_stream_cancel<'r>(
     if let Some(reader) = stream_byob_reader(scope, stream) {
         let undef = HandleValue::undefined();
         settle_request_snapshot(
-            std::mem::take(&mut reader.data_mut().read_into_requests),
+            // Drop `data_mut()` guard before call.
+            {
+                let mut data = reader.data_mut();
+                std::mem::take(&mut data.read_into_requests)
+            },
             |read_into_request| {
                 read_into_request
                     .root(scope)
@@ -3027,12 +3035,12 @@ pub(crate) fn readable_stream_cancel<'r>(
 /// (`RootedTraceableBox`) and draining it front-to-back keeps the remainder
 /// traced — and therefore pointer-current — across every settle step.
 fn settle_request_snapshot<T: js::heap::Trace + 'static>(
-    snapshot: Vec<T>,
+    snapshot: std::collections::VecDeque<T>,
     mut settle: impl FnMut(T),
 ) {
     let mut snapshot = RootedTraceableBox::new(snapshot);
-    while !snapshot.is_empty() {
-        settle(snapshot.remove(0));
+    while let Some(request) = snapshot.pop_front() {
+        settle(request);
     }
 }
 
@@ -3059,7 +3067,11 @@ pub(crate) fn readable_stream_close(scope: &Scope<'_>, stream: &ReadableStream<'
     //         A BYOB reader has no `[[readRequests]]`; its pending read-into requests are left as-is.
     if let Some(reader) = stream_default_reader(scope, stream) {
         settle_request_snapshot(
-            std::mem::take(&mut reader.data_mut().read_requests),
+            // Drop `data_mut()` guard before call.
+            {
+                let mut data = reader.data_mut();
+                std::mem::take(&mut data.read_requests)
+            },
             |read_request| {
                 read_request
                     .root(scope)
@@ -3128,7 +3140,12 @@ pub(crate) fn readable_stream_fulfill_read_into_request(
     debug_assert!(!reader.data().read_into_requests.is_empty());
     // Step 4: Let _readIntoRequest_ be _reader_.`[[readIntoRequests]]`[0].
     // Step 5: `Remove` _readIntoRequest_ from _reader_.`[[readIntoRequests]]`.
-    let read_into_request = reader.data_mut().read_into_requests.remove(0).root(scope);
+    let read_into_request = reader
+        .data_mut()
+        .read_into_requests
+        .pop_front()
+        .expect("a non-empty read-into request list")
+        .root(scope);
     if done {
         // Step 6: If _done_ is true, perform _readIntoRequest_’s `close steps`, given _chunk_.
         read_into_request
@@ -3163,7 +3180,12 @@ pub(crate) fn readable_stream_fulfill_read_request(
     // Root the popped request immediately: the bound value is the non-`must_root`
     // `StackReadRequest`, so it is held across the step calls below without an
     // `allow_unrooted`.
-    let read_request = reader.data_mut().read_requests.remove(0).root(scope);
+    let read_request = reader
+        .data_mut()
+        .read_requests
+        .pop_front()
+        .expect("a non-empty read request list")
+        .root(scope);
     if done {
         // Step 6: If _done_ is true, perform _readRequest_’s `close steps`.
         read_request
@@ -3186,7 +3208,9 @@ pub(crate) fn readable_stream_get_num_read_into_requests(
     // Step 1: Assert: ! `ReadableStreamHasBYOBReader`(_stream_) is true.
     let reader = stream_byob_reader(scope, stream).expect("stream has a BYOB reader");
     // Step 2: Return _stream_.`[[reader]]`.`[[readIntoRequests]]`’s `size`.
-    reader.data().read_into_requests.len()
+    // Bind the guard to a local so it drops before `reader` at end of scope.
+    let data = reader.data();
+    data.read_into_requests.len()
 }
 
 /// <https://streams.spec.whatwg.org/#readable-stream-get-num-read-requests>
@@ -3431,7 +3455,11 @@ pub(crate) fn readable_stream_default_reader_error_read_requests(
     // Step 3: `For each` _readRequest_ of _readRequests_, Perform _readRequest_’s `error steps`,
     //         given _e_.
     settle_request_snapshot(
-        std::mem::take(&mut reader.data_mut().read_requests),
+        // Drop `data_mut()` guard before call.
+        {
+            let mut data = reader.data_mut();
+            std::mem::take(&mut data.read_requests)
+        },
         |read_request| {
             read_request
                 .root(scope)
@@ -3545,7 +3573,7 @@ pub(crate) fn set_up_readable_stream_byob_reader(
     // Step 3: Perform ! `ReadableStreamReaderGenericInitialize`(_reader_, _stream_).
     readable_stream_reader_generic_initialize(scope, reader, stream)?;
     // Step 4: Set _reader_.`[[readIntoRequests]]` to a new empty `list`.
-    reader.data_mut().read_into_requests = Vec::new();
+    reader.data_mut().read_into_requests = std::collections::VecDeque::new();
     Ok(())
 }
 
@@ -3566,7 +3594,7 @@ pub(crate) fn set_up_readable_stream_default_reader(
     // Step 2: Perform ! `ReadableStreamReaderGenericInitialize`(_reader_, _stream_).
     readable_stream_reader_generic_initialize(scope, reader, stream)?;
     // Step 3: Set _reader_.`[[readRequests]]` to a new empty `list`.
-    reader.data_mut().read_requests = Vec::new();
+    reader.data_mut().read_requests = std::collections::VecDeque::new();
     Ok(())
 }
 
@@ -3742,7 +3770,7 @@ pub(crate) fn readable_stream_default_controller_enqueue(
             // value and re-throw it.
             Err(_) => return Err(error_controller_with_pending(scope, controller)),
         };
-        if enqueue_value_with_size(scope, controller.data_mut(), chunk, chunk_size).is_err() {
+        if enqueue_value_with_size(scope, &mut *controller.data_mut(), chunk, chunk_size).is_err() {
             return Err(error_controller_with_pending(scope, controller));
         }
     }
@@ -3765,7 +3793,7 @@ pub(crate) fn readable_stream_default_controller_error(
         return;
     }
     // Step 3: Perform ! `ResetQueue`(_controller_).
-    reset_queue(controller.data_mut());
+    reset_queue(&mut *controller.data_mut());
     // Step 4: Perform ! `DefaultControllerClearAlgorithms`(_controller_).
     readable_stream_default_controller_clear_algorithms(controller);
     // Step 5: Perform ! `ReadableStreamError`(_stream_, _e_).
@@ -3840,11 +3868,11 @@ pub(crate) fn set_up_readable_stream_default_controller(
     // Step 2: Set _controller_.`[[stream]]` to _stream_.
     controller.data_mut().stream = Some(Heap::from(*stream));
     // Step 3: Perform ! `ResetQueue`(_controller_).
-    reset_queue(controller.data_mut());
+    reset_queue(&mut *controller.data_mut());
     // Step 4: Set _controller_.`[[started]]`, _controller_.`[[closeRequested]]`,
     //         _controller_.`[[pullAgain]]`, and _controller_.`[[pulling]]` to false.
     {
-        let data = controller.data_mut();
+        let mut data = controller.data_mut();
         data.started = false;
         data.close_requested = false;
         data.pull_again = false;
@@ -4818,8 +4846,7 @@ pub(crate) fn readable_byte_stream_controller_process_read_requests_using_queue(
         if controller.data().queue_total_size == 0.0 {
             return Ok(());
         }
-        let mut read_request =
-            RootedTraceableBox::new(Some(reader.data_mut().read_requests.remove(0)));
+        let mut read_request = RootedTraceableBox::new(reader.data_mut().read_requests.pop_front());
         readable_byte_stream_controller_fill_read_request_from_queue(
             scope,
             controller,
@@ -5448,7 +5475,7 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     controller.data_mut().stream = Some(Heap::from(*stream));
     // Step 4: Set _controller_.`[[pullAgain]]` and _controller_.`[[pulling]]` to false.
     {
-        let data = controller.data_mut();
+        let mut data = controller.data_mut();
         data.pull_again = false;
         data.pulling = false;
     }
@@ -5458,7 +5485,7 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     reset_byte_queue(controller);
     // Step 7: Set _controller_.`[[closeRequested]]` and _controller_.`[[started]]` to false.
     {
-        let data = controller.data_mut();
+        let mut data = controller.data_mut();
         data.close_requested = false;
         data.started = false;
     }

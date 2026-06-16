@@ -618,15 +618,21 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
                 unsafe { self.0.as_raw() == other.as_ptr() }
             }
 
-            /// Get a shared reference to the private Rust data.
-            pub fn data(&self) -> &#inner_name {
-                unsafe { self.0.data().unwrap_unchecked() }
+            /// Borrow the private Rust data (guard dereferencing to `&data`).
+            ///
+            /// Panics if the data is already mutably borrowed (a reentrant
+            /// access to the same object) — see `js::class::Stack::data`.
+            pub fn data(&self) -> ::js::class::Ref<'_, #inner_name> {
+                self.0.data().unwrap()
             }
 
-            /// Get a mutable reference to the private Rust data.
-            #[allow(clippy::mut_from_ref)]
-            pub fn data_mut(&self) -> &mut #inner_name {
-                unsafe { self.0.data_mut().unwrap_unchecked() }
+            /// Mutably borrow the private Rust data (guard dereferencing to
+            /// `&mut data`).
+            ///
+            /// Panics if the data is already borrowed (a reentrant access to
+            /// the same object) — see `js::class::Stack::data_mut`.
+            pub fn data_mut(&self) -> ::js::class::RefMut<'_, #inner_name> {
+                self.0.data_mut().unwrap()
             }
         }
 
@@ -1672,10 +1678,15 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                     .map(|(name, _)| quote! { #name })
                     .collect();
 
-                let get_inner = if method.has_mut_self {
-                    quote! { let inner = self.data_mut(); }
+                // `data()`/`data_mut()` return borrow guards; reborrow through
+                // them when passing the receiver to the inner method.
+                let (get_inner, inner_arg) = if method.has_mut_self {
+                    (
+                        quote! { let mut inner = self.data_mut(); },
+                        quote! { &mut *inner },
+                    )
                 } else {
-                    quote! { let inner = self.data(); }
+                    (quote! { let inner = self.data(); }, quote! { &*inner })
                 };
 
                 // InstanceValue: always needs a scope to create the JS object.
@@ -1693,7 +1704,7 @@ fn process_methods(attr: TokenStream, item: TokenStream, config: ClassConfig) ->
                         #get_inner
                         unsafe {
                             let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
-                                #inner_name::#fn_name(inner, #cx_arg #(#param_names),*)
+                                #inner_name::#fn_name(#inner_arg, #cx_arg #(#param_names),*)
                             })?;
                             <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __obj)?;
                             let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
@@ -2563,6 +2574,13 @@ fn gen_method_native(
         vec![]
     };
 
+    // When `this` is the private data (not the newtype), `__self` is a borrow
+    // guard; reborrow through it to pass the receiver to the inner method.
+    let self_arg = if info.has_mut_self {
+        quote! { &mut *__self }
+    } else {
+        quote! { &*__self }
+    };
     let call = if on_newtype && (info.has_self || info.has_mut_self) {
         // Method lives on the stack newtype — use method-call syntax.
         if info.is_raw {
@@ -2576,13 +2594,13 @@ fn gen_method_native(
         }
     } else if info.has_self || info.has_mut_self {
         if info.is_raw {
-            quote! { #type_name::#fn_name(__self, &scope, &__args) }
+            quote! { #type_name::#fn_name(#self_arg, &scope, &__args) }
         } else if info.has_cx {
             let all_args: Vec<_> = call_args.iter().chain(rest_arg_expr.iter()).collect();
-            quote! { #type_name::#fn_name(__self, &scope, #(#all_args),*) }
+            quote! { #type_name::#fn_name(#self_arg, &scope, #(#all_args),*) }
         } else {
             let all_args: Vec<_> = call_args.iter().chain(rest_arg_expr.iter()).collect();
-            quote! { #type_name::#fn_name(__self, #(#all_args),*) }
+            quote! { #type_name::#fn_name(#self_arg, #(#all_args),*) }
         }
     } else if info.is_raw {
         quote! { #type_name::#fn_name(&scope, &__args) }
@@ -2796,6 +2814,14 @@ fn gen_accessor_native(
         };
     };
 
+    // When `this` is the private data (not the newtype), `__self` is a borrow
+    // guard; reborrow through it to pass the receiver to the inner method.
+    let self_arg = if is_getter {
+        quote! { &*__self }
+    } else {
+        quote! { &mut *__self }
+    };
+
     let body = if is_getter {
         // Getter: call method, set return value
         let call = if on_newtype {
@@ -2807,11 +2833,11 @@ fn gen_accessor_native(
                 quote! { __self.#fn_name() }
             }
         } else if info.is_raw {
-            quote! { #type_name::#fn_name(__self, &scope, &__args) }
+            quote! { #type_name::#fn_name(#self_arg, &scope, &__args) }
         } else if info.has_cx {
-            quote! { #type_name::#fn_name(__self, &scope) }
+            quote! { #type_name::#fn_name(#self_arg, &scope) }
         } else {
-            quote! { #type_name::#fn_name(__self) }
+            quote! { #type_name::#fn_name(#self_arg) }
         };
 
         match &info.return_style {
@@ -2864,11 +2890,11 @@ fn gen_accessor_native(
                 quote! { __self.#fn_name(#(#call_args),*) }
             }
         } else if info.is_raw {
-            quote! { #type_name::#fn_name(__self, &scope, &__args) }
+            quote! { #type_name::#fn_name(#self_arg, &scope, &__args) }
         } else if info.has_cx {
-            quote! { #type_name::#fn_name(__self, &scope, #(#call_args),*) }
+            quote! { #type_name::#fn_name(#self_arg, &scope, #(#call_args),*) }
         } else {
-            quote! { #type_name::#fn_name(__self, #(#call_args),*) }
+            quote! { #type_name::#fn_name(#self_arg, #(#call_args),*) }
         };
 
         match &info.return_style {

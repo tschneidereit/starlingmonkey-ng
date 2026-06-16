@@ -103,7 +103,8 @@ impl URL<'_> {
     fn set_protocol(&self, _scope: &Scope<'_>, value: String) -> Result<(), ExnThrown> {
         // Step 1: Basic URL parse the given value, followed by U+003A (:), with this’s URL as url
         //         and scheme start state as state override.
-        let Some(url) = self.data_mut().url.as_mut() else {
+        let mut url_data = self.data_mut();
+        let Some(url) = url_data.url.as_mut() else {
             return Ok(());
         };
         let _ = url::quirks::set_protocol(url, &value);
@@ -125,7 +126,8 @@ impl URL<'_> {
     #[setter]
     fn set_username(&self, _scope: &Scope<'_>, value: String) -> Result<(), ExnThrown> {
         // Step 1: If `this`’s `URL` `cannot have a username/password/port`, then return.
-        let Some(url) = self.data_mut().url.as_mut() else {
+        let mut url_data = self.data_mut();
+        let Some(url) = url_data.url.as_mut() else {
             return Ok(());
         };
         if url.cannot_be_a_base() || url.host_str().is_none() {
@@ -152,7 +154,8 @@ impl URL<'_> {
     #[setter]
     fn set_password(&self, _scope: &Scope<'_>, value: String) -> Result<(), ExnThrown> {
         // Step 1: If `this`’s `URL` `cannot have a username/password/port`, then return.
-        let Some(url) = self.data_mut().url.as_mut() else {
+        let mut url_data = self.data_mut();
+        let Some(url) = url_data.url.as_mut() else {
             return Ok(());
         };
         if url.cannot_be_a_base() || url.host_str().is_none() {
@@ -183,7 +186,8 @@ impl URL<'_> {
     #[setter]
     fn set_host(&self, _scope: &Scope<'_>, value: String) -> Result<(), ExnThrown> {
         // Step 1: If `this`'s `URL` has an `opaque path`, then return.
-        let Some(url) = self.data_mut().url.as_mut() else {
+        let mut url_data = self.data_mut();
+        let Some(url) = url_data.url.as_mut() else {
             return Ok(());
         };
 
@@ -209,7 +213,8 @@ impl URL<'_> {
     #[setter]
     fn set_hostname(&self, _scope: &Scope<'_>, value: String) -> Result<(), ExnThrown> {
         // Step 1: If `this`’s `URL` has an `opaque path`, then return.
-        let Some(url) = self.data_mut().url.as_mut() else {
+        let mut url_data = self.data_mut();
+        let Some(url) = url_data.url.as_mut() else {
             return Ok(());
         };
 
@@ -235,7 +240,8 @@ impl URL<'_> {
     #[setter]
     fn set_port(&self, _scope: &Scope<'_>, value: String) -> Result<(), ExnThrown> {
         // Step 1: If `this`’s `URL` `cannot have a username/password/port`, then return.
-        let Some(url) = self.data_mut().url.as_mut() else {
+        let mut url_data = self.data_mut();
+        let Some(url) = url_data.url.as_mut() else {
             return Ok(());
         };
 
@@ -262,7 +268,8 @@ impl URL<'_> {
     #[setter]
     fn set_pathname(&self, _scope: &Scope<'_>, value: String) -> Result<(), ExnThrown> {
         // Step 1: If `this`’s `URL` has an `opaque path`, then return.
-        let Some(url) = self.data_mut().url.as_mut() else {
+        let mut url_data = self.data_mut();
+        let Some(url) = url_data.url.as_mut() else {
             return Ok(());
         };
 
@@ -296,12 +303,15 @@ impl URL<'_> {
         // Step 4: Set _url_’s `query` to the empty string.
         // Step 5: `Basic URL parse` _input_ with _url_ as `_url_` and `query state` as `_state
         //         override_`.
-        let Some(url) = self.data_mut().url.as_mut() else {
-            return Ok(());
-        };
-
         let input = value.strip_prefix('?').unwrap_or(&value);
-        url::quirks::set_search(url, &value);
+        // Drop `data_mut()` guard before `self.data()` in Step 6.
+        {
+            let mut url_data = self.data_mut();
+            let Some(url) = url_data.url.as_mut() else {
+                return Ok(());
+            };
+            url::quirks::set_search(url, &value);
+        }
 
         // Step 6: Set `this`’s `query object`’s `list` to the result of `parsing` _input_.
         if let Some(query_object_heap) = self.data().query_object.as_ref() {
@@ -348,7 +358,8 @@ impl URL<'_> {
         //         to null and return.
         // Step 2: Let _input_ be the given value with a single leading U+0023 (#) removed, if any.
         // Step 3: Set `this`’s `URL`’s `fragment` to the empty string.
-        let Some(url) = self.data_mut().url.as_mut() else {
+        let mut url_data = self.data_mut();
+        let Some(url) = url_data.url.as_mut() else {
             return Ok(());
         };
         url::quirks::set_hash(url, &value);

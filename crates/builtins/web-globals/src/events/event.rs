@@ -207,7 +207,7 @@ impl Event {
         // Step 1: Set the canceled flag with this if the given value is false; otherwise do
         //         nothing.
         if !value {
-            set_the_canceled_flag(self.data_mut());
+            set_the_canceled_flag(&mut *self.data_mut());
         }
     }
 
@@ -215,7 +215,7 @@ impl Event {
     #[method]
     fn prevent_default(&self) {
         // Step 1: Set the canceled flag with this.
-        set_the_canceled_flag(self.data_mut());
+        set_the_canceled_flag(&mut *self.data_mut());
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-defaultprevented>
@@ -270,7 +270,7 @@ impl Event {
         }
         // Step 2: `Initialize` `this` with _type_, _bubbles_, and _cancelable_.
         initialize_event(
-            self.data_mut(),
+            &mut *self.data_mut(),
             event_type,
             bubbles.unwrap_or(false),
             cancelable.unwrap_or(false),

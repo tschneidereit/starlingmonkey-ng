@@ -226,7 +226,7 @@ pub(crate) fn abort_steps<'r>(
 /// [[ErrorSteps]]() implements the [[ErrorSteps]] contract. It performs the following steps:
 pub(crate) fn error_steps(controller: &WritableStreamDefaultController<'_>) {
     // Step 1: Perform ! `ResetQueue`(`this`).
-    reset_queue(controller.data_mut());
+    reset_queue(&mut *controller.data_mut());
 }
 
 /// <https://streams.spec.whatwg.org/#acquire-writable-stream-default-writer>
@@ -295,7 +295,7 @@ pub(crate) fn create_writable_stream<'r>(
 /// <https://streams.spec.whatwg.org/#initialize-writable-stream>
 /// InitializeWritableStream(stream) performs the following steps:
 pub(crate) fn initialize_writable_stream(stream: &WritableStream<'_>) {
-    let data = stream.data_mut();
+    let mut data = stream.data_mut();
     // Step 1: Set _stream_.`[[state]]` to "`writable`".
     data.state = WritableStreamState::Writable;
     // Step 2: Set _stream_.`[[storedError]]`, _stream_.`[[writer]]`, _stream_.`[[controller]]`,
@@ -870,7 +870,7 @@ pub(crate) fn writable_stream_mark_close_request_in_flight(stream: &WritableStre
     // Step 4: Set _stream_.`[[closeRequest]]` to undefined.
     // Move the slot between two traced fields in one borrow, with no `#[must_root]`
     // local in between.
-    let data = stream.data_mut();
+    let mut data = stream.data_mut();
     data.in_flight_close_request = data.close_request.take();
 }
 
@@ -886,7 +886,7 @@ pub(crate) fn writable_stream_mark_first_write_request_in_flight(stream: &Writab
     // Step 5: Set _stream_.`[[inFlightWriteRequest]]` to _writeRequest_.
     // Move the slot between two traced fields in one borrow, with no `#[must_root]`
     // local in between.
-    let data = stream.data_mut();
+    let mut data = stream.data_mut();
     data.in_flight_write_request = Some(data.write_requests.pop_front().unwrap());
 }
 
@@ -1209,7 +1209,7 @@ pub(crate) fn set_up_writable_stream_default_controller(
     // Step 4: Set _stream_.`[[controller]]` to _controller_.
     stream.data_mut().controller = Some(Heap::from(*controller));
     // Step 5: Perform ! `ResetQueue`(_controller_).
-    reset_queue(controller.data_mut());
+    reset_queue(&mut *controller.data_mut());
     // Step 6: Set _controller_.`[[abortController]]` to a new ``AbortController``.
     // Already done by `WritableStreamDefaultController::new`, because the field
     // needs to be initialized before that returns.
@@ -1401,7 +1401,7 @@ pub(crate) fn writable_stream_default_controller_advance_queue_if_needed(
     } else {
         // Step 10: Otherwise, perform ! `WritableStreamDefaultControllerProcessWrite`(_controller_,
         //          _value_).
-        let value = peek_queue_value(scope, controller.data());
+        let value = peek_queue_value(scope, &*controller.data());
         writable_stream_default_controller_process_write(scope, controller, value);
     }
 }
@@ -1554,7 +1554,7 @@ pub(crate) fn writable_stream_default_controller_process_close(
     // Step 2: Perform ! `WritableStreamMarkCloseRequestInFlight`(_stream_).
     writable_stream_mark_close_request_in_flight(&stream);
     // Step 3: Perform ! `DequeueValue`(_controller_).
-    dequeue_value(scope, controller.data_mut());
+    dequeue_value(scope, &mut *controller.data_mut());
     // Step 4: Assert: _controller_.`[[queue]]` is empty.
     debug_assert!(controller.data().queue.is_empty());
     // Step 5: Let _sinkClosePromise_ be the result of performing _controller_.`[[closeAlgorithm]]`.
@@ -1640,7 +1640,7 @@ pub(crate) fn writable_stream_default_controller_write(
     // Step 2: If _enqueueResult_ is an abrupt completion, Perform !
     //         `WritableStreamDefaultControllerErrorIfNeeded`(_controller_,
     //         _enqueueResult_.[[Value]]). Return.
-    if enqueue_value_with_size(scope, controller.data_mut(), chunk, chunk_size).is_err() {
+    if enqueue_value_with_size(scope, &mut *controller.data_mut(), chunk, chunk_size).is_err() {
         let value = js::exception::get_and_clear_pending(scope).unwrap();
         writable_stream_default_controller_error_if_needed(scope, controller, value);
         return;

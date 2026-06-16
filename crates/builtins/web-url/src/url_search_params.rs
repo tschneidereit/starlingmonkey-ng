@@ -184,12 +184,12 @@ impl URLSearchParams<'_> {
         // Step 1: If `this`’s `list` `contains` any `tuples` whose name is _name_, then set the
         //         value of the first such `tuple` to _value_ and `remove` the others.
         // Step 2: Otherwise, `append` (_name_, _value_) to `this`’s `list`.
-        if let Some(first_index) = self
+        let first_index = self
             .data()
             .list
             .iter()
-            .position(|(tuple_name, _)| tuple_name == &name)
-        {
+            .position(|(tuple_name, _)| tuple_name == &name);
+        if let Some(first_index) = first_index {
             self.data_mut().list[first_index].1 = value.clone();
             let mut seen_first = false;
             self.data_mut().list.retain(|(tuple_name, _)| {
@@ -320,14 +320,15 @@ pub fn install_symbol_iterator(scope: &Scope<'_>) {
 
 impl URLSearchParams<'_> {
     pub(crate) fn update(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
-        let Some(url_object_heap) = self.data().url_object.as_ref() else {
+        let data = self.data();
+        let Some(url_object_heap) = data.url_object.as_ref() else {
             return Ok(());
         };
 
         let url_object = url_object_heap.get(scope);
 
         let mut serializer = form_urlencoded::Serializer::new(String::new());
-        for (name, value) in &self.data().list {
+        for (name, value) in &data.list {
             serializer.append_pair(name, value);
         }
         let serialized = serializer.finish();
