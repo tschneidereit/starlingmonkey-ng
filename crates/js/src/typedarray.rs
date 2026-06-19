@@ -230,29 +230,9 @@ impl<'s> Stack<'s, ArrayBuffer> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, ArrayBuffer> {
-    type Target = Object<'s>;
+crate::gc::handle::deref_to_object!(ArrayBuffer);
 
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<ArrayBuffer> and Stack<Object> are both
-        // repr(transparent) over Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Stack<'s, ArrayBuffer> as *const Object<'s>) }
-    }
-}
-
-impl<'s> FromJSVal<'s> for Stack<'s, ArrayBuffer> {
-    type Config = ();
-
-    fn from_jsval(
-        scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
-        _option: Self::Config,
-    ) -> Result<Self, ConversionError> {
-        Object::from_value(scope, *val)?
-            .cast::<Self>()
-            .map_err(|_| ConversionError::Failure(Cow::Borrowed(c"Value isn't an ArrayBuffer")))
-    }
-}
+crate::gc::handle::from_jsval_via_cast!(ArrayBuffer, c"Value isn't an ArrayBuffer");
 
 // ---------------------------------------------------------------------------
 // SharedArrayBuffer
@@ -278,29 +258,9 @@ impl<'s> Stack<'s, SharedArrayBuffer> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, SharedArrayBuffer> {
-    type Target = Object<'s>;
+crate::gc::handle::deref_to_object!(SharedArrayBuffer);
 
-    fn deref(&self) -> &Object<'s> {
-        unsafe { &*(self as *const Stack<'s, SharedArrayBuffer> as *const Object<'s>) }
-    }
-}
-
-impl<'s> FromJSVal<'s> for Stack<'s, SharedArrayBuffer> {
-    type Config = ();
-
-    fn from_jsval(
-        scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
-        _option: Self::Config,
-    ) -> Result<Self, ConversionError> {
-        Object::from_value(scope, *val)?
-            .cast::<Self>()
-            .map_err(|_| {
-                ConversionError::Failure(Cow::Borrowed(c"Value isn't a SharedArrayBuffer"))
-            })
-    }
-}
+crate::gc::handle::from_jsval_via_cast!(SharedArrayBuffer, c"Value isn't a SharedArrayBuffer");
 
 // ---------------------------------------------------------------------------
 // ArrayBufferView — umbrella for typed arrays and DataView
@@ -530,29 +490,9 @@ pub fn construct_view<'s>(
     root_or_throw(scope, obj)
 }
 
-impl<'s> std::ops::Deref for Stack<'s, ArrayBufferView> {
-    type Target = Object<'s>;
+crate::gc::handle::deref_to_object!(ArrayBufferView);
 
-    fn deref(&self) -> &Object<'s> {
-        unsafe { &*(self as *const Stack<'s, ArrayBufferView> as *const Object<'s>) }
-    }
-}
-
-impl<'s> FromJSVal<'s> for Stack<'s, ArrayBufferView> {
-    type Config = ();
-
-    fn from_jsval(
-        scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
-        _option: Self::Config,
-    ) -> Result<Self, ConversionError> {
-        Object::from_value(scope, *val)?
-            .cast::<Self>()
-            .map_err(|_| {
-                ConversionError::Failure(Cow::Borrowed(c"Value isn't a typed array or DataView"))
-            })
-    }
-}
+crate::gc::handle::from_jsval_via_cast!(ArrayBufferView, c"Value isn't a typed array or DataView");
 
 /// Copy the bytes held by any `BufferSource` (an `ArrayBuffer`,
 /// `SharedArrayBuffer`, or `ArrayBufferView`) into an owned `Vec`.
@@ -793,9 +733,8 @@ fn root_or_throw<'s, T: JSType>(
     scope: &'s Scope<'_>,
     obj: *mut JSObject,
 ) -> Result<Stack<'s, T>, ExnThrown> {
-    NonNull::new(obj)
-        .map(|nn| unsafe { Stack::<T>::from_handle_unchecked(scope.root_object(nn)) })
-        .ok_or(ExnThrown)
+    // SAFETY: callers pass pointers fresh from the JSAPI constructor for `T`.
+    unsafe { Stack::from_mozjs_rval(scope, obj) }
 }
 
 /// Read the data pointer and length of an `ArrayBuffer`, asserting it is

@@ -7,8 +7,6 @@
 //! handle type. It provides methods for creating Date objects and extracting
 //! their values.
 
-use std::ptr::NonNull;
-
 use crate::builtins::JSType;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
@@ -17,7 +15,6 @@ use mozjs::rust::wrappers2;
 use mozjs::rust::HandleObject;
 
 use super::error::ExnThrown;
-use crate::Object;
 
 /// Marker type for JavaScript `Date` objects.
 ///
@@ -43,9 +40,7 @@ impl<'s> Stack<'s, Date> {
     /// Create a new `Date` object from a `ClippedTime` value.
     pub fn new(scope: &'s Scope<'_>, time: ClippedTime) -> Result<Self, ExnThrown> {
         let obj = unsafe { wrappers2::NewDateObject(scope.cx_mut(), time) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new `Date` object from individual components.
@@ -63,9 +58,7 @@ impl<'s> Stack<'s, Date> {
         let obj = unsafe {
             wrappers2::NewDateObject1(scope.cx_mut(), year, month, day, hour, minute, second)
         };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Check whether an object is a `Date`.
@@ -98,12 +91,4 @@ impl<'s> Stack<'s, Date> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, Date> {
-    type Target = Object<'s>;
-
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<Date> and Stack<Object> are both repr(transparent)
-        // over Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Stack<'s, Date> as *const Object<'s>) }
-    }
-}
+crate::gc::handle::deref_to_object!(Date);

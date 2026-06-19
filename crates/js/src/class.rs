@@ -8,7 +8,7 @@
 //! for defining JavaScript classes backed by Rust structs.
 
 use std::any::TypeId;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr, CString};
 use std::marker::PhantomData;
@@ -289,13 +289,15 @@ impl<T: ClassDef> JSType for T {
     }
 }
 
-/// Typed variadic rest arguments in `#[jsmethods]`.
+/// Typed variadic rest arguments in `#[jsmethods]` and `#[webidl_methods]`.
 ///
 /// Use this as the type of the last parameter to collect all remaining
-/// JS arguments. The macro generates code that converts each argument
-/// to the specified type `T` using the [`FromJSValue`] trait.
+/// JS arguments. `T` must implement [`FromJSVal`](crate::conversion::FromJSVal) and either not
+/// need rooting, such as `i32`, `f64` or `String`, or be a scope-rooted type, such as
+/// `HandleValue<'_>`, `Promise<'_>`, or `Request<'_>`.
 ///
-/// The default type parameter is `Value`, which collects raw JS values.
+/// Note that instead of `HandleValue<'_>`, you can also use `&CallArgs`, which gives you access
+/// to the raw, already rooted, arguments vector and count.
 ///
 /// # Examples
 ///
@@ -305,12 +307,8 @@ impl<T: ClassDef> JSType for T {
 /// fn sum(rest: RestArgs<f64>) -> f64 {
 ///     rest.iter().sum()
 /// }
-///
-/// // Raw Value access (same as the default):
-/// #[method]
-/// fn process(&self, rest: RestArgs<Value>) -> String { ... }
 /// ```
-pub struct RestArgs<T = Value>(Vec<T>);
+pub struct RestArgs<T>(Vec<T>);
 
 impl<T> RestArgs<T> {
     /// Creates a new `RestArgs` from a pre-converted vector.
@@ -772,7 +770,30 @@ unsafe fn get_or_init_class_registry(global: *mut JSObject) -> &'static mut Clas
     let registry = Box::into_raw(Box::new(ClassRegistry::new()));
     let pv = value::from_private(registry as *const c_void);
     crate::object::set_reserved_slot(global, CLASS_REGISTRY_SLOT, &pv);
+    LIVE_REGISTRIES.with(|regs| regs.borrow_mut().push(registry));
     &mut *registry
+}
+
+thread_local! {
+    /// All live `ClassRegistry` boxes on this thread, traced by [`trace_class_registries`].
+    static LIVE_REGISTRIES: RefCell<Vec<*mut ClassRegistry>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Trace each global's class registry, rooting prototype and shared-function objects.
+/// Registered as an extra-GC-roots tracer by [`crate::gc::init`].
+///
+/// # Safety
+///
+/// `trc` must be a valid `JSTracer` provided by SpiderMonkey's GC.
+pub(crate) unsafe extern "C" fn trace_class_registries(trc: *mut JSTracer, _data: *mut c_void) {
+    LIVE_REGISTRIES.with(|regs| {
+        // `as_ptr` bypasses RefCell borrow tracking: GC tracing pauses JS execution, so a borrow
+        // held by interrupted code isn't actively used while the list is read here.
+        let regs = &*regs.as_ptr();
+        for &registry in regs {
+            (*registry).trace(trc);
+        }
+    });
 }
 
 fn register_prototype<T: 'static>(global: Object, proto: *mut JSObject) {
@@ -791,9 +812,6 @@ fn get_prototype<T: 'static>(global: Object) -> Option<*mut JSObject> {
 
 /// Starling's global class, extending `SIMPLE_GLOBAL_CLASS` with one extra
 /// reserved slot for the per-global [`ClassRegistry`].
-///
-/// The trace hook is `JS_GlobalObjectTraceHook` (required by SpiderMonkey).
-/// Registry entries are traced by the `Runtime`'s GC roots tracer instead.
 /// The finalize hook drops the registry.
 pub static STARLING_GLOBAL_CLASS: JSClass = JSClass {
     name: c"global".as_ptr(),
@@ -826,26 +844,13 @@ unsafe extern "C" fn finalize_starling_global(_gc: *mut GCContext, obj: *mut JSO
     if !val.is_undefined() {
         let ptr = val.to_private() as *mut ClassRegistry;
         if !ptr.is_null() {
+            // Unregister from the tracer's list before freeing.
+            LIVE_REGISTRIES.with(|regs| regs.borrow_mut().retain(|&r| r != ptr));
             drop(Box::from_raw(ptr));
             // Clear the slot so we don't double-free.
             let undef = value::undefined();
             crate::object::set_reserved_slot(obj, CLASS_REGISTRY_SLOT, &undef);
         }
-    }
-}
-
-/// Trace the class registry stored in a global object's reserved slot.
-///
-/// Called by the `Runtime`'s GC roots tracer to keep registered prototype
-/// `Heap` pointers up-to-date across moving GC.
-///
-/// # Safety
-///
-/// `trc` must be a valid tracer. `global` must be a live global object
-/// that was created with [`STARLING_GLOBAL_CLASS`].
-pub unsafe fn trace_class_registry_for_global(trc: *mut JSTracer, global: *mut JSObject) {
-    if let Some(registry) = get_class_registry(global) {
-        registry.trace(trc);
     }
 }
 
@@ -1596,10 +1601,38 @@ pub unsafe extern "C" fn generic_class_trace<T: ClassDef>(trc: *mut JSTracer, ob
 // Argument extraction helpers
 // ============================================================================
 
+/// Shared core of the `get_*arg*` extractors: optionally require the
+/// argument's presence, then convert it via `FromJSVal` with the given
+/// config, throwing a `TypeError` for conversion failures.
+///
+/// # Safety
+///
+/// - `scope` must be in a valid realm.
+/// - `args` must be from a valid JSNative call.
+unsafe fn extract_arg<'s, T: FromJSVal<'s>>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    index: u32,
+    required: bool,
+    config: T::Config,
+) -> Result<T, ExnThrown> {
+    if required && index >= args.argc_ {
+        return Err(crate::error::throw_type_error(
+            scope,
+            c"Not enough arguments",
+        ));
+    }
+    // `CallArgs::get` yields `undefined` for an out-of-range index.
+    let val = crate::native::Handle::from_raw(args.get(index));
+    T::from_jsval(scope, val, config).map_err(|e| match e {
+        ConversionError::ExnPending => ExnThrown,
+        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
+    })
+}
+
 /// Extract an argument from CallArgs and convert it to the desired Rust type.
 ///
-/// Returns `Ok(value)` on success, or `Err(())` if the argument is missing
-/// or conversion fails.
+/// Throws "Not enough arguments" if the argument is missing.
 ///
 /// # Safety
 ///
@@ -1610,17 +1643,7 @@ pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
     args: &CallArgs,
     index: u32,
 ) -> Result<T, ExnThrown> {
-    if index >= args.argc_ {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"Not enough arguments",
-        ));
-    }
-    let val = crate::native::Handle::from_raw(args.get(index));
-    T::from_jsval(scope, val, ()).map_err(|e| match e {
-        ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
-    })
+    extract_arg(scope, args, index, true, ())
 }
 
 /// Extract an argument like [`get_arg`], but treat a missing argument as
@@ -1628,8 +1651,7 @@ pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
 ///
 /// Used for optional `any` parameters (typed `HandleValue`/`Value`), where a
 /// missing argument is indistinguishable from an explicit `undefined` and both
-/// are valid values. `CallArgs::get` already yields `undefined` for an
-/// out-of-range index, so the conversion is an identity for those types.
+/// are valid values.
 ///
 /// # Safety
 ///
@@ -1640,11 +1662,7 @@ pub unsafe fn get_arg_or_undefined<'s, T: FromJSVal<'s, Config = ()>>(
     args: &CallArgs,
     index: u32,
 ) -> Result<T, ExnThrown> {
-    let val = crate::native::Handle::from_raw(args.get(index));
-    T::from_jsval(scope, val, ()).map_err(|e| match e {
-        ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
-    })
+    extract_arg(scope, args, index, false, ())
 }
 
 /// Extract an integer argument with configurable conversion behavior.
@@ -1659,17 +1677,7 @@ pub unsafe fn get_int_arg<'s, T: FromJSVal<'s, Config = ConversionBehavior>>(
     index: u32,
     behavior: ConversionBehavior,
 ) -> Result<T, ExnThrown> {
-    if index >= args.argc_ {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"Not enough arguments",
-        ));
-    }
-    let val = crate::native::Handle::from_raw(args.get(index));
-    T::from_jsval(scope, val, behavior).map_err(|e| match e {
-        ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
-    })
+    extract_arg(scope, args, index, true, behavior)
 }
 
 /// Extract an argument with an explicit conversion config.
@@ -1690,17 +1698,7 @@ pub unsafe fn get_arg_with_config<'s, T: FromJSVal<'s>>(
     index: u32,
     config: T::Config,
 ) -> Result<T, ExnThrown> {
-    if index >= args.argc_ {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"Not enough arguments",
-        ));
-    }
-    let val = crate::native::Handle::from_raw(args.get(index));
-    T::from_jsval(scope, val, config).map_err(|e| match e {
-        ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
-    })
+    extract_arg(scope, args, index, true, config)
 }
 
 /// Extract a stack newtype argument from CallArgs.
@@ -1738,7 +1736,8 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
     let obj = val.to_object();
     let concrete_tag = crate::object::get_object_class(obj) as usize;
     let target_tag = class_tag::<T::Inner>();
-    if !is_derived_from_type(concrete_tag, target_tag) {
+    // Reject builtins' prototype objects, which match the class tag but carry no private data.
+    if !is_derived_from_type(concrete_tag, target_tag) || get_raw_private(obj).is_none() {
         let msg = CString::new(format!(
             "argument {} is not an instance of {}",
             index,
@@ -1864,14 +1863,26 @@ where
 
 /// Set the return value of a JSNative callback.
 ///
+/// On conversion failure the error is thrown as a pending exception and `false` is returned.
+///
 /// # Safety
 ///
 /// - `cx` and `args` must be from a valid JSNative call.
-pub unsafe fn set_return<'s, T: ToJSVal<'s>>(scope: &'s Scope<'s>, args: &CallArgs, value: &T) {
-    let val = value
-        .to_jsval(scope)
-        .expect("Failed to convert return value to JS");
-    args.rval().set(val.get());
+pub unsafe fn set_return<'s, T: ToJSVal<'s>>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    value: &T,
+) -> bool {
+    match value.to_jsval(scope) {
+        Ok(val) => {
+            args.rval().set(val.get());
+            true
+        }
+        Err(e) => {
+            e.throw(scope);
+            false
+        }
+    }
 }
 
 // ============================================================================
@@ -2069,7 +2080,8 @@ pub unsafe fn create_instance_with<'s, T: ClassDef>(
 ) -> Result<Object<'s>, ExnThrown> {
     let global = scope.global();
     let proto = match get_prototype::<T>(global) {
-        Some(p) => Object::from_raw_obj(scope, p).unwrap(),
+        // SAFETY: builtins' prototypes are always valid objects.
+        Some(p) => unsafe { Object::from_raw(scope, p) }.unwrap(),
         None => return Err(ExnThrown), // TODO: Actually throw an error here.
     };
 
@@ -2098,8 +2110,11 @@ pub fn get_or_init_shared_function<'s>(
     key: usize,
     init: impl FnOnce(&'s Scope<'_>) -> Result<crate::Function<'s>, ExnThrown>,
 ) -> Result<crate::Function<'s>, ExnThrown> {
-    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
-    if let Some(f) = registry.get_shared_function(key) {
+    // Scope the registry borrow to the lookup so nothing under `init` can cause a second borrow.
+    let cached = unsafe {
+        get_class_registry(scope.global().as_raw()).and_then(|r| r.get_shared_function(key))
+    };
+    if let Some(f) = cached {
         // SAFETY: `f` is a live JSFunction cached for this global and kept alive
         // by the registry's tracer.
         if let Some(func) = unsafe { crate::Function::from_raw(scope, f) } {
@@ -2107,6 +2122,7 @@ pub fn get_or_init_shared_function<'s>(
         }
     }
     let func = init(scope)?;
+    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
     registry.set_shared_function(key, func.as_raw());
     Ok(func)
 }

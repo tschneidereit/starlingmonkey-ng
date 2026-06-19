@@ -82,12 +82,4 @@ impl<'s> Stack<'s, WeakMap> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, WeakMap> {
-    type Target = Object<'s>;
-
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<WeakMap> and Stack<Object> are both repr(transparent)
-        // over Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Stack<'s, WeakMap> as *const Object<'s>) }
-    }
-}
+crate::gc::handle::deref_to_object!(WeakMap);

@@ -61,29 +61,23 @@ impl ExnThrown {
     /// API and Rust's `Result` type.
     #[inline]
     pub fn check(ok: bool) -> Result<(), ExnThrown> {
-        #[cfg(debug_assertions)]
-        {
-            use crate::exception::is_pending;
-
-            if let Some(rt) = Runtime::get() {
-                let raw_cx = rt.as_ptr();
-                let scope = unsafe { crate::gc::scope::RootScope::from_current_realm(raw_cx) };
-                if ok {
+        if ok {
+            #[cfg(debug_assertions)]
+            {
+                if let Some(rt) = Runtime::get() {
+                    let raw_cx = std::ptr::NonNull::new(rt.as_ptr()).unwrap();
+                    let cx = unsafe { mozjs::context::JSContext::from_ptr(raw_cx) };
                     debug_assert!(
-                        !is_pending(&scope),
+                        !unsafe { mozjs::rust::wrappers2::JS_IsExceptionPending(&cx) },
                         "Native JS function returned true but an exception is pending",
-                    );
-                } else {
-                    debug_assert!(
-                        is_pending(&scope),
-                        "Native JS function returned false but no exception is pending",
                     );
                 }
             }
-        }
-        if ok {
             Ok(())
         } else {
+            // Note that we can't do the inverse of the above assert: `false` without a pending
+            // exception is legitimate, since SpiderMonkey's API can return `false` without a
+            // pending exception for uncatchable exceptions.
             Err(ExnThrown)
         }
     }
@@ -109,52 +103,33 @@ impl ExnThrown {
             }
             JS_ClearPendingException(raw);
 
-            // Try to extract the error report if the exception is an Error object.
+            // For object exceptions, extract the attached stack and, for
+            // `Error` objects, the engine's error report.
+            let mut stack = None;
             if exc_val.is_object() {
                 let exc_obj = Object::from_value(scope, *exc_val).unwrap();
                 let report = mozjs::jsapi::JS_ErrorFromException(raw, exc_obj.handle().into());
 
-                // Try to extract the stack trace from the error object.
+                // Try to extract the stack trace from the exception object.
                 let maybe_stack =
                     Object::from_raw(scope, wrappers2::ExceptionStackOrNull(exc_obj.handle()));
-                let stack = if let Some(stack) = maybe_stack {
+                if let Some(stack_obj) = maybe_stack {
                     rooted!(in(raw) let mut stack_str: *mut JSString = ptr::null_mut());
                     let ok = mozjs::rust::wrappers::BuildStackString(
                         raw,
                         ptr::null_mut(),
-                        stack.handle(),
+                        stack_obj.handle(),
                         stack_str.handle_mut(),
                         0,
                         StackFormat::Default,
                     );
                     if ok && !stack_str.get().is_null() {
-                        // Convert the JS stack string to a Rust String via
-                        // the glue callback, using wrappers (not wrappers2)
-                        // since we only have a raw context pointer.
-                        use std::cell::Cell;
-                        thread_local! {
-                            static STACK_RESULT: Cell<Option<String>> =
-                                const { Cell::new(None) };
-                        }
-                        unsafe extern "C" fn stack_cb(encoded: *const std::ffi::c_char) {
-                            if !encoded.is_null() {
-                                let cstr = CStr::from_ptr(encoded);
-                                STACK_RESULT
-                                    .with(|r| r.set(Some(cstr.to_string_lossy().into_owned())));
-                            }
-                        }
-                        mozjs::rust::wrappers::EncodeStringToUTF8(
-                            raw,
-                            stack_str.handle(),
-                            stack_cb,
-                        );
-                        STACK_RESULT.with(|r| r.take())
-                    } else {
-                        None
+                        stack = Some(crate::conversion::jsstr_to_string(
+                            scope,
+                            ptr::NonNull::new(stack_str.get()).unwrap(),
+                        ));
                     }
-                } else {
-                    None
-                };
+                }
 
                 if !report.is_null() {
                     let report = &*report;
@@ -180,13 +155,25 @@ impl ExnThrown {
                 }
             }
 
-            // The exception was not an Error object; return a generic capture.
+            // No error report (a primitive throw like `throw "boom"`, or a non-`Error` object without engine error data): stringify the value itself.
+            // Any attached stack extracted above is kept.
+            let message = match crate::string::Str::from_value(scope, exc_val.handle()) {
+                Ok(s) => s
+                    .to_utf8(scope)
+                    .unwrap_or_else(|_| "(non-Error exception)".into()),
+                Err(ExnThrown) => {
+                    // ToString itself threw (a symbol, or a throwing
+                    // `toString`); discard that secondary exception.
+                    JS_ClearPendingException(raw);
+                    "(non-Error exception)".into()
+                }
+            };
             CapturedError {
-                message: Some("(non-Error exception)".into()),
+                message: Some(message),
                 filename: None,
                 lineno: 0,
                 column: 0,
-                stack: None,
+                stack,
             }
         } // unsafe
     }
@@ -200,18 +187,6 @@ impl fmt::Display for ExnThrown {
 
 impl std::error::Error for ExnThrown {}
 
-#[derive(Debug)]
-pub enum EvalError {
-    Exn,
-}
-
-impl EvalError {
-    pub fn format(scope: &Scope<'_>) -> String {
-        let error = ExnThrown::capture(scope);
-        format!("{error:?}")
-    }
-}
-
 /// Captured details from a JavaScript exception.
 ///
 /// Created by [`ExnThrown::capture`]. Contains the message, source location,
@@ -224,7 +199,8 @@ pub struct CapturedError {
     pub filename: Option<String>,
     /// The 1-based line number in the source, or 0 if unknown.
     pub lineno: u32,
-    /// The 0-based column number in the source, or 0 if unknown.
+    /// The 1-based column number in the source (`JSErrorReport::column` is
+    /// 1-origin), or 0 if unknown.
     pub column: u32,
     /// The stack trace string, if available.
     pub stack: Option<String>,
@@ -351,93 +327,80 @@ pub fn report_error_ascii(scope: &Scope<'_>, msg: &CStr) -> ExnThrown {
 // Newtype error wrappers
 // ---------------------------------------------------------------------------
 
-/// A JavaScript `TypeError` with a message.
-///
-/// Use this as the `Err` type in `Result<T, TypeError>` to throw a
-/// `TypeError` when a function returns an error. The proc macro system
-/// (`#[jsmethods]`, `#[jsglobals]`, etc.) dispatches via the
-/// [`ThrowException`](core_runtime::class::ThrowException) trait to call the
-/// appropriate SpiderMonkey error API.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use js::error::TypeError;
-///
-/// #[method]
-/// fn parse(input: String) -> Result<i32, TypeError> {
-///     input.parse().map_err(|_| TypeError(format!("invalid integer: {input}")))
-/// }
-/// ```
-#[derive(Debug, Clone)]
-pub struct TypeError(pub String);
+/// Defines a newtype error wrapper that throws as the named JS error type.
+macro_rules! js_error_newtype {
+    ($(#[doc = $doc:expr])* $Name:ident, $throw_fn:ident, $fallback:literal) => {
+        $(#[doc = $doc])*
+        #[derive(Debug, Clone)]
+        pub struct $Name(pub String);
 
-impl TypeError {
-    /// Throw this error as a pending JavaScript `TypeError` exception.
+        impl $Name {
+            /// Throw this error as the corresponding pending JavaScript
+            /// exception.
+            pub fn throw(&self, scope: &Scope<'_>) -> ExnThrown {
+                let c_msg = CString::new(self.0.as_str())
+                    .unwrap_or_else(|_| CString::from($fallback));
+                $throw_fn(scope, &c_msg)
+            }
+        }
+
+        impl fmt::Display for $Name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}: {}", stringify!($Name), self.0)
+            }
+        }
+
+        impl std::error::Error for $Name {}
+
+        impl ThrowException for $Name {
+            fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+                $Name::throw(&self, scope)
+            }
+        }
+    };
+}
+
+js_error_newtype!(
+    /// A JavaScript `TypeError` with a message.
     ///
-    /// # Safety
+    /// Use this as the `Err` type in `Result<T, TypeError>` to throw a
+    /// `TypeError` when a function returns an error. The proc macro system
+    /// (`#[jsmethods]`, `#[jsglobals]`, etc.) dispatches via the
+    /// [`ThrowException`] trait to call the appropriate SpiderMonkey error
+    /// API.
     ///
-    /// A realm must be entered on the scope's context.
-    pub fn throw(&self, scope: &Scope<'_>) -> ExnThrown {
-        let c_msg =
-            CString::new(self.0.as_str()).unwrap_or_else(|_| CString::new("type error").unwrap());
-        throw_type_error(scope, &c_msg)
-    }
-}
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use js::error::TypeError;
+    ///
+    /// #[method]
+    /// fn parse(input: String) -> Result<i32, TypeError> {
+    ///     input.parse().map_err(|_| TypeError(format!("invalid integer: {input}")))
+    /// }
+    /// ```
+    TypeError,
+    throw_type_error,
+    c"type error"
+);
 
-impl fmt::Display for TypeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TypeError: {}", self.0)
-    }
-}
+js_error_newtype!(
+    /// A JavaScript `RangeError` with a message.
+    ///
+    /// See [`TypeError`] for usage patterns.
+    RangeError,
+    throw_range_error,
+    c"range error"
+);
 
-impl std::error::Error for TypeError {}
-
-/// A JavaScript `RangeError` with a message.
-///
-/// See [`TypeError`] for usage patterns.
-#[derive(Debug, Clone)]
-pub struct RangeError(pub String);
-
-impl RangeError {
-    /// Throw this error as a pending JavaScript `RangeError` exception.
-    pub fn throw(&self, scope: &Scope<'_>) -> ExnThrown {
-        let c_msg =
-            CString::new(self.0.as_str()).unwrap_or_else(|_| CString::new("range error").unwrap());
-        throw_range_error(scope, &c_msg)
-    }
-}
-
-impl fmt::Display for RangeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "RangeError: {}", self.0)
-    }
-}
-
-impl std::error::Error for RangeError {}
-
-/// A JavaScript `SyntaxError` with a message.
-///
-/// See [`TypeError`] for usage patterns.
-#[derive(Debug, Clone)]
-pub struct SyntaxError(pub String);
-
-impl SyntaxError {
-    /// Throw this error as a pending JavaScript `SyntaxError` exception.
-    pub fn throw(&self, scope: &Scope<'_>) -> ExnThrown {
-        let c_msg =
-            CString::new(self.0.as_str()).unwrap_or_else(|_| CString::new("syntax error").unwrap());
-        throw_syntax_error(scope, &c_msg)
-    }
-}
-
-impl fmt::Display for SyntaxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SyntaxError: {}", self.0)
-    }
-}
-
-impl std::error::Error for SyntaxError {}
+js_error_newtype!(
+    /// A JavaScript `SyntaxError` with a message.
+    ///
+    /// See [`TypeError`] for usage patterns.
+    SyntaxError,
+    throw_syntax_error,
+    c"syntax error"
+);
 
 // ---------------------------------------------------------------------------
 // ThrowException trait — typed error dispatch for proc macros
@@ -465,24 +428,6 @@ impl ThrowException for String {
     /// Throw a `TypeError` with this string as the message.
     fn throw(self, scope: &Scope<'_>) -> ExnThrown {
         throw_error(scope, &self)
-    }
-}
-
-impl ThrowException for TypeError {
-    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
-        TypeError::throw(&self, scope)
-    }
-}
-
-impl ThrowException for RangeError {
-    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
-        RangeError::throw(&self, scope)
-    }
-}
-
-impl ThrowException for SyntaxError {
-    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
-        SyntaxError::throw(&self, scope)
     }
 }
 

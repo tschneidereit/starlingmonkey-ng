@@ -27,8 +27,16 @@ pub fn options<'a>(scope: &'a Scope<'_>) -> &'a ContextOptions {
 ///
 /// The returned reference borrows the context, so it is valid as long as the
 /// borrow is held.
+///
+/// # Safety
+///
+/// The reference points at context-owned data reachable through any
+/// `&Scope`, so Rust's uniqueness rule cannot be enforced by the signature.
+/// The caller must not let it overlap with any other reference to the
+/// options — neither one from [`options`] nor from a second `options_mut`
+/// call.
 #[allow(clippy::mut_from_ref)]
-pub fn options_mut<'a>(scope: &'a Scope<'_>) -> &'a mut ContextOptions {
+pub unsafe fn options_mut<'a>(scope: &'a Scope<'_>) -> &'a mut ContextOptions {
     // SAFETY: ContextOptionsRef returns a non-null pointer to options that
     // live as long as the JSContext.
     unsafe { &mut *wrappers2::ContextOptionsRef(scope.cx()) }
@@ -84,6 +92,9 @@ pub unsafe fn add_interrupt_callback(scope: &Scope<'_>, callback: JSInterruptCal
 }
 
 /// Check for a pending interrupt and invoke any registered callbacks.
+///
+/// If a callback cancels execution, this returns `Err(ExnThrown)` with no
+/// pending exception — uncatchable termination has no exception value.
 pub fn check_for_interrupt(scope: &Scope<'_>) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::JS_CheckForInterrupt(scope.cx_mut()) };
     ExnThrown::check(ok)

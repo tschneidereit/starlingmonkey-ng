@@ -28,9 +28,25 @@ pub use mozjs::jsapi::SetGCZeal;
 
 pub fn init(cx: &mut JSContext) {
     pool::init_pool(cx);
+    // SAFETY: `trace_class_registries` is a static function pointer.
+    unsafe {
+        add_extra_gc_roots_tracer(
+            cx,
+            Some(crate::class::trace_class_registries),
+            std::ptr::null_mut(),
+        );
+    }
 }
 
-pub fn shutdown() {
+pub fn shutdown(cx: &JSContext) {
+    // SAFETY: matches the registration in `init`.
+    unsafe {
+        remove_extra_gc_roots_tracer(
+            cx,
+            Some(crate::class::trace_class_registries),
+            std::ptr::null_mut(),
+        );
+    }
     pool::shutdown();
 }
 

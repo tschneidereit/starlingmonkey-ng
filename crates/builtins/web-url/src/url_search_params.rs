@@ -20,7 +20,7 @@ use js::prelude::HandleValue;
 #[webidl_union]
 pub enum URLSearchParamsInit {
     Pairs(Vec<Vec<String>>),
-    Record(Record<String>),
+    Record(Record<String, String>),
     Str(String),
 }
 

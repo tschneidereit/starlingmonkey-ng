@@ -43,33 +43,14 @@ use crate::builtins::JSType;
 use crate::conversion::{ConversionError, FromJSVal, ToJSVal};
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
+use crate::value::ValueArrayRooter;
 use crate::Object;
 use mozjs::gc::{HandleObject, HandleValue};
 use mozjs::jsapi::{
-    GetFunctionNativeReserved, HandleValueArray, JSClass, JSFunction, JSNative,
-    SetFunctionNativeReserved, Value,
+    GetFunctionNativeReserved, JSClass, JSFunction, JSNative, SetFunctionNativeReserved, Value,
 };
 use mozjs::jsval::UndefinedValue;
 use mozjs::rust::wrappers2;
-
-/// Backing buffer for a call's arguments.
-///
-/// `Function::call` and friends take `&[HandleValue]` and copy their values
-/// into this `Vec` so SpiderMonkey can be handed a `HandleValueArray` view.
-struct ArgBuffer(Vec<Value>);
-
-impl ArgBuffer {
-    fn new(args: &[HandleValue]) -> Self {
-        ArgBuffer(args.iter().map(|h| h.get()).collect())
-    }
-
-    fn handles(&self) -> HandleValueArray {
-        HandleValueArray {
-            length_: self.0.len(),
-            elements_: self.0.as_ptr(),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Function marker type
@@ -126,8 +107,7 @@ impl<'s> Stack<'s, Function> {
         };
         let fun = NonNull::new(fun).ok_or(ExnThrown)?;
         let obj = unsafe { mozjs::jsapi::JS_GetFunctionObject(fun.as_ptr()) };
-        let obj = NonNull::new(obj).ok_or(ExnThrown)?;
-        Ok(unsafe { Self::from_handle_unchecked(scope.root_object(obj)) })
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new standalone function (not attached to an object).
@@ -142,8 +122,7 @@ impl<'s> Stack<'s, Function> {
             unsafe { wrappers2::JS_NewFunction(scope.cx_mut(), call, nargs, flags, name.as_ptr()) };
         let fun = NonNull::new(fun).ok_or(ExnThrown)?;
         let obj = unsafe { mozjs::jsapi::JS_GetFunctionObject(fun.as_ptr()) };
-        let obj = NonNull::new(obj).ok_or(ExnThrown)?;
-        Ok(unsafe { Self::from_handle_unchecked(scope.root_object(obj)) })
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new function with reserved slots for storing closure data.
@@ -162,8 +141,7 @@ impl<'s> Stack<'s, Function> {
         };
         let fun = NonNull::new(fun).ok_or(ExnThrown)?;
         let obj = unsafe { mozjs::jsapi::JS_GetFunctionObject(fun.as_ptr()) };
-        let obj = NonNull::new(obj).ok_or(ExnThrown)?;
-        Ok(unsafe { Self::from_handle_unchecked(scope.root_object(obj)) })
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Get the underlying `JSFunction` pointer.
@@ -201,12 +179,13 @@ impl<'s> Stack<'s, Function> {
 
     /// Call a function value with the given `this` object and arguments.
     pub fn call_value<'a>(
-        scope: &Scope<'a>,
+        scope: &'a Scope<'_>,
         this: HandleObject,
         fval: HandleValue,
         args: &[HandleValue],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let args = ArgBuffer::new(args);
+        let mut args_root = ValueArrayRooter::new(args);
+        let args = args_root.root(scope);
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
             wrappers2::JS_CallFunctionValue(
@@ -223,12 +202,13 @@ impl<'s> Stack<'s, Function> {
 
     /// Call a named method on an object.
     pub fn call_by_name<'a>(
-        scope: &Scope<'a>,
+        scope: &'a Scope<'_>,
         obj: HandleObject,
         name: &CStr,
         args: &[HandleValue],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let args = ArgBuffer::new(args);
+        let mut args_root = ValueArrayRooter::new(args);
+        let args = args_root.root(scope);
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
             wrappers2::JS_CallFunctionName(
@@ -245,12 +225,13 @@ impl<'s> Stack<'s, Function> {
 
     /// Call a function object with a given `this` value.
     pub fn call<'a>(
-        scope: &Scope<'a>,
+        scope: &'a Scope<'_>,
         thisv: HandleValue,
         fun: HandleValue,
         args: &[HandleValue],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let args = ArgBuffer::new(args);
+        let mut args_root = ValueArrayRooter::new(args);
+        let args = args_root.root(scope);
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
             wrappers2::Call(scope.cx_mut(), thisv, fun, &args.handles(), rval.reborrow())
@@ -265,13 +246,14 @@ impl<'s> Stack<'s, Function> {
         fun: HandleValue,
         args: &[HandleValue],
     ) -> Result<Object<'s>, ExnThrown> {
-        let args = ArgBuffer::new(args);
+        let mut args_root = ValueArrayRooter::new(args);
+        let args = args_root.root(scope);
         let mut result = scope.root_object_mut(std::ptr::null_mut());
         let ok = unsafe {
             wrappers2::Construct1(scope.cx_mut(), fun, &args.handles(), result.reborrow())
         };
         ExnThrown::check(ok)?;
-        Object::from_raw_obj(scope, result.get()).ok_or(ExnThrown)
+        Object::from_handle(result.handle()).ok_or(ExnThrown)
     }
 
     /// Invoke the `new` operator on a constructor with an explicit `new.target`.
@@ -281,7 +263,8 @@ impl<'s> Stack<'s, Function> {
         new_target: HandleObject,
         args: &[HandleValue],
     ) -> Result<Object<'s>, ExnThrown> {
-        let args = ArgBuffer::new(args);
+        let mut args_root = ValueArrayRooter::new(args);
+        let args = args_root.root(scope);
         let mut result = scope.root_object_mut(std::ptr::null_mut());
         let ok = unsafe {
             wrappers2::Construct(
@@ -293,7 +276,7 @@ impl<'s> Stack<'s, Function> {
             )
         };
         ExnThrown::check(ok)?;
-        Object::from_raw_obj(scope, result.get()).ok_or(ExnThrown)
+        Object::from_handle(result.handle()).ok_or(ExnThrown)
     }
 
     // ---------------------------------------------------------------------------
@@ -361,29 +344,9 @@ impl<'s> Stack<'s, Function> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, Function> {
-    type Target = Object<'s>;
+crate::gc::handle::deref_to_object!(Function);
 
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<Function> and Stack<Object> are both repr(transparent)
-        // over Handle<'s, *mut JSObject>, so they have identical layout.
-        unsafe { &*(self as *const Stack<'s, Function> as *const Object<'s>) }
-    }
-}
-
-impl<'s> FromJSVal<'s> for Stack<'s, Function> {
-    type Config = ();
-
-    fn from_jsval(
-        scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
-        _option: Self::Config,
-    ) -> Result<Self, ConversionError> {
-        Object::from_value(scope, *val)?
-            .cast::<Self>()
-            .map_err(|_| ConversionError::Failure(Cow::Borrowed(c"Value isn't a Function")))
-    }
-}
+crate::gc::handle::from_jsval_via_cast!(Function, c"Value isn't a Function");
 
 pub enum ReservedSlot {
     Slot0 = 0,

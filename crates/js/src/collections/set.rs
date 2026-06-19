@@ -12,7 +12,6 @@ use mozjs::rust::wrappers2;
 use mozjs::rust::{HandleObject, HandleValue};
 
 use crate::error::ExnThrown;
-use crate::Object;
 
 /// Marker type for JavaScript `Set` objects.
 ///
@@ -122,12 +121,4 @@ impl<'s> Stack<'s, Set> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, Set> {
-    type Target = Object<'s>;
-
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<Set> and Stack<Object> are both repr(transparent)
-        // over Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Stack<'s, Set> as *const Object<'s>) }
-    }
-}
+crate::gc::handle::deref_to_object!(Set);

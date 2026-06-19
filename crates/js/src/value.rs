@@ -25,11 +25,13 @@
 //! The type-checking methods live directly on [`JSVal`] (e.g., `val.is_int32()`,
 //! `val.to_int32()`).
 
-use mozjs::gc::HandleFunction;
-use mozjs::jsapi::{JSObject, JSString};
+use std::hint::cold_path;
+
+use mozjs::gc::{Handle, HandleFunction};
+use mozjs::jsapi::{BigInt, JSObject, JSString};
 use mozjs::jsval::{
-    BooleanValue, DoubleValue, Int32Value, JSVal, NullValue, ObjectOrNullValue, ObjectValue,
-    PrivateValue, StringValue, UInt32Value, UndefinedValue,
+    BigIntValue, BooleanValue, DoubleValue, Int32Value, JSVal, NullValue, ObjectOrNullValue,
+    ObjectValue, PrivateValue, StringValue, UInt32Value, UndefinedValue,
 };
 
 /// Create an `undefined` value.
@@ -66,8 +68,21 @@ pub fn from_u32(u: u32) -> JSVal {
 }
 
 /// Create a `double` value.
+///
+/// NaNs are canonicalized first (matching `JS::CanonicalizedDoubleValue`):
+/// the engine reserves non-canonical NaN bit patterns for value tagging, so
+/// a payload-carrying NaN, e.g. read from raw `Float64Array` bits, would
+/// otherwise fail `DoubleValue`'s bit-pattern assertion and abort.
 #[inline]
 pub fn from_f64(f: f64) -> JSVal {
+    let f = if f.is_nan() {
+        cold_path();
+        // SpiderMonkey's canonical NaN: positive quiet NaN with zero payload.
+        const CANONICAL_NAN: f64 = f64::from_bits(0x7FF8_0000_0000_0000);
+        CANONICAL_NAN
+    } else {
+        f
+    };
     DoubleValue(f)
 }
 
@@ -89,6 +104,14 @@ pub unsafe fn from_object_or_null(obj: *mut JSObject) -> JSVal {
 #[inline]
 pub unsafe fn from_object(obj: *mut JSObject) -> JSVal {
     ObjectValue(obj)
+}
+
+/// Create a value from a rooted `BigInt` handle.
+#[inline]
+pub fn from_bigint(bi: Handle<*mut BigInt>) -> JSVal {
+    // SAFETY: the `BigInt` is rooted via the handle, so the reference is valid
+    // for the duration of this call.
+    unsafe { BigIntValue(&*bi.get()) }
 }
 
 /// Create a value from a rooted function handle.
@@ -123,4 +146,49 @@ pub unsafe fn from_private(ptr: *const std::ffi::c_void) -> JSVal {
 #[inline]
 pub unsafe fn from_string_raw(s: *mut JSString) -> JSVal {
     StringValue(&*s)
+}
+
+// ---------------------------------------------------------------------------
+// Rooted HandleValueArray backing
+// ---------------------------------------------------------------------------
+
+/// Rooted backing buffer for a [`HandleValueArray`].
+///
+/// `Function::call*` and `Array::with_contents` take `&[HandleValue]` and
+/// copy the values in here. The copies are traced for as long as the rooted
+/// guard lives.
+///
+/// ```ignore
+/// let mut args_root = ValueArrayRooter::new(args);
+/// let args = args_root.root(scope);
+/// some_jsapi_call(scope.cx_mut(), &args.handles());
+/// ```
+pub(crate) struct ValueArrayRooter(mozjs::gc::CustomAutoRooter<Vec<JSVal>>);
+
+impl ValueArrayRooter {
+    pub(crate) fn new(values: &[mozjs::gc::HandleValue]) -> Self {
+        ValueArrayRooter(mozjs::gc::CustomAutoRooter::new(
+            values.iter().map(|h| h.get()).collect(),
+        ))
+    }
+
+    pub(crate) fn root<'a>(
+        &'a mut self,
+        scope: &crate::gc::scope::Scope<'_>,
+    ) -> RootedValueArray<'a> {
+        // SAFETY: adding the rooter to the root stack performs no GC.
+        RootedValueArray(self.0.root(unsafe { scope.raw_cx_no_gc() }))
+    }
+}
+
+/// A rooted view over a [`ValueArrayRooter`]'s values; see there.
+pub(crate) struct RootedValueArray<'a>(mozjs::gc::CustomAutoRooterGuard<'a, Vec<JSVal>>);
+
+impl RootedValueArray<'_> {
+    pub(crate) fn handles(&self) -> mozjs::jsapi::HandleValueArray {
+        mozjs::jsapi::HandleValueArray {
+            length_: self.0.len(),
+            elements_: self.0.as_ptr(),
+        }
+    }
 }

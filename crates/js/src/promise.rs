@@ -44,9 +44,7 @@ impl<'s> Stack<'s, Promise> {
     /// The executor is called immediately with `(resolve, reject)` functions.
     pub fn new(scope: &'s Scope<'_>, executor: HandleObject) -> Result<Self, ExnThrown> {
         let obj = unsafe { wrappers2::NewPromiseObject(scope.cx_mut(), executor) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new unresolved `Promise` without an executor.
@@ -55,11 +53,9 @@ impl<'s> Stack<'s, Promise> {
     /// resolved or rejected later via [`resolve`](Self::resolve) /
     /// [`reject`](Self::reject).
     pub fn new_pending(scope: &'s Scope<'_>) -> Result<Self, ExnThrown> {
-        Object::from_raw_obj(scope, unsafe {
-            wrappers2::NewPromiseObject(scope.cx_mut(), HandleObject::null())
-        })
-        .ok_or(ExnThrown)
-        .map(|obj| obj.cast::<Self>().unwrap())
+        let obj = unsafe { wrappers2::NewPromiseObject(scope.cx_mut(), HandleObject::null()) };
+        // SAFETY: NewPromiseObject returns a Promise object or null.
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new `Promise` resolved with the given `value`.
@@ -82,16 +78,14 @@ impl<'s> Stack<'s, Promise> {
         scope: &'s Scope<'_>,
         error: HandleValue,
     ) -> Result<Self, ExnThrown> {
-        Object::from_raw_obj(scope, unsafe {
-            wrappers2::CallOriginalPromiseReject(scope.cx_mut(), error)
-        })
-        .ok_or(ExnThrown)
-        .map(|obj| obj.cast::<Self>().unwrap())
+        let obj = unsafe { wrappers2::CallOriginalPromiseReject(scope.cx_mut(), error) };
+        // SAFETY: CallOriginalPromiseReject returns a Promise object or null.
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new `Promise` that is immediately rejected with the pending exception.
     pub fn new_rejected_with_pending_error(scope: &'s Scope<'_>) -> Result<Self, &'static str> {
-        let error = crate::exception::get_and_clear_pending(scope)?;
+        let error = crate::exception::take_pending(scope)?;
         Self::new_rejected_with_error(scope, error)
             .map_err(|_| "Failed to reject promise with pending exception")
     }
@@ -122,12 +116,15 @@ impl<'s> Stack<'s, Promise> {
     ///
     /// For a fulfilled promise this is the fulfillment value; for a rejected
     /// promise this is the rejection reason. On a pending promise this returns
-    /// `undefined`.
-    pub fn result<'a>(&self, scope: &'a Scope<'_>) -> HandleValue<'a> {
+    /// `None`.
+    pub fn result<'a>(&self, scope: &'a Scope<'_>) -> Option<HandleValue<'a>> {
+        if self.is_pending() {
+            return None;
+        }
         let mut val = scope.root_value_mut(mozjs::jsval::UndefinedValue());
-        // SAFETY: self is a rooted handle to a valid Promise object.
+        // SAFETY: self is a rooted handle to a valid, settled Promise object.
         unsafe { mozjs::glue::JS_GetPromiseResult(self.handle().into(), val.reborrow().into()) };
-        val.handle()
+        Some(val.handle())
     }
 
     /// Get the unique ID of this promise (for debugging/tracking).
@@ -223,9 +220,7 @@ impl<'s> Stack<'s, Promise> {
     ) -> Result<Self, ExnThrown> {
         let obj =
             unsafe { wrappers2::CallOriginalPromiseResolve(scope.cx_mut(), resolution_value) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Call `Promise.reject(value)` using the original `Promise` constructor.
@@ -234,9 +229,7 @@ impl<'s> Stack<'s, Promise> {
         rejection_value: HandleValue,
     ) -> Result<Self, ExnThrown> {
         let obj = unsafe { wrappers2::CallOriginalPromiseReject(scope.cx_mut(), rejection_value) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Call the original `Promise.prototype.then` with the given handlers.
@@ -256,9 +249,7 @@ impl<'s> Stack<'s, Promise> {
                 on_rejected.map_or(HandleObject::null(), |o| o.handle()),
             )
         };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a `Promise.all`-style promise from a vector of promises.
@@ -317,15 +308,7 @@ impl<'s> Stack<'s, Promise> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, Promise> {
-    type Target = Object<'s>;
-
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<Promise> and Stack<Object> are both repr(transparent)
-        // over Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Stack<'s, Promise> as *const Object<'s>) }
-    }
-}
+crate::gc::handle::deref_to_object!(Promise);
 
 // ---------------------------------------------------------------------------
 // Async promise support — JSPromise, PromiseOutcome, __spawn_promise

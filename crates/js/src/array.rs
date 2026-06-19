@@ -9,13 +9,11 @@
 //! so all property and prototype methods are available directly.
 
 use std::os::raw::c_uint;
-use std::ptr::NonNull;
 
 use crate::builtins::JSType;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
-use crate::Object;
-use mozjs::jsapi::HandleValueArray;
+use crate::value::ValueArrayRooter;
 use mozjs::rust::wrappers2;
 use mozjs::rust::{HandleObject, HandleValue};
 
@@ -45,20 +43,18 @@ impl<'s> Stack<'s, Array> {
     /// Create a new empty array with the given initial length.
     pub fn new(scope: &'s Scope<'s>, length: usize) -> Result<Self, ExnThrown> {
         let obj = unsafe { wrappers2::NewArrayObject1(scope.cx_mut(), length) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new array pre-populated with the given values.
     pub fn with_contents(
         scope: &'s Scope<'s>,
-        contents: &HandleValueArray,
+        contents: &[HandleValue],
     ) -> Result<Self, ExnThrown> {
-        let obj = unsafe { wrappers2::NewArrayObject(scope.cx_mut(), contents) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        let mut contents_root = ValueArrayRooter::new(contents);
+        let contents = contents_root.root(scope);
+        let obj = unsafe { wrappers2::NewArrayObject(scope.cx_mut(), &contents.handles()) };
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Get the `length` of this array.
@@ -106,12 +102,4 @@ impl<'s> Stack<'s, Array> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, Array> {
-    type Target = Object<'s>;
-
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<Array> and Stack<Object> are both repr(transparent)
-        // over Handle<'s, *mut JSObject>, so they have identical layout.
-        unsafe { &*(self as *const Stack<'s, Array> as *const Object<'s>) }
-    }
-}
+crate::gc::handle::deref_to_object!(Array);

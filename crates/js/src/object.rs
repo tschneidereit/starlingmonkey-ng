@@ -29,7 +29,6 @@ use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
 use crate::prelude::{FromJSVal, ToJSVal};
 
-use mozjs::conversions::ToJSValConvertible;
 use mozjs::gc::{Handle, HandleId, HandleObject, HandleValue, MutableHandle};
 use mozjs::jsapi::{
     JSClass, JSFunctionSpec, JSObject, JSPropertySpec, ObjectOpResult, PropertyDescriptor, Value,
@@ -77,17 +76,13 @@ impl<'s> Stack<'s, Object> {
                 None => wrappers2::JS_NewPlainObject(raw),
             }
         };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new plain object (`{}`), rooted in the scope's pool.
     pub fn new_plain(scope: &'s Scope<'_>) -> Result<Self, ExnThrown> {
         let obj = unsafe { wrappers2::JS_NewPlainObject(scope.cx_mut()) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new object with a specific prototype.
@@ -98,9 +93,7 @@ impl<'s> Stack<'s, Object> {
     ) -> Result<Self, ExnThrown> {
         let obj =
             unsafe { wrappers2::JS_NewObjectWithGivenProto(scope.cx_mut(), clasp, proto.handle()) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new object for use inside a constructor (`new.target`).
@@ -110,9 +103,7 @@ impl<'s> Stack<'s, Object> {
         args: &mozjs::jsapi::CallArgs,
     ) -> Result<Self, ExnThrown> {
         let obj = unsafe { wrappers2::JS_NewObjectForConstructor(scope.cx_mut(), clasp, args) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     // ---------------------------------------------------------------------------
@@ -124,13 +115,6 @@ impl<'s> Stack<'s, Object> {
         NonNull::new(self.handle().get())
     }
 
-    /// Wrap a raw `*mut JSObject` pointer, rooting it in the scope's pool.
-    ///
-    /// Returns `None` if `ptr` is null.
-    pub fn from_raw_obj(scope: &'s Scope<'_>, ptr: *mut JSObject) -> Option<Self> {
-        NonNull::new(ptr).map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-    }
-
     /// Create from a JS value. Returns an error if the value is not an object.
     pub fn from_value(
         scope: &'s Scope<'_>,
@@ -138,7 +122,8 @@ impl<'s> Stack<'s, Object> {
     ) -> Result<Self, ConversionError> {
         let val = val.into();
         if val.is_object() {
-            Ok(Self::from_raw_obj(scope, val.to_object()).unwrap())
+            // SAFETY: the value holds an object, so the pointer is a non-null JSObject.
+            Ok(unsafe { Self::from_raw(scope, val.to_object()) }.unwrap())
         } else {
             Err(ConversionError::Failure(Cow::Borrowed(
                 c"Value isn't an object",
@@ -164,7 +149,7 @@ impl<'s> Stack<'s, Object> {
     #[inline]
     pub fn get_property<'a>(
         &self,
-        scope: &Scope<'a>,
+        scope: &'a Scope<'_>,
         name: &CStr,
     ) -> Result<HandleValue<'a>, ExnThrown> {
         let mut rval = scope.root_value_mut(UndefinedValue());
@@ -184,7 +169,7 @@ impl<'s> Stack<'s, Object> {
     #[inline]
     pub fn get_property_by_id<'a>(
         &self,
-        scope: &Scope<'a>,
+        scope: &'a Scope<'_>,
         id: HandleId,
     ) -> Result<HandleValue<'a>, ExnThrown> {
         let mut rval = scope.root_value_mut(UndefinedValue());
@@ -199,7 +184,7 @@ impl<'s> Stack<'s, Object> {
     #[inline]
     pub fn get_element<'a>(
         &self,
-        scope: &Scope<'a>,
+        scope: &'a Scope<'_>,
         index: u32,
     ) -> Result<HandleValue<'a>, ExnThrown> {
         let mut rval = scope.root_value_mut(UndefinedValue());
@@ -345,25 +330,37 @@ impl<'s> Stack<'s, Object> {
 
     /// Define a property with a JS value and attribute flags.
     #[inline]
-    pub fn define_property<V: ToJSValConvertible + ?Sized>(
+    pub fn define_property<'v, V: ToJSVal<'v> + ?Sized>(
         &self,
-        scope: &Scope<'_>,
+        scope: &'v Scope<'_>,
         name: &CStr,
         value: &V,
         attrs: c_uint,
     ) -> Result<(), ExnThrown> {
-        let mut val = scope.root_value_mut(crate::value::undefined());
-        unsafe {
-            value.to_jsval(scope.cx_mut().raw_cx(), val.reborrow());
-        }
+        let val = value.to_jsval(scope).map_err(|e| e.throw(scope))?;
         let ok = unsafe {
-            wrappers2::JS_DefineProperty(
-                scope.cx_mut(),
-                self.handle(),
-                name.as_ptr(),
-                val.handle(),
-                attrs,
-            )
+            wrappers2::JS_DefineProperty(scope.cx_mut(), self.handle(), name.as_ptr(), val, attrs)
+        };
+        ExnThrown::check(ok)
+    }
+
+    /// Define an element by index with attribute flags.
+    ///
+    /// Installs an own data property without consulting the prototype chain or invoking setters.
+    /// Use this to build objects whose indexed slots must be immune to `Object.prototype`
+    /// numeric accessors.
+    /// Use [`set_element`](Self::set_element) for normal element assignment, which would invoke
+    /// (inherited) setters for the index.
+    #[inline]
+    pub fn define_element(
+        &self,
+        scope: &Scope<'_>,
+        index: u32,
+        value: HandleValue,
+        attrs: c_uint,
+    ) -> Result<(), ExnThrown> {
+        let ok = unsafe {
+            wrappers2::JS_DefineElement(scope.cx_mut(), self.handle(), index, value, attrs)
         };
         ExnThrown::check(ok)
     }
@@ -416,15 +413,19 @@ impl<'s> Stack<'s, Object> {
     // -----------------------------------------------------------------------
 
     /// Get the prototype of this object.
+    ///
+    /// Returns `Ok(None)` for a null `[[Prototype]]` (e.g.
+    /// `Object.create(null)` or `Object.prototype`).
     #[inline]
-    pub fn get_prototype(&self, scope: &'s Scope<'_>) -> Result<Stack<'s, Object>, ExnThrown> {
+    pub fn get_prototype(
+        &self,
+        scope: &'s Scope<'_>,
+    ) -> Result<Option<Stack<'s, Object>>, ExnThrown> {
         let mut result = scope.root_object_mut(std::ptr::null_mut());
         let ok =
             unsafe { wrappers2::JS_GetPrototype(scope.cx_mut(), self.handle(), result.reborrow()) };
         ExnThrown::check(ok)?;
-        NonNull::new(result.get())
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        Ok(Self::from_handle(result.handle()))
     }
 
     /// Set the prototype of this object.

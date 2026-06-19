@@ -160,6 +160,10 @@ impl<'cx> Scope<'cx> {
     /// 1. SpiderMonkey is single-threaded — no concurrent access.
     /// 2. While GC runs concurrently, as long as Rust code ensures all
     ///    GC references are properly rooted, all safety requirements are met.
+    /// 3. `&mut JSContext` is only needed as an argument to JSAPI functions to indicate
+    ///    that a GC might be triggered by the call. Even if multiple `&mut JSContext` borrows
+    ///    were somehow created, as long as all values are properly rooted, the GC safety
+    ///    invariants would still hold.
     #[allow(clippy::mut_from_ref)]
     pub fn cx_mut(&self) -> &mut JSContext {
         // SAFETY: UnsafeCell provides interior mutability. See above.
@@ -176,8 +180,14 @@ impl<'cx> Scope<'cx> {
         *self.raw_cx.get()
     }
 
+    // Every rooting method below ties the returned handle to the `&self`
+    // borrow, not to `'cx`. The slot lives in this scope's allocator, so the
+    // handle must not outlive the scope: binding it to `'cx` (the *parent*
+    // lifetime) would let a handle rooted in an `InnerScope` escape the
+    // inner scope's drop, reading a freed, untraced slot.
+
     /// Root an object pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_object(&self, obj: NonNull<JSObject>) -> Handle<'cx, *mut JSObject> {
+    pub fn root_object(&self, obj: NonNull<JSObject>) -> Handle<'_, *mut JSObject> {
         let ptr = self.alloc_mut().alloc(SlotTag::Object, obj.as_ptr() as u64);
         // SAFETY: The pointer is in a traced page slot — it is a marked location.
         unsafe { Handle::from_marked_location(ptr as *const *mut JSObject) }
@@ -187,13 +197,13 @@ impl<'cx> Scope<'cx> {
     ///
     /// The slot is initialized with `obj` and can be used as an output parameter
     /// for JSAPI functions that write into a `MutableHandleObject`.
-    pub fn root_object_mut(&self, obj: *mut JSObject) -> MutableHandle<'cx, *mut JSObject> {
+    pub fn root_object_mut(&self, obj: *mut JSObject) -> MutableHandle<'_, *mut JSObject> {
         let ptr = self.alloc_mut().alloc(SlotTag::Object, obj as u64);
         unsafe { MutableHandle::from_marked_location(ptr as *mut *mut JSObject) }
     }
 
     /// Root a value, returning a [`Handle`] tied to this scope.
-    pub fn root_value(&self, val: Value) -> Handle<'cx, Value> {
+    pub fn root_value(&self, val: Value) -> Handle<'_, Value> {
         // SAFETY: Value is repr(C) and always 8 bytes (u64).
         let bits = unsafe { std::mem::transmute::<Value, u64>(val) };
         let ptr = self.alloc_mut().alloc(SlotTag::Value, bits);
@@ -204,26 +214,26 @@ impl<'cx> Scope<'cx> {
     ///
     /// The slot is initialized with `val` and can be used as an output parameter
     /// for JSAPI functions that write into a `MutableHandleValue`.
-    pub fn root_value_mut(&self, val: Value) -> MutableHandle<'cx, Value> {
+    pub fn root_value_mut(&self, val: Value) -> MutableHandle<'_, Value> {
         let bits = unsafe { std::mem::transmute::<Value, u64>(val) };
         let ptr = self.alloc_mut().alloc(SlotTag::Value, bits);
         unsafe { MutableHandle::from_marked_location(ptr as *mut Value) }
     }
 
     /// Root a string pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_string(&self, s: NonNull<JSString>) -> Handle<'cx, *mut JSString> {
+    pub fn root_string(&self, s: NonNull<JSString>) -> Handle<'_, *mut JSString> {
         let ptr = self.alloc_mut().alloc(SlotTag::String, s.as_ptr() as u64);
         unsafe { Handle::from_marked_location(ptr as *const *mut JSString) }
     }
 
     /// Root a script pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_script(&self, s: NonNull<JSScript>) -> Handle<'cx, *mut JSScript> {
+    pub fn root_script(&self, s: NonNull<JSScript>) -> Handle<'_, *mut JSScript> {
         let ptr = self.alloc_mut().alloc(SlotTag::Script, s.as_ptr() as u64);
         unsafe { Handle::from_marked_location(ptr as *const *mut JSScript) }
     }
 
     /// Root a property key (jsid), returning a [`Handle`] tied to this scope.
-    pub fn root_id(&self, id: jsid) -> Handle<'cx, jsid> {
+    pub fn root_id(&self, id: jsid) -> Handle<'_, jsid> {
         // jsid is pointer-sized (8 bytes on 64-bit, 4 bytes on wasm32).
         // Zero-extend to u64 for storage in the uniformly-sized slot array.
         let bits = id.asBits_ as u64;
@@ -232,13 +242,13 @@ impl<'cx> Scope<'cx> {
     }
 
     /// Root a symbol pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_symbol(&self, sym: NonNull<Symbol>) -> Handle<'cx, *mut Symbol> {
+    pub fn root_symbol(&self, sym: NonNull<Symbol>) -> Handle<'_, *mut Symbol> {
         let ptr = self.alloc_mut().alloc(SlotTag::Symbol, sym.as_ptr() as u64);
         unsafe { Handle::from_marked_location(ptr as *const *mut Symbol) }
     }
 
     /// Root a function pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_function(&self, fun: NonNull<JSFunction>) -> Handle<'cx, *mut JSFunction> {
+    pub fn root_function(&self, fun: NonNull<JSFunction>) -> Handle<'_, *mut JSFunction> {
         let ptr = self
             .alloc_mut()
             .alloc(SlotTag::Function, fun.as_ptr() as u64);
@@ -246,7 +256,7 @@ impl<'cx> Scope<'cx> {
     }
 
     /// Root a BigInt pointer, returning a [`Handle`] tied to this scope.
-    pub fn root_bigint(&self, bi: NonNull<BigInt>) -> Handle<'cx, *mut BigInt> {
+    pub fn root_bigint(&self, bi: NonNull<BigInt>) -> Handle<'_, *mut BigInt> {
         let ptr = self.alloc_mut().alloc(SlotTag::BigInt, bi.as_ptr() as u64);
         unsafe { Handle::from_marked_location(ptr as *const *mut BigInt) }
     }
@@ -259,6 +269,20 @@ impl<'cx> Scope<'cx> {
     ///
     /// The returned [`InnerScope`] dereferences to [`Scope`] and can be used
     /// anywhere a `&Scope` is accepted.
+    ///
+    /// Handles rooted in an inner scope cannot outlive it — their slots are
+    /// returned to the pool when the inner scope drops:
+    ///
+    /// ```compile_fail,E0597
+    /// fn escape(scope: &js::gc::scope::Scope<'_>, v: js::native::Value) {
+    ///     let h = {
+    ///         let inner = scope.inner_scope();
+    ///         inner.root_value(v)
+    ///     };
+    ///     let _ = h.get();
+    /// }
+    /// ```
+    // TODO: can we make InnerScope cheaper by sharing the allocator and just tracking a "high water mark" for roots at the time of creation, freeing anything above that on drop?
     pub fn inner_scope(&self) -> InnerScope<'_> {
         InnerScope {
             scope: Scope::new(unsafe { *self.raw_cx.get() }),

@@ -12,7 +12,6 @@ use mozjs::rust::wrappers2;
 use mozjs::rust::{HandleObject, HandleValue};
 
 use crate::error::ExnThrown;
-use crate::Object;
 
 /// Marker type for JavaScript `Map` objects.
 ///
@@ -145,12 +144,4 @@ impl<'s> Stack<'s, Map> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, Map> {
-    type Target = Object<'s>;
-
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<Map> and Stack<Object> are both repr(transparent)
-        // over Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Stack<'s, Map> as *const Object<'s>) }
-    }
-}
+crate::gc::handle::deref_to_object!(Map);

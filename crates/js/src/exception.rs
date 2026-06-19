@@ -6,6 +6,8 @@
 //! `JSContext`. For the higher-level error type that wraps these operations,
 //! see [`super::error::ExnThrown`].
 
+use std::hint::cold_path;
+
 use crate::gc::scope::Scope;
 use mozjs::jsapi::ExceptionStackBehavior;
 use mozjs::jsval::UndefinedValue;
@@ -14,18 +16,17 @@ use mozjs::rust::HandleValue;
 
 use super::error::ExnThrown;
 
+#[inline]
 pub fn check_fn_return(scope: &Scope<'_>, ok: bool, name: &str) -> bool {
     if ok {
         debug_assert!(
             !is_pending(scope),
             "Native function '{name}' returned true but an exception is pending",
         );
-    } else {
-        debug_assert!(
-            is_pending(scope),
-            "Native function '{name}' returned false but no exception is pending",
-        );
     }
+    // Note that we can't do the inverse of the above assert: `false` without a pending
+    // exception is legitimate, since SpiderMonkey's API can return `false` without a
+    // pending exception for uncatchable exceptions.
     ok
 }
 
@@ -46,6 +47,7 @@ pub fn get_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static
     let mut vp = scope.root_value_mut(UndefinedValue());
     let ok = unsafe { wrappers2::JS_GetPendingException(scope.cx_mut(), vp.reborrow()) };
     if !ok {
+        cold_path();
         if !is_pending(scope) {
             return Err("No exception pending");
         }
@@ -57,10 +59,18 @@ pub fn get_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static
 /// Get and clear the pending exception value.
 ///
 /// Returns `Err` if no exception is pending or retrieval fails.
-pub fn get_and_clear_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static str> {
+pub fn take_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static str> {
     let result = get_pending(scope)?;
     clear(scope);
     Ok(result)
+}
+
+/// Get and clear the pending exception value, or return `undefined` if there is none.
+///
+/// Can be used in contexts where JS execution failed, but an uncatchable exception
+/// (e.g., OOM) may be pending.
+pub fn take_pending_or_undefined<'r>(scope: &'r Scope<'_>) -> HandleValue<'r> {
+    take_pending(scope).unwrap_or_else(|_| HandleValue::undefined())
 }
 
 /// Set a pending exception on the context.
@@ -76,6 +86,23 @@ pub fn set_pending(
 /// Clear any pending exception on the context.
 pub fn clear(scope: &Scope<'_>) {
     unsafe { wrappers2::JS_ClearPendingException(scope.cx()) }
+}
+
+/// Report the pending exception to stderr with a context label, then clear it.
+///
+/// For algorithms where a callback's throw is "reported" per spec but must not
+/// abort the surrounding algorithm — event listener invocation, abort
+/// algorithms, promise-settle bookkeeping. Swallowing such exceptions silently
+/// makes real bugs in callback code undetectable, so they are printed in the
+/// same shape as the event loop's uncaught-exception report. No-op when
+/// nothing is pending.
+pub fn report_and_clear(scope: &Scope<'_>, context: &str) {
+    if !is_pending(scope) {
+        return;
+    }
+    // `capture` clears the pending exception as part of extracting it.
+    let captured = ExnThrown::capture(scope);
+    eprintln!("[{context}] Uncaught exception: {captured}");
 }
 
 /// Get the `JSErrorReport` from an Error object.

@@ -16,7 +16,6 @@
 use std::ffi::CString;
 use std::ptr::NonNull;
 
-use crate::error::EvalError;
 use crate::gc::scope::Scope;
 use mozjs::gc::{Handle, HandleFunction, HandleScript, HandleValue};
 use mozjs::jsapi::mozilla::Utf8Unit;
@@ -29,7 +28,7 @@ use super::error::ExnThrown;
 ///
 /// This is the primary entry point for evaluating JavaScript from Rust. It
 /// handles compile options creation internally.
-pub fn evaluate<'s>(scope: &'s Scope<'_>, script: &str) -> Result<HandleValue<'s>, EvalError> {
+pub fn evaluate<'s>(scope: &'s Scope<'_>, script: &str) -> Result<HandleValue<'s>, ExnThrown> {
     evaluate_with_filename(scope, script, "<inline>", 1)
 }
 
@@ -39,7 +38,7 @@ pub fn evaluate_with_filename<'s>(
     script: &str,
     filename: &str,
     lineno: u32,
-) -> Result<HandleValue<'s>, EvalError> {
+) -> Result<HandleValue<'s>, ExnThrown> {
     evaluate_with_options(scope, script, filename, lineno, false)
 }
 
@@ -57,7 +56,7 @@ pub fn evaluate_non_syntactic<'s>(
     script: &str,
     filename: &str,
     lineno: u32,
-) -> Result<HandleValue<'s>, EvalError> {
+) -> Result<HandleValue<'s>, ExnThrown> {
     evaluate_with_options(scope, script, filename, lineno, true)
 }
 
@@ -67,7 +66,7 @@ fn evaluate_with_options<'s>(
     filename: &str,
     lineno: u32,
     non_syntactic_scope: bool,
-) -> Result<HandleValue<'s>, EvalError> {
+) -> Result<HandleValue<'s>, ExnThrown> {
     let filename_cstr =
         CString::new(filename).unwrap_or_else(|_| CString::new("<unknown>").unwrap());
     let options = CompileOptionsWrapper::new(scope.cx(), filename_cstr, lineno);
@@ -85,7 +84,7 @@ fn evaluate_with_options<'s>(
     let mut rval = scope.root_value_mut(crate::value::undefined());
     let ok =
         unsafe { wrappers2::Evaluate2(scope.cx_mut(), options.ptr, &mut source, rval.reborrow()) };
-    ExnThrown::check(ok).map_err(|_| EvalError::Exn)?;
+    ExnThrown::check(ok)?;
     Ok(rval.handle())
 }
 
@@ -318,14 +317,13 @@ pub fn decompile_function<'s>(
 /// it would produce errors), `false` if it is incomplete (e.g. missing closing
 /// braces).
 pub fn is_compilable_unit(scope: &Scope<'_>, source: &str) -> bool {
-    let c_src = std::ffi::CString::new(source).unwrap_or_default();
     // Copy the global pointer before taking the mutable borrow on cx.
     let global = scope.global();
     unsafe {
         wrappers2::JS_Utf8BufferIsCompilableUnit(
             scope.cx_mut(),
             global.handle(),
-            c_src.as_ptr(),
+            source.as_ptr() as *const std::os::raw::c_char,
             source.len(),
         )
     }
