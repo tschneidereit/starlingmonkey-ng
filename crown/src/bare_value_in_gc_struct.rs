@@ -20,12 +20,12 @@
 //! ```
 
 use rustc_hir::{self as hir};
-use rustc_lint::{LateContext, LateLintPass, Lint, LintContext, LintPass, LintStore};
+use rustc_lint::{LateContext, LateLintPass, Lint, LintPass, LintStore};
 use rustc_middle::ty;
 use rustc_session::declare_tool_lint;
 use rustc_span::symbol::Symbol;
 
-use crate::common::match_def_path_suffix;
+use crate::common::{match_def_path_suffix, LateContextExt};
 use crate::symbols;
 
 declare_tool_lint! {

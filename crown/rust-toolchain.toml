@@ -1,5 +1,6 @@
 [toolchain]
-channel = "1.94"
+# Keep this in sync with the project workspace's channel.
+channel = "1.96"
 
 components = [
     "clippy",

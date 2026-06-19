@@ -7,12 +7,12 @@ use rustc_ast::tokenstream::TokenTree;
 use rustc_error_messages::MultiSpan;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_hir::{self as hir};
-use rustc_lint::{LateContext, LateLintPass, Lint, LintContext, LintPass, LintStore};
+use rustc_lint::{LateContext, LateLintPass, Lint, LintPass, LintStore};
 use rustc_middle::ty;
 use rustc_session::declare_tool_lint;
 use rustc_span::symbol::Symbol;
 
-use crate::common::{find_first_crate, implements_trait, trait_in_crate};
+use crate::common::{find_first_crate, implements_trait, trait_in_crate, LateContextExt};
 use crate::symbols;
 
 declare_tool_lint! {
