@@ -150,6 +150,40 @@ impl Default for InvocationRegistry {
     }
 }
 
+/// Keeps an [`InvocationState`] registered for GC tracing in a [`Runtime`],
+/// unregistering when dropped.
+///
+/// [`Runtime`]: crate::runtime::Runtime
+pub struct InvocationGuard<'rt> {
+    runtime: &'rt crate::runtime::Runtime,
+    state: *const InvocationState,
+}
+
+impl<'rt> InvocationGuard<'rt> {
+    /// Register `state` for GC tracing until the guard drops.
+    ///
+    /// # Safety
+    ///
+    /// `state` must stay alive and at a stable address for the guard's whole
+    /// lifetime. In an async fn, keep the guard and the state in the same
+    /// frame and declare the guard after the state, so the guard drops
+    /// first.
+    pub unsafe fn new(runtime: &'rt crate::runtime::Runtime, state: &InvocationState) -> Self {
+        runtime.register_invocation(state);
+        Self {
+            runtime,
+            state: state as *const _,
+        }
+    }
+}
+
+impl Drop for InvocationGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: per `new`'s contract, the state outlives the guard.
+        self.runtime.unregister_invocation(unsafe { &*self.state });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
