@@ -5,6 +5,7 @@
 use core_runtime::{jsclass, jsmethods};
 use js::conversion::{FromJSVal, ToJSVal};
 use js::error::ExnThrown;
+use js::exception::take_pending_or_undefined;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
@@ -2118,10 +2119,9 @@ pub(crate) fn readable_stream_default_tee<'r>(
         .add_reactions(scope, None, Some(*on_rejected))?;
 
     // Step 20: Return « _branch1_, _branch2_ ».
-    Ok(vec![
-        state.data().branch1.get(scope),
-        state.data().branch2.get(scope),
-    ])
+    let branch1 = state.data().branch1.get(scope);
+    let branch2 = state.data().branch2.get(scope);
+    Ok(vec![branch1, branch2])
 }
 
 /// <https://streams.spec.whatwg.org/#abstract-opdef-readablebytestreamtee>
@@ -3365,8 +3365,13 @@ pub(crate) fn readable_stream_byob_reader_error_read_into_requests(
     // Step 2: Set _reader_.`[[readIntoRequests]]` to a new empty `list`.
     // Step 3: `For each` _readIntoRequest_ of _readIntoRequests_, Perform _readIntoRequest_’s
     //         `error steps`, given _e_.
+    // A block expression drops the `data_mut()` guard before the call (the
+    // closure re-enters this reader's data) while passing the snapshot directly.
     settle_request_snapshot(
-        std::mem::take(&mut reader.data_mut().read_into_requests),
+        {
+            let mut data = reader.data_mut();
+            std::mem::take(&mut data.read_into_requests)
+        },
         |read_into_request| {
             read_into_request
                 .root(scope)
@@ -4360,11 +4365,7 @@ fn readable_byte_stream_controller_enqueue_cloned_chunk_to_queue(
     let cloned = match clone_result {
         Ok(b) => b,
         Err(_) => {
-            let error = match js::exception::get_pending(scope) {
-                Ok(v) => scope.root_value(v.get()),
-                Err(_) => HandleValue::undefined(),
-            };
-            js::exception::clear(scope);
+            let error = take_pending_or_undefined(scope);
             readable_byte_stream_controller_error(scope, controller, error);
             js::exception::set_pending(
                 scope,
@@ -4450,7 +4451,7 @@ pub(crate) fn readable_byte_stream_controller_error(
 /// the byte controller, whose `[[queue]]` is a list of byte-stream queue
 /// entries rather than value-with-size records.
 fn reset_byte_queue(controller: &ReadableByteStreamController<'_>) {
-    let data = controller.data_mut();
+    let mut data = controller.data_mut();
     data.queue.clear();
     data.queue_total_size = 0.0;
 }
@@ -4591,7 +4592,7 @@ fn readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(
         if head_byte_length == bytes_to_copy {
             controller.data_mut().queue.pop_front();
         } else {
-            let data = controller.data_mut();
+            let mut data = controller.data_mut();
             let head = &mut data.queue[0];
             head.byte_offset += bytes_to_copy;
             head.byte_length -= bytes_to_copy;
@@ -4891,7 +4892,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
     let viewed_buffer = match view.viewed_buffer(scope) {
         Ok(b) => b,
         Err(_) => {
-            let error = exception_value_or_undefined(scope);
+            let error = take_pending_or_undefined(scope);
             read_into_request
                 .take()
                 .unwrap()
@@ -4907,7 +4908,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
     let buffer = match buffer_result {
         Ok(b) => b,
         Err(_) => {
-            let error = exception_value_or_undefined(scope);
+            let error = take_pending_or_undefined(scope);
             read_into_request
                 .take()
                 .unwrap()

@@ -224,6 +224,7 @@ pub use macros::ScopeRoot;
 pub use macros::{allow_unrooted, allow_unrooted_interior};
 
 pub use conversion::AsyncSequence;
+pub use conversion::Finite;
 pub use conversion::Record;
 
 use crate::gc::handle::Stack;

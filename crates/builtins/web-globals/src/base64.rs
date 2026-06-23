@@ -115,10 +115,10 @@ fn base64_encode(input: &[u8]) -> String {
 /// Latin-1 string (each byte maps directly to a code point in U+0000..U+00FF).
 pub(crate) fn atob(data: &str) -> Result<String, String> {
     let bytes = forgiving_base64_decode(data)?;
-    // SAFETY: the output bytes are all in the range 0x00..=0xFF, so they are valid Latin-1 code
-    // points.
-    let s = unsafe { String::from_utf8_unchecked(bytes) };
-    Ok(s)
+    // Convert bytes to a Latin-1 string. In UTF-8 encoding, some non-ASCII characters
+    // have multi-byte representantation, so we need to loop over the vec instead of
+    // using `String::from_utf8_unchecked`.
+    Ok(bytes.into_iter().map(|b| b as char).collect())
 }
 
 /// WHATWG [forgiving-base64 decode]: decode `data` to its byte sequence.

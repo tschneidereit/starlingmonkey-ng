@@ -287,6 +287,15 @@ impl<T: ClassDef> JSType for T {
     fn js_class() -> *const JSClass {
         T::class()
     }
+
+    #[inline]
+    unsafe fn is_instance(obj: *mut JSObject) -> bool {
+        // The class tag must match (allowing subclasses), and the object must carry private data.
+        // Both must be checked because the prototype object shares the instance JSClass but
+        // doesn't have the private slot.
+        is_derived_from_type(unsafe { get_class_tag(obj) }, Self::js_class() as usize)
+            && unsafe { get_raw_private(obj).is_some() }
+    }
 }
 
 /// Typed variadic rest arguments in `#[jsmethods]` and `#[webidl_methods]`.
@@ -1385,6 +1394,56 @@ impl<T: ClassDef> ClassBuilder<T> {
 // Class registration
 // ============================================================================
 
+/// Leaked per-type spec tables.
+///
+/// SpiderMonkey requires the method/property arrays to outlive the class.
+/// They are identical for every global, so they are built and leaked once
+/// per type and reused when the class is registered on further globals.
+#[derive(Clone, Copy)]
+struct SpecTables {
+    methods: *const JSFunctionSpec,
+    static_methods: *const JSFunctionSpec,
+    properties: *const JSPropertySpec,
+    static_properties: *const JSPropertySpec,
+}
+
+thread_local! {
+    static SPEC_TABLES: RefCell<HashMap<TypeId, SpecTables>> = RefCell::new(HashMap::new());
+}
+
+fn spec_tables_for<T: ClassDef>() -> SpecTables {
+    SPEC_TABLES.with(|tables| {
+        if let Some(t) = tables.borrow().get(&TypeId::of::<T>()) {
+            return *t;
+        }
+
+        let builder = ClassBuilder::<T>::new();
+        let builder = T::register_class_methods(builder);
+        let (methods, properties, _proto_constants) = builder.finalize();
+
+        let static_builder = ClassBuilder::<T>::new();
+        let static_builder = T::register_static_methods(static_builder);
+        let (static_methods, static_properties, _static_constants) = static_builder.finalize();
+
+        let t = SpecTables {
+            methods: Box::leak(methods.into_boxed_slice()).as_ptr(),
+            static_methods: Box::leak(static_methods.into_boxed_slice()).as_ptr(),
+            properties: if properties.len() > 1 {
+                Box::leak(properties.into_boxed_slice()).as_ptr()
+            } else {
+                ptr::null()
+            },
+            static_properties: if static_properties.len() > 1 {
+                Box::leak(static_properties.into_boxed_slice()).as_ptr()
+            } else {
+                ptr::null()
+            },
+        };
+        tables.borrow_mut().insert(TypeId::of::<T>(), t);
+        t
+    })
+}
+
 /// Register a class on the global object, making it available as a constructor.
 ///
 /// This creates the class's JSClass, constructor, prototype, and methods,
@@ -1415,34 +1474,13 @@ pub unsafe fn register_class<'s, T: ClassDef>(
     // Ensure the parent class is registered before we register ourselves.
     T::ensure_parent_registered(scope, global);
 
-    // Build method and property tables
-    let builder = ClassBuilder::<T>::new();
-    let builder = T::register_class_methods(builder);
-    let (methods, properties, _proto_constants) = builder.finalize();
-
-    let static_builder = ClassBuilder::<T>::new();
-    let static_builder = T::register_static_methods(static_builder);
-    let (static_methods, static_properties, _static_constants) = static_builder.finalize();
+    // The leaked method/property tables, shared across globals.
+    let tables = spec_tables_for::<T>();
 
     // Build constructor constants
     let const_builder = ClassBuilder::<T>::new();
     let const_builder = T::register_constants(const_builder);
     let (_cm, _cp, constants) = const_builder.finalize();
-
-    // Leak the method/property arrays so they live for the duration of the program.
-    // SpiderMonkey requires these arrays to be valid for the lifetime of the class.
-    let methods_ptr = Box::leak(methods.into_boxed_slice()).as_ptr();
-    let static_methods_ptr = Box::leak(static_methods.into_boxed_slice()).as_ptr();
-    let properties_ptr = if properties.len() > 1 {
-        Box::leak(properties.into_boxed_slice()).as_ptr()
-    } else {
-        ptr::null()
-    };
-    let static_properties_ptr = if static_properties.len() > 1 {
-        Box::leak(static_properties.into_boxed_slice()).as_ptr()
-    } else {
-        ptr::null()
-    };
 
     let class: &'static JSClass = T::class();
 
@@ -1464,10 +1502,10 @@ pub unsafe fn register_class<'s, T: ClassDef>(
         class.name,
         Some(generic_constructor::<T>),
         ctor_nargs,
-        properties_ptr,
-        methods_ptr,
-        static_properties_ptr,
-        static_methods_ptr,
+        tables.properties,
+        tables.methods,
+        tables.static_properties,
+        tables.static_methods,
     )
     .expect("init_class failed");
 
