@@ -46,7 +46,7 @@ mod my_globals {
     ) -> Result<(), js::error::ExnThrown> {
         let mut total = 0.0;
         for i in 0..args.argc_ {
-            let val = *args.get(i);
+            let val = args.get(i);
             if val.is_double() {
                 total += val.to_double();
             } else if val.is_int32() {

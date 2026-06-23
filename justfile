@@ -67,7 +67,7 @@ gc-zeal:
 
 # Run crown lint checker.
 crown:
-    ./scripts/check-crown.sh
+    ./scripts/check-crown.sh --workspace --examples
 
 # Run most checks: formatting, clippy, tests.
 check:
