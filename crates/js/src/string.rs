@@ -188,9 +188,18 @@ impl<'s> Str<'s> {
     ///
     /// Note: use [`atomize`](Self::atomize) if pinning isn't needed.
     pub fn atomize_and_pin(scope: &'s Scope<'_>, s: &str) -> Result<Self, ExnThrown> {
-        let js_str = if s.is_ascii() || s.chars().all(|c| (c as u32) <= 0xFF) {
+        let js_str = if s.is_ascii() {
             unsafe {
                 wrappers2::JS_AtomizeAndPinStringN(scope.cx(), s.as_ptr() as *const c_char, s.len())
+            }
+        } else if s.chars().all(|c| (c as u32) <= 0xFF) {
+            let latin1: Vec<u8> = s.chars().map(|c| c as u8).collect();
+            unsafe {
+                wrappers2::JS_AtomizeAndPinStringN(
+                    scope.cx(),
+                    latin1.as_ptr() as *const c_char,
+                    latin1.len(),
+                )
             }
         } else {
             return Err(crate::error::throw_type_error(

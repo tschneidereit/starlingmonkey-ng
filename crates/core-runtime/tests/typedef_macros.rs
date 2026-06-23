@@ -287,6 +287,8 @@ mod jsnamespace_tests {
     mod math_ns {
         use js::gc::scope::Scope;
 
+        pub const PI: f64 = 3.5;
+
         pub fn add(a: f64, b: f64) -> f64 {
             a + b
         }
@@ -345,6 +347,22 @@ mod jsnamespace_tests {
         assert_eq!(
             eval("Object.prototype.toString.call(math)"),
             "[object Object]"
+        );
+    }
+
+    #[test]
+    fn namespace_constant_exposed() {
+        // `pub const` items are installed on the namespace object.
+        assert_eq!(eval("math.PI"), "3.5");
+    }
+
+    #[test]
+    fn namespace_object_is_not_enumerable() {
+        // WebIDL §3.13: the namespace object is a non-enumerable property of
+        // the global (installed via define, not [[Set]]).
+        assert_eq!(
+            eval("Object.getOwnPropertyDescriptor(globalThis, 'math').enumerable"),
+            "false"
         );
     }
 }
@@ -408,7 +426,7 @@ mod setup_style_inheritance {
     impl Pet {
         #[constructor]
         fn new(&self, kind: String) -> Result<(), String> {
-            let data = self.data_mut();
+            let mut data = self.data_mut();
             data.kind = kind;
             Ok(())
         }
@@ -434,7 +452,7 @@ mod setup_style_inheritance {
     impl Lily {
         #[constructor]
         fn new(&self, cuteness: f64) -> Result<(), String> {
-            let data = self.data_mut();
+            let mut data = self.data_mut();
             data.parent = PetImpl {
                 kind: "The very cutest".to_string(),
             };

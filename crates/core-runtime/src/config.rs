@@ -21,7 +21,8 @@ pub struct RuntimeConfig {
     #[arg(short = 'e', long = "eval")]
     pub eval_script: Option<String>,
 
-    /// Path to an initialization script (runs in a separate global before content).
+    /// Path to an initialization script (runs in the default global, as a
+    /// classic script, before the content script; must complete synchronously).
     #[arg(short = 'i', long = "initializer-script")]
     pub initializer_script_path: Option<String>,
 
@@ -49,6 +50,12 @@ pub struct RuntimeConfig {
     #[arg(long = "strip-path-prefix")]
     pub path_prefix: Option<String>,
 
+    /// Serve incoming HTTP requests on this TCP port (native), dispatching each as a `fetch` event
+    /// to the handler the script registered with `addEventListener("fetch", …)`. The script runs
+    /// once to register handlers; the runtime then stays alive to handle requests.
+    #[arg(long = "serve")]
+    pub serve: Option<u16>,
+
     /// Pre-initialize the runtime (used during wizer snapshot).
     #[arg(skip)]
     pub pre_initialize: bool,
@@ -65,14 +72,24 @@ impl RuntimeConfig {
         self.eval_script.as_deref()
     }
 
-    /// The base path for resolving module imports.
+    /// The base directory for resolving module imports.
     ///
-    /// Derived from the content script path or the current working directory if not provided.
+    /// For `--eval` scripts this is the current working directory. Otherwise,
+    /// it is the directory containing the content script.
     pub fn base_path(&self) -> PathBuf {
-        // Get the directory of the content script, or use current directory if no script path is provided.
-        match Path::new(&self.script_path).parent() {
-            Some(parent) => parent.to_path_buf(),
-            None => env::current_dir().unwrap(),
+        if self.eval_script.is_some() {
+            return env::current_dir().unwrap_or_default();
+        }
+        let path = Path::new(&self.script_path);
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            env::current_dir().unwrap_or_default().join(path)
+        };
+        match abs.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            // A filesystem root has no parent; resolve relative to it directly.
+            _ => abs,
         }
     }
 
@@ -145,5 +162,32 @@ mod tests {
         assert_eq!(config.script_path, "app.js");
         assert!(config.verbose);
         assert!(!config.module_mode());
+    }
+
+    #[test]
+    fn base_path_for_eval_is_cwd() {
+        let config = RuntimeConfig::from_arg_string("-e 42").unwrap();
+        assert_eq!(config.base_path(), env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn base_path_for_bare_filename_is_cwd() {
+        let config = RuntimeConfig::from_arg_string("app.js").unwrap();
+        assert_eq!(config.base_path(), env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn base_path_for_absolute_script_is_its_directory() {
+        let config = RuntimeConfig::from_arg_string("/srv/js/app.js").unwrap();
+        assert_eq!(config.base_path(), Path::new("/srv/js"));
+    }
+
+    #[test]
+    fn base_path_for_relative_script_is_absolute() {
+        let config = RuntimeConfig::from_arg_string("sub/dir/app.js").unwrap();
+        assert_eq!(
+            config.base_path(),
+            env::current_dir().unwrap().join("sub/dir")
+        );
     }
 }

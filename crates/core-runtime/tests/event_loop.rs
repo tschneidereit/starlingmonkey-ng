@@ -78,7 +78,7 @@ fn test_event_loop() {
 
     // ---- Test 1: Basic EventLoop operations ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
 
         // Empty loop.
         assert!(el.is_empty());
@@ -117,7 +117,7 @@ fn test_event_loop() {
 
     // ---- Test 2: queue_ready (immediately ready) ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
         let counter = Rc::new(Cell::new(0u32));
 
         el.queue_ready(Box::new(CounterTask {
@@ -134,7 +134,7 @@ fn test_event_loop() {
 
     // ---- Test 3: Cancel ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
         let counter = Rc::new(Cell::new(0u32));
 
         let id = el.queue_ready(Box::new(CounterTask {
@@ -142,17 +142,17 @@ fn test_event_loop() {
             label: "cancelled",
         }));
 
-        assert!(el.cancel(id));
+        assert!(el.cancel_if_queued(id));
         assert!(el.is_empty());
         assert_eq!(counter.get(), 0);
 
         // Cancel of non-existent ID returns false.
-        assert!(!el.cancel(id));
+        assert!(!el.cancel_if_queued(id));
     }
 
     // ---- Test 4: Timer tasks ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
         let counter = Rc::new(Cell::new(0u32));
 
         // Queue a timer 5ms in the future.
@@ -189,7 +189,7 @@ fn test_event_loop() {
 
     // ---- Test 5: Multiple tasks, ordering ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
         let counter = Rc::new(Cell::new(0u32));
 
         let id1 = el.queue_ready(Box::new(CounterTask {
@@ -265,7 +265,7 @@ fn test_event_loop() {
         let mut el = EventLoop::new();
 
         // Evaluate JS with the event loop thread-local set so setTimeout works.
-        unsafe {
+        {
             with_event_loop(&mut el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
@@ -298,11 +298,347 @@ fn test_event_loop() {
         );
     }
 
+    // ---- Test 8a: timer ids are unique per global across concurrent loops ----
+    //
+    // Two event loops driving the same global (the WASIp3 concurrent-invocation
+    // shape) must not hand out colliding `setTimeout` ids: HTML's id namespace
+    // is per-global, so a `clearTimeout` from one invocation must never resolve
+    // to a different invocation's timer.
+    {
+        let mut el_a = EventLoop::new();
+        let mut el_b = EventLoop::new();
+
+        with_event_loop(&mut el_a, |_| {
+            let ok = js::compile::evaluate_with_filename(
+                &scope,
+                "globalThis._idA = setTimeout(function() {}, 100000);",
+                "<test-id-a>",
+                1,
+            );
+            assert!(ok.is_ok(), "setTimeout in loop A failed");
+        });
+        with_event_loop(&mut el_b, |_| {
+            let ok = js::compile::evaluate_with_filename(
+                &scope,
+                "globalThis._idB = setTimeout(function() {}, 100000);",
+                "<test-id-b>",
+                1,
+            );
+            assert!(ok.is_ok(), "setTimeout in loop B failed");
+        });
+
+        let read_id = |name: &str| -> i32 {
+            let r = js::compile::evaluate_with_filename(&scope, name, "<test-id-read>", 1).unwrap();
+            if r.is_int32() {
+                r.to_int32()
+            } else {
+                r.to_double() as i32
+            }
+        };
+        let id_a = read_id("globalThis._idA");
+        let id_b = read_id("globalThis._idB");
+        assert_ne!(
+            id_a, id_b,
+            "timer ids from concurrent event loops on the same global must be unique"
+        );
+    }
+
+    // ---- Test 8b: setTimeout forwards extra arguments to the callback ----
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut el = EventLoop::new();
+
+        {
+            with_event_loop(&mut el, |_| {
+                let ok = js::compile::evaluate_with_filename(
+                    &scope,
+                    "globalThis._timerArgs = null; \
+                     setTimeout(function(a, b, c) { globalThis._timerArgs = [a, b, c].join(','); }, 1, 'x', 42, true);",
+                    "<test-args>",
+                    1,
+                );
+                assert!(ok.is_ok(), "setTimeout-with-args JS evaluation failed");
+            });
+        }
+
+        block_on_event_loop(&scope, &mut el);
+
+        let result = js::compile::evaluate_with_filename(
+            &scope,
+            "globalThis._timerArgs",
+            "<test-args-check>",
+            1,
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(val.is_string(), "timer args should have been recorded");
+        let s = js::JSString::from_value(&scope, val)
+            .unwrap()
+            .to_utf8(&scope)
+            .unwrap();
+        assert_eq!(
+            s, "x,42,true",
+            "extra setTimeout arguments must be forwarded"
+        );
+    }
+
+    // ---- Test 8c: handler is converted before the timeout (WebIDL order) ----
+    {
+        let mut el = EventLoop::new();
+
+        {
+            with_event_loop(&mut el, |_| {
+                let ok = js::compile::evaluate_with_filename(
+                    &scope,
+                    "globalThis._convOrder = []; \
+                     globalThis._convTid = setTimeout(\
+                       { toString() { globalThis._convOrder.push('handler'); return ''; } }, \
+                       { valueOf() { globalThis._convOrder.push('timeout'); return 1e9; } });",
+                    "<test-conv-order>",
+                    1,
+                );
+                assert!(ok.is_ok(), "setTimeout with converting args failed");
+            });
+        }
+
+        let result = js::compile::evaluate_with_filename(
+            &scope,
+            "globalThis._convOrder.join(',')",
+            "<test-conv-order-check>",
+            1,
+        );
+        let val = result.unwrap();
+        let s = js::JSString::from_value(&scope, val)
+            .unwrap()
+            .to_utf8(&scope)
+            .unwrap();
+        assert_eq!(
+            s, "handler,timeout",
+            "WebIDL requires left-to-right argument conversion"
+        );
+
+        // Drain the queued (far-future) timer so it can't leak into later tests.
+        let cleared = {
+            with_event_loop(&mut el, |_| {
+                js::compile::evaluate_with_filename(
+                    &scope,
+                    "clearTimeout(globalThis._convTid)",
+                    "<cleanup>",
+                    1,
+                )
+                .is_ok()
+            })
+        };
+        assert!(cleared);
+        assert!(el.is_empty(), "cleanup clearTimeout should empty the loop");
+    }
+
+    // ---- Test 8d: a throwing interval callback keeps repeating ----
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut el = EventLoop::new();
+
+        {
+            with_event_loop(&mut el, |_| {
+                let ok = js::compile::evaluate_with_filename(
+                    &scope,
+                    "globalThis._ivTicks = 0; \
+                     globalThis._iv = setInterval(function() { \
+                       globalThis._ivTicks++; \
+                       if (globalThis._ivTicks === 1) { throw new Error('boom'); } \
+                       if (globalThis._ivTicks >= 3) { clearInterval(globalThis._iv); } \
+                     }, 1);",
+                    "<test-throwing-interval>",
+                    1,
+                );
+                assert!(ok.is_ok(), "setInterval JS evaluation failed");
+            });
+        }
+
+        block_on_event_loop(&scope, &mut el);
+
+        let result = js::compile::evaluate_with_filename(
+            &scope,
+            "globalThis._ivTicks",
+            "<test-throwing-interval-check>",
+            1,
+        );
+        let val = result.unwrap();
+        assert!(val.is_int32());
+        assert_eq!(
+            val.to_int32(),
+            3,
+            "a throwing callback must not kill the interval (spec: report + repeat)"
+        );
+    }
+
+    // ---- Test 8e: JS timer ids are spec-shaped; clearing is timer-only ----
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut el = EventLoop::new();
+        let counter = Rc::new(Cell::new(0));
+
+        // An internal (non-JS) timer task on the same loop: clearTimeout must
+        // not be able to reach it, whatever ids JS throws at it.
+        el.queue_timer(
+            Box::new(CounterTask {
+                counter: Rc::clone(&counter),
+                label: "internal",
+            }),
+            Instant::now(),
+        );
+
+        {
+            with_event_loop(&mut el, |_| {
+                let ok = js::compile::evaluate_with_filename(
+                    &scope,
+                    "globalThis._t1Fired = false; \
+                     globalThis._tid1 = setTimeout(function() { globalThis._t1Fired = true; }, 1); \
+                     if (globalThis._tid1 <= 0) throw new Error('timer id must be > 0, got ' + globalThis._tid1); \
+                     clearTimeout(globalThis._tid1 + 1); \
+                     globalThis._ivTicks2 = 0; \
+                     globalThis._iv2 = setInterval(function() { \
+                       globalThis._ivTicks2++; \
+                       if (globalThis._ivTicks2 >= 2) clearInterval(globalThis._iv2); \
+                     }, 1); \
+                     clearTimeout(-0.5); clearTimeout(0); clearTimeout(999999); clearTimeout(-7); \
+                     globalThis._t3Fired = false; \
+                     globalThis._tid3 = setTimeout(function() { globalThis._t3Fired = true; }, 1); \
+                     clearTimeout(String(globalThis._tid3));",
+                    "<test-timer-ids>",
+                    1,
+                );
+                assert!(ok.is_ok(), "timer-id JS evaluation failed");
+            });
+        }
+
+        block_on_event_loop(&scope, &mut el);
+
+        assert_eq!(
+            counter.get(),
+            1,
+            "internal tasks must be unreachable from clearTimeout"
+        );
+        let result = js::compile::evaluate_with_filename(
+            &scope,
+            "[globalThis._t1Fired, globalThis._ivTicks2, globalThis._t3Fired].join(',')",
+            "<test-timer-ids-check>",
+            1,
+        );
+        let val = result.unwrap();
+        let s = js::JSString::from_value(&scope, val)
+            .unwrap()
+            .to_utf8(&scope)
+            .unwrap();
+        assert_eq!(
+            s, "true,2,false",
+            "junk clears must be no-ops, a pre-cleared id must not poison a \
+             later interval, and a string id must coerce and clear"
+        );
+    }
+
+    // ---- Test 8f: expired timers fire in deadline order ----
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut el = EventLoop::new();
+
+        {
+            with_event_loop(&mut el, |_| {
+                let ok = js::compile::evaluate_with_filename(
+                    &scope,
+                    "globalThis._fireOrder = []; \
+                     setTimeout(function() { globalThis._fireOrder.push('late'); }, 40); \
+                     setTimeout(function() { globalThis._fireOrder.push('early'); }, 10); \
+                     globalThis._goner = setTimeout(function() { globalThis._fireOrder.push('goner'); }, 10); \
+                     setTimeout(function() { globalThis._fireOrder.push('early2'); }, 10); \
+                     clearTimeout(globalThis._goner);",
+                    "<test-deadline-order>",
+                    1,
+                );
+                assert!(ok.is_ok(), "deadline-order JS evaluation failed");
+            });
+        }
+
+        // Let every deadline pass before the loop runs, so one advance_timers
+        // call marks them all ready at once — the order must then come from
+        // the deadlines, not from queue positions (which the clearTimeout's
+        // swap_remove perturbed).
+        std::thread::sleep(Duration::from_millis(60));
+        block_on_event_loop(&scope, &mut el);
+
+        let result = js::compile::evaluate_with_filename(
+            &scope,
+            "globalThis._fireOrder.join(',')",
+            "<test-deadline-order-check>",
+            1,
+        );
+        let val = result.unwrap();
+        let s = js::JSString::from_value(&scope, val)
+            .unwrap()
+            .to_utf8(&scope)
+            .unwrap();
+        assert_eq!(
+            s, "early,early2,late",
+            "expired timers must fire in deadline order, ties in scheduling \
+             order, regardless of cancellations"
+        );
+    }
+
+    // ---- Test 8g: interval arguments survive moving GC across re-queues ----
+    // While a task runs it is out of the loop's task list and untraced, so the
+    // re-queued interval must rebuild its argument Heaps from scope roots.
+    // Compacting on every allocation makes a stale Heap fail deterministically.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut el = EventLoop::new();
+
+        {
+            with_event_loop(&mut el, |_| {
+                let ok = js::compile::evaluate_with_filename(
+                    &scope,
+                    "globalThis._gcArgSeen = []; \
+                     globalThis._gcIv = setInterval(function(tag) { \
+                       globalThis._gcArgSeen.push(tag.name); \
+                       if (globalThis._gcArgSeen.length >= 3) clearInterval(globalThis._gcIv); \
+                     }, 1, { name: 'payload' });",
+                    "<test-gc-args>",
+                    1,
+                );
+                assert!(ok.is_ok(), "interval-with-args JS evaluation failed");
+            });
+        }
+        #[cfg(feature = "debugmozjs")]
+        unsafe {
+            js::gc::SetGCZeal(scope.raw_cx_no_gc(), 14, 1)
+        };
+        block_on_event_loop(&scope, &mut el);
+        #[cfg(feature = "debugmozjs")]
+        unsafe {
+            js::gc::SetGCZeal(scope.raw_cx_no_gc(), 0, 0)
+        };
+
+        let result = js::compile::evaluate_with_filename(
+            &scope,
+            "globalThis._gcArgSeen.join(',')",
+            "<test-gc-args-check>",
+            1,
+        );
+        let val = result.unwrap();
+        let s = js::JSString::from_value(&scope, val)
+            .unwrap()
+            .to_utf8(&scope)
+            .unwrap();
+        assert_eq!(
+            s, "payload,payload,payload",
+            "interval arguments must survive compacting GC between re-queues"
+        );
+    }
+
     // ---- Test 9: clearTimeout cancels a timer ----
     {
         let mut el = EventLoop::new();
 
-        unsafe {
+        {
             with_event_loop(&mut el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
@@ -337,7 +673,7 @@ fn test_event_loop() {
     {
         let mut el = EventLoop::new();
 
-        unsafe {
+        {
             with_event_loop(&mut el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
@@ -411,14 +747,14 @@ fn test_event_loop() {
 
     // ---- Test 12: step() returns Done on empty event loop ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
         let outcome = el.step(&scope);
         assert_eq!(outcome, StepOutcome::Done);
     }
 
     // ---- Test 13: step() returns Progressed when tasks run ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
         let counter = Rc::new(Cell::new(0u32));
 
         el.queue_ready(Box::new(CounterTask {
@@ -433,7 +769,7 @@ fn test_event_loop() {
 
     // ---- Test 14: step() returns Idle when tasks exist but none ready ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
         let counter = Rc::new(Cell::new(0u32));
 
         // Queue a task but don't signal it ready.
@@ -449,16 +785,16 @@ fn test_event_loop() {
 
     // ---- Test 15: step() returns Idle with interest but no tasks ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
 
-        el.acquire_interest();
+        let interest = el.acquire_interest_handle();
         assert!(el.has_interest());
         assert!(el.is_alive());
 
         let outcome = el.step(&scope);
         assert_eq!(outcome, StepOutcome::Idle);
 
-        el.release_interest();
+        interest.release();
         assert!(!el.has_interest());
 
         let outcome = el.step(&scope);
@@ -467,14 +803,14 @@ fn test_event_loop() {
 
     // ---- Test 16: is_alive combines interest and pending ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
 
         assert!(!el.is_alive());
 
         // Interest alone keeps it alive.
-        el.acquire_interest();
+        let interest = el.acquire_interest_handle();
         assert!(el.is_alive());
-        el.release_interest();
+        drop(interest);
         assert!(!el.is_alive());
 
         // Pending tasks alone keep it alive.
@@ -488,7 +824,7 @@ fn test_event_loop() {
 
     // ---- Test 17: step() runs timer tasks after advance ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
         let counter = Rc::new(Cell::new(0u32));
 
         // Queue a timer with deadline in the past.
@@ -512,28 +848,30 @@ fn test_event_loop() {
     {
         let mut el = EventLoop::new();
 
-        // Acquire interest, queue a task that releases it.
-        el.acquire_interest();
+        // Acquire interest, queue a task that releases it (by dropping the handle).
+        let interest = el.acquire_interest_handle();
 
-        struct ReleaseInterestTask;
+        struct ReleaseInterestTask {
+            interest: Option<core_runtime::event_loop::InterestHandle>,
+        }
         impl Task for ReleaseInterestTask {
             fn kind(&self) -> &'static str {
                 "release-interest"
             }
             fn run(
-                self: Box<Self>,
+                mut self: Box<Self>,
                 _scope: &Scope<'_>,
                 _id: core_runtime::event_loop::TaskId,
             ) -> Result<(), ()> {
-                core_runtime::event_loop::with_active_event_loop(|el| {
-                    el.release_interest();
-                });
+                drop(self.interest.take());
                 Ok(())
             }
             fn trace(&self, _trc: *mut JSTracer) {}
         }
 
-        el.queue_ready(Box::new(ReleaseInterestTask));
+        el.queue_ready(Box::new(ReleaseInterestTask {
+            interest: Some(interest),
+        }));
 
         // With interest, the native driver should run the task and then
         // exit once interest drops to zero and no tasks remain.

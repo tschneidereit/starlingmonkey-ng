@@ -123,6 +123,7 @@ pub mod symbol;
 pub mod try_catch;
 pub mod typedarray;
 pub mod value;
+pub mod webidl_enum;
 
 // ---------------------------------------------------------------------------
 // Re-exports of SpiderMonkey types that have no safe wrapper
@@ -149,7 +150,7 @@ pub mod engine {
 pub mod native {
     pub use mozjs::context::{JSContext, RawJSContext};
     pub use mozjs::jsapi::{
-        CallArgs, ExceptionStackBehavior, GCContext, HandleValueArray, JSNative, JSObject,
+        BigInt, CallArgs, ExceptionStackBehavior, GCContext, HandleValueArray, JSNative, JSObject,
         JSRuntime, JSString, JSTracer, PropertyDescriptor, SymbolCode, Value,
     };
     pub use mozjs::rust::wrappers2::JS_GetRuntime;

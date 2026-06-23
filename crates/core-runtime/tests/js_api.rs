@@ -159,6 +159,34 @@ fn test_js_api_with_runtime() {
         );
     }
 
+    // --- Finite<f32>/Finite<f64> (restricted WebIDL float/double) ---
+    {
+        use js::Finite;
+
+        let v = scope.root_value(value::from_f64(1.5));
+        assert_eq!(Finite::<f64>::from_jsval(&scope, v, ()).unwrap().get(), 1.5);
+        assert_eq!(*Finite::<f32>::from_jsval(&scope, v, ()).unwrap(), 1.5f32);
+
+        // NaN and infinities are rejected with a TypeError.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let v = scope.root_value(value::from_f64(bad));
+            assert!(Finite::<f64>::from_jsval(&scope, v, ()).is_err());
+            js::exception::clear(&scope);
+            assert!(Finite::<f32>::from_jsval(&scope, v, ()).is_err());
+            js::exception::clear(&scope);
+        }
+
+        // A finite double that overflows single precision is rejected too.
+        let v = scope.root_value(value::from_f64(1e300));
+        assert!(Finite::<f32>::from_jsval(&scope, v, ()).is_err());
+        js::exception::clear(&scope);
+
+        // Finite values round-trip through ToJSVal.
+        let f = Finite::<f64>::new(2.5).unwrap();
+        assert_eq!(f.to_jsval(&scope).unwrap().to_double(), 2.5);
+        assert!(Finite::<f64>::new(f64::NAN).is_none());
+    }
+
     // --- Comparison operations ---
     {
         let v1 = 42.to_jsval(&scope).unwrap();
@@ -223,7 +251,7 @@ fn test_js_api_with_runtime() {
     // --- Date builtins ---
     {
         let rval = js::compile::evaluate(&scope, "new Date(2024, 0, 15)").unwrap();
-        let date_obj = Object::from_raw_obj(&scope, rval.to_object()).unwrap();
+        let date_obj = Object::from_value(&scope, rval.get()).unwrap();
         assert!(Date::is_date(&scope, date_obj.handle()).unwrap());
         let js_date = date_obj.cast::<Date>().unwrap();
         assert!(js_date.is_valid(&scope).unwrap());
@@ -233,10 +261,20 @@ fn test_js_api_with_runtime() {
     {
         let rval = js::compile::evaluate(&scope, "new Promise(function(resolve) { resolve(42) })")
             .unwrap();
-        let promise_obj = Object::from_raw_obj(&scope, rval.to_object()).unwrap();
+        let promise_obj = Object::from_value(&scope, rval.get()).unwrap();
         assert!(Promise::is_promise(promise_obj.handle()));
         let js_promise = promise_obj.cast::<Promise>().unwrap();
         let _id = js_promise.id();
+        // A settled promise reports its result.
+        assert_eq!(js_promise.result(&scope).unwrap().to_int32(), 42);
+
+        // A pending promise has no result yet (the engine asserts on the
+        // access in debug builds).
+        let rval = js::compile::evaluate(&scope, "new Promise(function() {})").unwrap();
+        let pending = Object::from_value(&scope, rval.get()).unwrap();
+        let pending = pending.cast::<Promise>().unwrap();
+        assert!(pending.is_pending());
+        assert!(pending.result(&scope).is_none());
     }
 
     // --- Primitive type checks ---
@@ -255,6 +293,20 @@ fn test_js_api_with_runtime() {
 
         assert!(Double::is_value(value::from_f64(3.14)));
 
+        // Non-canonical NaNs (e.g. raw Float64Array bits) canonicalize
+        // instead of aborting on DoubleValue's bit-pattern assertion.
+        {
+            use js::conversion::ToJSVal;
+            let sneaky = f64::from_bits(0xFFFF_FFFF_FFFF_FFFF);
+            assert!(sneaky.is_nan());
+            let v = value::from_f64(sneaky);
+            assert!(Double::is_value(v) && v.to_double().is_nan());
+            let h = sneaky.to_jsval(&scope).unwrap();
+            assert!(h.get().is_double() && h.get().to_double().is_nan());
+            let h = (f32::from_bits(0xFFFF_FFFF)).to_jsval(&scope).unwrap();
+            assert!(h.get().is_double() && h.get().to_double().is_nan());
+        }
+
         assert!(!StringPrimitive::is_value(value::from_i32(0)));
         assert!(!SymbolPrimitive::is_value(value::from_i32(0)));
     }
@@ -270,6 +322,15 @@ fn test_js_api_with_runtime() {
         assert!(js::compile::is_compilable_unit(&scope, "2 + 3"));
         // Incomplete source — missing closing brace
         assert!(!js::compile::is_compilable_unit(&scope, "function f() {"));
+        // Interior NUL: a raw U+0000 is a legal SourceCharacter inside a
+        // string literal, so the parser must see the full buffer — a
+        // truncated C-string view would stop at the NUL and misjudge the
+        // incomplete tail below.
+        assert!(js::compile::is_compilable_unit(&scope, "'a\0b' + 'c'"));
+        assert!(!js::compile::is_compilable_unit(
+            &scope,
+            "'a\0b' + function f() {"
+        ));
     }
 
     // --- String char_at ---
@@ -279,6 +340,70 @@ fn test_js_api_with_runtime() {
         assert_eq!(ch, b'A' as u16);
         let ch = s.char_at(&scope, 2).unwrap();
         assert_eq!(ch, b'C' as u16);
+    }
+
+    // --- String to_utf8 with interior NUL ---
+    {
+        // U+0000 is a legal JS string code unit; extraction must not stop
+        // at it.
+        let s = js::JSString::from_str(&scope, "a\0b").unwrap();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.to_utf8(&scope).unwrap(), "a\0b");
+    }
+
+    // --- Prototype chain ---
+    {
+        let obj = Object::new_plain(&scope).unwrap();
+        let proto = obj.get_prototype(&scope).unwrap();
+        assert!(proto.is_some(), "plain object has Object.prototype");
+        // A null [[Prototype]] is a legitimate result, not an error.
+        let end = proto.unwrap().get_prototype(&scope).unwrap();
+        assert!(end.is_none(), "Object.prototype's prototype is null");
+        assert!(!js::exception::is_pending(&scope));
+    }
+
+    // --- Atomization ---
+    {
+        // Non-ASCII text must round-trip (a Latin-1 read of the UTF-8 bytes
+        // would mojibake it) and intern to a single atom.
+        let atom = js::JSString::atomize(&scope, "héllo🦊").unwrap();
+        assert_eq!(atom.to_utf8(&scope).unwrap(), "héllo🦊");
+        let atom2 = js::JSString::atomize(&scope, "héllo🦊").unwrap();
+        assert_eq!(atom.as_raw(), atom2.as_raw());
+
+        // Pinning supports the Latin-1 range...
+        let pinned = js::JSString::atomize_and_pin(&scope, "café").unwrap();
+        assert_eq!(pinned.to_utf8(&scope).unwrap(), "café");
+        assert!(pinned.has_been_pinned(&scope));
+        // ...and throws for wider text instead of corrupting it.
+        assert!(js::JSString::atomize_and_pin(&scope, "🦊").is_err());
+        assert!(js::exception::is_pending(&scope));
+        js::exception::clear(&scope);
+    }
+
+    // --- Exception capture for non-Error throws ---
+    {
+        use js::error::ExnThrown;
+
+        // Primitive throws stringify instead of a generic placeholder.
+        js::compile::evaluate(&scope, "throw 'boom'").unwrap_err();
+        assert_eq!(ExnThrown::capture(&scope).message.as_deref(), Some("boom"));
+        js::compile::evaluate(&scope, "throw 42").unwrap_err();
+        assert_eq!(ExnThrown::capture(&scope).message.as_deref(), Some("42"));
+        js::compile::evaluate(&scope, "throw {a: 1}").unwrap_err();
+        assert_eq!(
+            ExnThrown::capture(&scope).message.as_deref(),
+            Some("[object Object]")
+        );
+
+        // A thrown symbol can't stringify; the fallback must not leave the
+        // secondary ToString exception pending.
+        js::compile::evaluate(&scope, "throw Symbol('s')").unwrap_err();
+        assert_eq!(
+            ExnThrown::capture(&scope).message.as_deref(),
+            Some("(non-Error exception)")
+        );
+        assert!(!js::exception::is_pending(&scope));
     }
 
     // --- TryCatch operations ---

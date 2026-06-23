@@ -9,7 +9,6 @@
 
 use js::conversion::ConversionError;
 use js::error::throw_error;
-use js::exception::check_fn_return;
 use js::gc::scope::Scope;
 use js::native::{Handle, RawJSContext};
 use js::prelude::FromJSVal;
@@ -43,6 +42,15 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
         0,
     )
     .expect("failed to define __setLocation");
+    js::Function::define(
+        scope,
+        global.handle(),
+        c"__wptDone",
+        Some(wpt_done_native),
+        0,
+        0,
+    )
+    .expect("failed to define __wptDone");
 }
 
 /// JSNative implementation of `evalScript(source)`.
@@ -77,7 +85,7 @@ unsafe extern "C" fn eval_script_native(
         }
         Err(_) => {
             println!("Eval failed");
-            check_fn_return(&scope, false, "evalScript")
+            false
         }
     }
 }
@@ -113,6 +121,22 @@ unsafe extern "C" fn set_location_native(
         }
     };
     web_globals::worker_location::set_init_location(url);
+    args.rval().set(js::value::undefined());
+    true
+}
+
+/// JSNative implementation of `__wptDone()`.
+///
+/// The WPT post-harness calls this from the test's completion callback, after results have been
+/// emitted. It requests that the event loop stop, so a finished test that left a live `setInterval`
+/// (or other pending timer) running does not keep the process alive until the harness timeout.
+unsafe extern "C" fn wpt_done_native(
+    _raw_cx: *mut RawJSContext,
+    argc: u32,
+    vp: *mut js::native::Value,
+) -> bool {
+    let args = js::native::CallArgs::from_vp(vp, argc);
+    core_runtime::event_loop::request_stop();
     args.rval().set(js::value::undefined());
     true
 }

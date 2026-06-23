@@ -697,6 +697,12 @@ struct ClassRegistry {
     /// identical across instances) and for functions for which the relevant spec
     /// requires per-global identity. Traced like prototypes.
     shared_functions: HashMap<usize, Box<MozHeap<*mut JSObject>>>,
+    /// Per-global monotonic `u64` counters keyed by an arbitrary `usize`. Used
+    /// where a spec requires ids unique across a whole global rather than per
+    /// call site — e.g. HTML's setTimeout/setInterval ids, which must not
+    /// collide across the concurrent event loops that share one global. Plain
+    /// integers, so no GC tracing.
+    counters: HashMap<usize, u64>,
 }
 
 impl ClassRegistry {
@@ -704,7 +710,17 @@ impl ClassRegistry {
         Self {
             map: HashMap::new(),
             shared_functions: HashMap::new(),
+            counters: HashMap::new(),
         }
+    }
+
+    /// Return the counter for `key` and advance it by one (wrapping on
+    /// overflow). Counters start at 0.
+    fn bump_counter(&mut self, key: usize) -> u64 {
+        let slot = self.counters.entry(key).or_insert(0);
+        let value = *slot;
+        *slot = slot.wrapping_add(1);
+        value
     }
 
     fn register(&mut self, type_id: TypeId, proto: *mut JSObject) {
@@ -2125,6 +2141,36 @@ pub fn get_or_init_shared_function<'s>(
     let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
     registry.set_shared_function(key, func.as_raw());
     Ok(func)
+}
+
+/// Read-and-increment a per-global monotonic `u64` counter keyed by `key`.
+///
+/// Returns the counter's current value and advances it (wrapping on overflow);
+/// counters start at 0. The counter lives on the global's [`ClassRegistry`], so
+/// every caller on a given global draws from one sequence — use this for ids a
+/// spec requires to be unique per global rather than per call site, such as
+/// HTML's setTimeout/setInterval ids, which must not collide across the
+/// concurrent event loops that share a single global.
+///
+/// `key` is an arbitrary namespace token; pass the address of a dedicated
+/// `static` to get a process-unique key, mirroring how shared functions key on
+/// their native pointer.
+///
+/// Note: the counter is a u64 instead of a u32 because otherwise it'd be possible
+/// (though implausible) for a long-running script to wrap the counter and reuse ids,
+/// which would violate the uniqueness guarantee. We convert the id to a JS value,
+/// which can represent about 53 bits of integer precision, making wrap-around
+/// effectively impossible.
+pub fn next_global_counter(scope: &Scope<'_>, key: usize) -> u64 {
+    // The bump is a HashMap entry plus an integer add — no JS-GC-capable call
+    // in between — so briefly holding the `&mut ClassRegistry` aliases nothing.
+    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
+    let counter = registry.bump_counter(key);
+    assert!(
+        counter < crate::conversion::Number::MAX,
+        "counter for key {key} wrapped around"
+    );
+    counter
 }
 
 // ---------------------------------------------------------------------------

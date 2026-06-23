@@ -30,7 +30,13 @@ use crate::runtime::Runtime;
 /// The `drive_event_loop` callback receives the `Runtime` and
 /// `InvocationState` and is responsible for driving the event loop to
 /// completion using whatever executor and timer mechanism the embedding
-/// provides. It must call `runtime.unregister_invocation()` when done.
+/// provides. The invocation arrives **unregistered** from GC tracing: the
+/// callback must register it once it sits at its final address, most simply
+/// by wrapping it in [`invocation::InvocationGuard`] or
+/// [`invocation::OwnedInvocation`], whose drop also handles the required
+/// unregistration, and then drive [`event_loop::run_to_completion`].
+/// Driving the loop without registering leaves task-held JS objects
+/// invisible to the GC.
 ///
 /// On native targets, the callback typically creates an async runtime, e.g.
 /// Tokio, and calls `block_on(run_to_completion(..., tokio::time::sleep))`.
@@ -48,30 +54,16 @@ pub fn run(
     }
 }
 
-/// Perform the synchronous portion of a runtime invocation: initialize the
-/// runtime, evaluate the script, drain initial microtasks, and check whether
-/// any asynchronous work remains.
-///
-/// Returns:
-/// - `Ok(Some((runtime, invocation)))` if the script left work in the event
-///   loop. The returned `invocation` is **not** registered with the runtime's
-///   GC tracer: `setup` registers it only for the synchronous eval phase and
-///   unregisters it before handing it back, because moving it out of this
-///   function invalidates any raw pointer to it. The caller must call
-///   [`Runtime::register_invocation`] once the invocation reaches its final
-///   (stable) location, drive [`event_loop::run_to_completion`] (or an
-///   equivalent) to completion, then call [`Runtime::unregister_invocation`]
-///   before dropping the runtime.
-/// - `Ok(None)` if the script completed without scheduling any async work.
-///   The invocation is already cleaned up.
-/// - `Err(_)` if the script failed to parse or threw during top-level
-///   evaluation.
-///
-/// Splitting this out lets the wasm32 cdylib driver hold an async event-loop
-/// future on its own stack instead of bridging through a sync callback.
-pub fn setup(
+/// Initialize the runtime and evaluate the script (the synchronous portion of an
+/// invocation), draining initial microtasks. Returns the runtime and its
+/// invocation, with the invocation **unregistered** from the GC tracer: it is
+/// registered only for the eval phase here, then unregistered before being moved
+/// out (the registry holds a raw pointer that the move would invalidate). The
+/// caller re-registers at the final location, drives the loop, then unregisters.
+/// Shared by [`setup`] and [`setup_for_serve`].
+fn init_and_eval(
     config: config::RuntimeConfig,
-) -> Result<Option<(std::rc::Rc<Runtime>, invocation::InvocationState)>, String> {
+) -> Result<(std::rc::Rc<Runtime>, invocation::InvocationState), String> {
     let runtime = Runtime::init(&config);
 
     let (source, filename) = if let Some(ref eval) = config.eval_script {
@@ -87,16 +79,8 @@ pub fn setup(
         (source, path.clone())
     };
 
-    let mut invocation = invocation::InvocationState::new();
+    let invocation = invocation::InvocationState::new();
 
-    // Register `invocation` for GC tracing during the synchronous eval and
-    // initial-microtask phase below. This registration covers only that phase:
-    // the registry stores a raw pointer to `invocation`'s current address, and
-    // returning it by value (the `Ok(Some(..))` path) moves it elsewhere — so
-    // the pointer is unregistered again before any such move (here on the error
-    // paths, and just before the `Some` return). The driver re-registers it at
-    // its final location.
-    //
     // SAFETY: `invocation` lives at this address until it is unregistered on
     // every path out of this function, so the tracer never dereferences a
     // freed or moved-from slot.
@@ -105,20 +89,18 @@ pub fn setup(
     {
         let scope = runtime.default_global();
 
-        let eval_result = unsafe {
-            event_loop::with_event_loop(invocation.event_loop_mut(), |_| {
-                if config.module_mode() {
-                    module::evaluate_module(&scope, &source, &filename)
-                } else {
-                    js::compile::evaluate_with_filename(&scope, &source, &filename, 1)
-                }
-            })
-        };
+        let eval_result = event_loop::with_event_loop(invocation.event_loop(), |_| {
+            if config.module_mode() {
+                // SAFETY: the module loader was initialized by `Runtime::init`.
+                unsafe { module::evaluate_module(&scope, &source, &filename) }
+            } else {
+                js::compile::evaluate_with_filename(&scope, &source, &filename, 1)
+            }
+        });
 
         if eval_result.is_err() || exception::is_pending(&scope) {
             runtime.unregister_invocation(&invocation);
             let exn = ExnThrown::capture(&scope);
-            println!("exn: {exn}");
             return Err(format!("Script evaluation failed with error {exn}"));
         }
 
@@ -127,22 +109,52 @@ pub fn setup(
         // tasks are queued. Keep the event loop active while draining: a
         // microtask may itself call `setTimeout`/`queueMicrotask`, which need
         // the current event loop set.
-        unsafe {
-            event_loop::with_event_loop(invocation.event_loop_mut(), |_| {
-                event_loop::run_microtasks(&scope);
-            });
-        }
-    }
-
-    if !invocation.event_loop().is_alive() {
-        runtime.unregister_invocation(&invocation);
-        return Ok(None);
+        event_loop::with_event_loop(invocation.event_loop(), |_| {
+            event_loop::run_microtasks(&scope);
+        });
     }
 
     // Unregister before moving `invocation` out: the move invalidates the raw
-    // pointer the registry holds. The driver re-registers at the final address.
+    // pointer the registry holds. The caller re-registers at the final address.
     runtime.unregister_invocation(&invocation);
+    Ok((runtime, invocation))
+}
+
+/// Perform the synchronous portion of a runtime invocation: initialize the
+/// runtime, evaluate the script, drain initial microtasks, and check whether
+/// any asynchronous work remains.
+///
+/// Returns:
+/// - `Ok(Some((runtime, invocation)))` if the script left work in the event
+///   loop. The caller must call [`Runtime::register_invocation`] once the
+///   invocation reaches its final (stable) location, drive
+///   [`event_loop::run_to_completion`] to completion, then call
+///   [`Runtime::unregister_invocation`] before dropping the runtime.
+/// - `Ok(None)` if the script completed without scheduling any async work.
+/// - `Err(_)` if the script failed to parse or threw during top-level
+///   evaluation.
+///
+/// Splitting this out lets the wasm32 cdylib driver hold an async event-loop
+/// future on its own stack instead of bridging through a sync callback.
+pub fn setup(
+    config: config::RuntimeConfig,
+) -> Result<Option<(std::rc::Rc<Runtime>, invocation::InvocationState)>, String> {
+    let (runtime, invocation) = init_and_eval(config)?;
+    if !invocation.event_loop().is_alive() {
+        return Ok(None);
+    }
     Ok(Some((runtime, invocation)))
+}
+
+/// Like [`setup`], but always returns the runtime — for **serve mode**, where the
+/// runtime must outlive the script (which registers `fetch` handlers) so it can
+/// handle incoming requests. The returned invocation holds the script's initial
+/// event loop; drive it to completion (the script's top-level async) before
+/// serving, then keep the runtime alive for the accept loop.
+pub fn setup_for_serve(
+    config: config::RuntimeConfig,
+) -> Result<(std::rc::Rc<Runtime>, invocation::InvocationState), String> {
+    init_and_eval(config)
 }
 
 /// Extract and print the pending JS exception, if any.
@@ -190,19 +202,15 @@ mod tests {
         RuntimeConfig::from_args(args.iter().map(|s| s.to_string())).unwrap()
     }
 
-    /// Dummy event loop driver for tests whose scripts don't use timers
-    /// or async work. If the event loop is alive, something unexpected
-    /// happened.
+    /// Event-loop driver for tests whose scripts complete synchronously.
+    ///
+    /// `run` only invokes the driver when the script left async work in the
+    /// event loop, so for these tests being called at all is a failure.
     fn noop_driver(
-        runtime: std::rc::Rc<runtime::Runtime>,
-        invocation: invocation::InvocationState,
+        _runtime: std::rc::Rc<runtime::Runtime>,
+        _invocation: invocation::InvocationState,
     ) -> Result<(), String> {
-        assert!(
-            !invocation.event_loop().is_alive(),
-            "Event loop should not be alive"
-        );
-        runtime.unregister_invocation(&invocation);
-        Ok(())
+        Err("script unexpectedly left the event loop alive".to_string())
     }
 
     #[test]
