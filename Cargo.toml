@@ -32,7 +32,7 @@ starling-macro = { path = "crates/starling-macro" }
 tokio = { version = "1", features = ["rt", "time"] }
 url = "2.5.8"
 uuid = { version = "1.23", features = ["v4"] }
-wasip3 = { version = "0.6", features = ["http-compat"] }
+wasip3 = { version = "0.7.0", features = ["http-compat"] }
 wpt-support = { path = "crates/wpt-support" }
 # wit-bindgen = { version = "0.51", features = ["async", "async-spawn"] }
 
