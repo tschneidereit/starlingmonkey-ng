@@ -18,8 +18,8 @@ use js::Promise;
 #[webidl_interface(name = "ReadableStreamDefaultReader")]
 pub struct DefaultReader {
     /// <https://streams.spec.whatwg.org/#DefaultReader-readrequests>
-    /// A list of read requests, used when a consumer requests chunks sooner than they are available
-    pub(crate) read_requests: Vec<ReadRequest>,
+    /// A list of read requests, used when a consumer requests chunks sooner than they are available.
+    pub(crate) read_requests: std::collections::VecDeque<ReadRequest>,
     /// `ReadableStreamGenericReader` mixin slot `[[stream]]`: the stream owning
     /// this reader, or `None` once released.
     ///

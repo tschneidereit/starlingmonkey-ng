@@ -25,5 +25,8 @@ libstarling.workspace = true
 wasip3.workspace = true
 wpt-support.workspace = true
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

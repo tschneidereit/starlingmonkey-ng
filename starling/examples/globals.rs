@@ -35,6 +35,27 @@ mod my_globals {
             Ok(a / b)
         }
     }
+
+    /// A variadic global that takes the raw `&CallArgs` and sets its own return
+    /// value, returning `Result<(), ExnThrown>`. This "raw" shape is handled by
+    /// the same trampoline that backs class methods, so it works for a global
+    /// function too.
+    pub fn sum_all(
+        _scope: &js::gc::scope::Scope<'_>,
+        args: &js::native::CallArgs,
+    ) -> Result<(), js::error::ExnThrown> {
+        let mut total = 0.0;
+        for i in 0..args.argc_ {
+            let val = args.get(i);
+            if val.is_double() {
+                total += val.to_double();
+            } else if val.is_int32() {
+                total += val.to_int32() as f64;
+            }
+        }
+        args.rval().set(js::value::from_f64(total));
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -116,5 +137,22 @@ fn main() {
     assert_eq!(err_str, "Division by zero");
     println!("  PASSED: safeDivide(1, 0) throws '{}'", err_str);
 
+    // ====================================================================
+    // Test 6: Variadic raw-`&CallArgs` function returning Result<(), _>
+    // ====================================================================
+    println!("Test 6: sumAll(1, 2, 3, 4) from JS");
+    let rval =
+        evaluate_with_filename(&scope, "sumAll(1, 2, 3, 4)", "test7.js", 1).expect("sumAll failed");
+    assert_eq!(rval.to_double(), 10.0);
+    // No arguments yields 0, and the function still returns undefined-free.
+    let rval = evaluate_with_filename(&scope, "sumAll()", "test8.js", 1).expect("sumAll() failed");
+    assert_eq!(rval.to_double(), 0.0);
+    println!("  PASSED: sumAll(1, 2, 3, 4) = 10, sumAll() = 0");
+
     println!("\nAll jsglobals tests passed!");
+}
+
+#[test]
+fn globals_example() {
+    main()
 }

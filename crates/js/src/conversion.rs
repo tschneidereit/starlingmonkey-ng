@@ -30,12 +30,11 @@
 #![deny(missing_docs)]
 
 use mozjs::jsapi::AssertSameCompartment;
-use mozjs::jsapi::JS_GetTwoByteStringCharsAndLength;
+use mozjs::jsapi::JS_DefineElement;
 use mozjs::jsapi::JS;
 use mozjs::jsapi::{ForOfIterator, ForOfIterator_NonIterableBehavior};
 use mozjs::jsapi::{JSContext, JSObject, JSString, PropertyDescriptor, RootedObject, RootedValue};
-use mozjs::jsapi::{JS_DefineElement, JS_GetLatin1StringCharsAndLength};
-use mozjs::jsapi::{JS_DeprecatedStringHasLatin1Chars, JS_NewStringCopyUTF8N, JSPROP_ENUMERATE};
+use mozjs::jsapi::{JS_NewStringCopyUTF8N, JSPROP_ENUMERATE};
 use mozjs::jsval::{BooleanValue, DoubleValue, Int32Value, UInt32Value, UndefinedValue};
 use mozjs::jsval::{JSVal, ObjectOrNullValue, ObjectValue, StringValue, SymbolValue};
 use mozjs::rooted;
@@ -48,7 +47,7 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::{mem, ptr, slice};
+use std::{mem, ptr};
 
 use crate::error::{throw_type_error, ExnThrown, ThrowException};
 use crate::gc::handle::Heap;
@@ -316,8 +315,10 @@ impl<'s> ToJSVal<'s> for HandleValue<'s> {
 
 impl<'s> ToJSVal<'s> for MozHeap<JSVal> {
     #[inline]
-    fn to_jsval(&self, _scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(unsafe { HandleValue::from_marked_location(self.get_unsafe()) })
+    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+        // Root a copy: a handle into the MozHeap's own storage would dangle
+        // if the heap moves, and would outlive the borrow of `self`.
+        Ok(scope.root_value(self.get()))
     }
 }
 
@@ -535,7 +536,9 @@ impl FromJSVal<'_> for u64 {
 impl<'s> ToJSVal<'s> for f32 {
     #[inline]
     fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(DoubleValue(*self as f64)))
+        // from_f64 canonicalizes NaNs; a payload-carrying NaN would trip
+        // DoubleValue's bit-pattern assertion and abort.
+        Ok(scope.root_value(crate::value::from_f64(*self as f64)))
     }
 }
 
@@ -558,7 +561,9 @@ impl FromJSVal<'_> for f32 {
 impl<'s> ToJSVal<'s> for f64 {
     #[inline]
     fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(DoubleValue(*self)))
+        // from_f64 canonicalizes NaNs; a payload-carrying NaN would trip
+        // DoubleValue's bit-pattern assertion and abort.
+        Ok(scope.root_value(crate::value::from_f64(*self)))
     }
 }
 
@@ -577,54 +582,88 @@ impl FromJSVal<'_> for f64 {
     }
 }
 
-/// Converts a `JSString`, encoded in "Latin1" (i.e. U+0000-U+00FF encoded as 0x00-0xFF) into a
-/// `String`.
-pub fn latin1_to_string(scope: &Scope<'_>, s: NonNull<JSString>) -> String {
-    assert!(unsafe { JS_DeprecatedStringHasLatin1Chars(s.as_ptr()) });
+/// A finite floating-point number: the *restricted* WebIDL `float`/`double`
+/// types, which reject NaN and ±Infinity during conversion (WebIDL
+/// [§3.2.13](https://webidl.spec.whatwg.org/#es-float) and
+/// [§3.2.15](https://webidl.spec.whatwg.org/#es-double)). Use plain
+/// `f32`/`f64` for the unrestricted variants.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Finite<T>(T);
 
-    let mut length = 0;
-    let chars = unsafe {
-        let chars = JS_GetLatin1StringCharsAndLength(
-            scope.cx_mut().raw_cx(),
-            ptr::null(),
-            s.as_ptr(),
-            &mut length,
-        );
-        assert!(!chars.is_null());
+impl<T: num_traits::Float> Finite<T> {
+    /// Wrap `value`, returning `None` if it is NaN or infinite.
+    pub fn new(value: T) -> Option<Self> {
+        value.is_finite().then_some(Finite(value))
+    }
+}
 
-        slice::from_raw_parts(chars, length)
-    };
-    // The `encoding.rs` documentation for `convert_latin1_to_utf8` states that:
-    // > The length of the destination buffer must be at least the length of the source
-    // > buffer times two.
-    let mut v = vec![0; chars.len() * 2];
-    let real_size = encoding_rs::mem::convert_latin1_to_utf8(chars, v.as_mut_slice());
+impl<T: Copy> Finite<T> {
+    /// The wrapped value.
+    pub fn get(self) -> T {
+        self.0
+    }
+}
 
-    v.truncate(real_size);
+impl<T> std::ops::Deref for Finite<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
 
-    // Safety: convert_latin1_to_utf8 converts the raw bytes to utf8 and the
-    // buffer is the size specified in the documentation, so this should be safe.
-    unsafe { String::from_utf8_unchecked(v) }
+// https://webidl.spec.whatwg.org/#es-float
+impl FromJSVal<'_> for Finite<f32> {
+    type Config = ();
+    fn from_jsval(scope: &Scope<'_>, val: HandleValue, _: ()) -> Result<Self, ConversionError> {
+        // Step 1-2: Let x be ? ToNumber(V); reject non-finite x.
+        let x = f64::from_jsval(scope, val, ())?;
+        if !x.is_finite() {
+            throw_type_error(scope, c"value is not a finite floating-point value");
+            return Err(ConversionError::ExnPending);
+        }
+        // Step 3-4: Round to IEEE single precision; reject overflow to
+        // infinity.
+        let y = x as f32;
+        Finite::new(y).ok_or_else(|| {
+            throw_type_error(scope, c"value is out of range for a float");
+            ConversionError::ExnPending
+        })
+    }
+}
+
+// https://webidl.spec.whatwg.org/#es-double
+impl FromJSVal<'_> for Finite<f64> {
+    type Config = ();
+    fn from_jsval(scope: &Scope<'_>, val: HandleValue, _: ()) -> Result<Self, ConversionError> {
+        // Step 1-2: Let x be ? ToNumber(V); reject non-finite x.
+        let x = f64::from_jsval(scope, val, ())?;
+        Finite::new(x).ok_or_else(|| {
+            throw_type_error(scope, c"value is not a finite floating-point value");
+            ConversionError::ExnPending
+        })
+    }
+}
+
+// https://webidl.spec.whatwg.org/#es-float
+impl<'s> ToJSVal<'s> for Finite<f32> {
+    #[inline]
+    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+        self.0.to_jsval(scope)
+    }
+}
+
+// https://webidl.spec.whatwg.org/#es-double
+impl<'s> ToJSVal<'s> for Finite<f64> {
+    #[inline]
+    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+        self.0.to_jsval(scope)
+    }
 }
 
 /// Converts a `JSString` into a `String`, regardless of used encoding.
 pub fn jsstr_to_string(scope: &Scope<'_>, jsstr: NonNull<JSString>) -> String {
-    if unsafe { JS_DeprecatedStringHasLatin1Chars(jsstr.as_ptr()) } {
-        return latin1_to_string(scope, jsstr);
-    }
-
-    let mut length = 0;
-    let chars = unsafe {
-        JS_GetTwoByteStringCharsAndLength(
-            scope.cx_mut().raw_cx(),
-            ptr::null(),
-            jsstr.as_ptr(),
-            &mut length,
-        )
-    };
-    assert!(!chars.is_null());
-    let char_vec = unsafe { slice::from_raw_parts(chars, length) };
-    String::from_utf16_lossy(char_vec)
+    // SAFETY: the scope provides a valid context, and `jsstr` is non-null.
+    unsafe { mozjs::conversions::jsstr_to_string(scope.cx_mut().raw_cx(), jsstr) }
 }
 
 // https://heycam.github.io/webidl/#es-USVString
@@ -900,16 +939,16 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Vec<T
 // https://webidl.spec.whatwg.org/#es-record
 // ---------------------------------------------------------------------------
 
-/// WebIDL `record<DOMString, V>` — an ordered map with string keys.
+/// WebIDL `record<K, V>` — an ordered map. `K` is a WebIDL string type (`ByteString`, `USVString`,
+/// or `DOMString`), kept generic so keys are validated by the same conversion as the source IDL.
 ///
-/// Wraps `IndexMap<String, V>` to preserve insertion order as required by
-/// the spec.  `Deref` and `IntoIterator` delegate to the inner map.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Record<V>(pub IndexMap<String, V>);
+/// Wraps `IndexMap<K, V>` to preserve insertion order as required by the spec. `Deref` and
+/// `IntoIterator` delegate to the inner map.
+#[derive(Debug, Clone)]
+pub struct Record<K, V>(pub IndexMap<K, V>);
 
-// SAFETY: Traces each key and value in the map. Keys are Strings (no-op
-// trace), values trace via V: Traceable.
-unsafe impl<V: Trace> Trace for Record<V> {
+// SAFETY: Traces each key and value in the map; both trace via their own `Trace` impls.
+unsafe impl<K: Trace, V: Trace> Trace for Record<K, V> {
     #[inline]
     unsafe fn trace(&self, trc: *mut mozjs::jsapi::JSTracer) {
         for (k, v) in &self.0 {
@@ -919,57 +958,62 @@ unsafe impl<V: Trace> Trace for Record<V> {
     }
 }
 
-impl<V> Record<V> {
+impl<K, V> Record<K, V> {
     /// Create an empty record.
     pub fn new() -> Self {
         Record(IndexMap::new())
     }
 }
 
-impl<V> Default for Record<V> {
+impl<K, V> Default for Record<K, V> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<V> std::ops::Deref for Record<V> {
-    type Target = IndexMap<String, V>;
+impl<K, V> std::ops::Deref for Record<K, V> {
+    type Target = IndexMap<K, V>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<V> std::ops::DerefMut for Record<V> {
+impl<K, V> std::ops::DerefMut for Record<K, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<V> IntoIterator for Record<V> {
-    type Item = (String, V);
-    type IntoIter = indexmap::map::IntoIter<String, V>;
+impl<K, V> IntoIterator for Record<K, V> {
+    type Item = (K, V);
+    type IntoIter = indexmap::map::IntoIter<K, V>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
 }
 
-impl<'a, V> IntoIterator for &'a Record<V> {
-    type Item = (&'a String, &'a V);
-    type IntoIter = indexmap::map::Iter<'a, String, V>;
+impl<'a, K, V> IntoIterator for &'a Record<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = indexmap::map::Iter<'a, K, V>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
 }
 
 // https://webidl.spec.whatwg.org/#es-record
-impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Record<T> {
+impl<'s, C, K, V> FromJSVal<'s> for Record<K, V>
+where
+    C: Clone,
+    K: for<'a> FromJSVal<'a, Config = ()> + std::hash::Hash + Eq,
+    V: for<'a> FromJSVal<'a, Config = C>,
+{
     type Config = C;
 
     fn from_jsval(
         scope: &'s Scope<'s>,
         val: HandleValue<'s>,
         option: C,
-    ) -> Result<Record<T>, ConversionError> {
+    ) -> Result<Record<K, V>, ConversionError> {
         // Step 1: If Type(V) is not Object, throw a TypeError.
         if !val.is_object() {
             return Err(ConversionError::Failure(
@@ -989,11 +1033,7 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Recor
         // [[OwnPropertyKeys]] set, then manually filter out symbols and
         // non-enumerable properties (per spec step 4).
         unsafe {
-            let cx = scope.cx_mut().raw_cx();
-            let id_vector = mozjs_sys::glue::CreateRootedIdVector(cx);
-            if id_vector.is_null() {
-                return Err(ConversionError::ExnPending);
-            }
+            let mut ids = mozjs::rust::IdVector::new(scope.cx_mut().raw_cx());
 
             // Use JSITER_OWNONLY | JSITER_HIDDEN | JSITER_SYMBOLS to match
             // [[OwnPropertyKeys]] ordering.
@@ -1001,32 +1041,21 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Recor
                 | mozjs::jsapi::JSITER_HIDDEN
                 | mozjs::jsapi::JSITER_SYMBOLS;
 
-            let props = mozjs_sys::glue::GetIdVectorAddress(id_vector);
             if !mozjs::rust::wrappers2::GetPropertyKeys(
                 scope.cx_mut(),
                 obj.handle(),
                 flags,
-                mozjs::jsapi::MutableHandleIdVector { ptr: props },
+                ids.handle_mut(),
             ) {
-                mozjs_sys::glue::DestroyRootedIdVector(id_vector);
                 return Err(ConversionError::ExnPending);
             }
 
-            let mut len = 0usize;
-            let ids_ptr = mozjs_sys::glue::SliceRootedIdVector(id_vector, &mut len);
-
-            for i in 0..len {
-                let id = *ids_ptr.add(i);
-                // Root the id for use with SpiderMonkey APIs.
-                rooted!(in(scope.raw_cx_no_gc()) let id_rooted = id);
-
-                // Step 4.1: If Type(key) is not Symbol...
-                // Skip symbol and integer keys — records only have string keys.
-                if !mozjs_sys::glue::RUST_JSID_IS_STRING(id_rooted.handle().into()) {
-                    continue;
-                }
+            for i in 0..ids.len() {
+                rooted!(in(scope.raw_cx_no_gc()) let id_rooted = ids[i]);
 
                 // Step 4.2: Let desc be ? O.GetOwnPropertyDescriptor(key).
+                // The spec runs [[GetOwnProperty]] for every key, including symbols, before any
+                // filtering, so do this first.
                 // Step 4.3: If desc is not undefined and desc.[[Enumerable]] is true...
                 let mut is_none = true;
                 rooted!(in(scope.raw_cx_no_gc()) let mut desc = PropertyDescriptor {
@@ -1046,7 +1075,6 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Recor
                     desc.handle_mut(),
                     &mut is_none,
                 ) {
-                    mozjs_sys::glue::DestroyRootedIdVector(id_vector);
                     return Err(ConversionError::ExnPending);
                 }
 
@@ -1054,9 +1082,14 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Recor
                     continue;
                 }
 
-                // Step 4.4: Let typedKey be key converted to an IDL value of type K.
-                let key_str = mozjs_sys::glue::RUST_JSID_TO_STRING(id_rooted.handle().into());
-                let key = jsstr_to_string(scope, NonNull::new_unchecked(key_str));
+                // Step 4.4: Let typedKey be key converted to an IDL value of type K. Turn the
+                // property key (a string, integer-index, or symbol id) into a value, then run the
+                // key type's own conversion. This throws for a symbol key (ToString of a Symbol is a
+                // TypeError) and for an out-of-range key (e.g. a `ByteString` code unit > 255) —
+                // before the value is read.
+                let key_val = crate::id::id_to_value(scope, id_rooted.get())
+                    .map_err(|_| ConversionError::ExnPending)?;
+                let key = K::from_jsval(scope, key_val, ())?;
 
                 // Step 4.5: Let value be ? Get(O, key).
                 let mut val_rooted = scope.root_value_mut(UndefinedValue());
@@ -1066,25 +1099,16 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Recor
                     id_rooted.handle(),
                     val_rooted.reborrow(),
                 ) {
-                    mozjs_sys::glue::DestroyRootedIdVector(id_vector);
                     return Err(ConversionError::ExnPending);
                 }
 
                 // Step 4.6: Let typedValue be the result of converting value
                 // to an IDL value of type V.
-                let typed_value = match T::from_jsval(scope, val_rooted.handle(), option.clone()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        mozjs_sys::glue::DestroyRootedIdVector(id_vector);
-                        return Err(e);
-                    }
-                };
+                let typed_value = V::from_jsval(scope, val_rooted.handle(), option.clone())?;
 
                 // Step 4.7: Set result[typedKey] to typedValue.
                 result.insert(key, typed_value);
             }
-
-            mozjs_sys::glue::DestroyRootedIdVector(id_vector);
         }
 
         Ok(Record(result))
@@ -1092,19 +1116,22 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Recor
 }
 
 // https://webidl.spec.whatwg.org/#es-record
-impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Record<T> {
+impl<'s, K: AsRef<str>, V: ToJSVal<'s>> ToJSVal<'s> for Record<K, V> {
     fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
         let obj = crate::Object::new(scope, None).map_err(|_| ConversionError::ExnPending)?;
 
         for (key, value) in &self.0 {
             let val = value.to_jsval(scope)?;
+            // Set by the two-byte name: the C-string entry point would read
+            // the key as Latin-1 instead of Rust's UTF-8 and cannot represent
+            // keys with interior NULs, which are legal property names.
+            let key_utf16: Vec<u16> = key.as_ref().encode_utf16().collect();
             let ok = unsafe {
-                let c_key = std::ffi::CString::new(key.as_bytes())
-                    .map_err(|_| ConversionError::ExnPending)?;
-                mozjs::rust::wrappers2::JS_SetProperty(
+                mozjs::rust::wrappers2::JS_SetUCProperty(
                     scope.cx_mut(),
                     obj.handle(),
-                    c_key.as_ptr(),
+                    key_utf16.as_ptr(),
+                    key_utf16.len(),
                     val,
                 )
             };
@@ -1173,40 +1200,40 @@ impl FromJSVal<'_> for AsyncSequence {
             crate::Object::from_raw(scope, val.to_object()).ok_or(ConversionError::ExnPending)?
         };
 
-        // Try Symbol.asyncIterator first.
-        let async_iter_key =
-            crate::symbol::get_well_known_key(scope, crate::native::SymbolCode::asyncIterator);
-        let async_iter_id = scope.root_id(async_iter_key);
+        // GetMethod(V, P): Get the property — no [[HasProperty]] pre-check,
+        // and a Get error propagates — treat null/undefined as absent, and
+        // require anything else to be callable.
+        let get_method =
+            |code: crate::native::SymbolCode| -> Result<Option<JSVal>, ConversionError> {
+                let key = crate::symbol::get_well_known_key(scope, code);
+                let id = scope.root_id(key);
+                let method_val = obj.get_property_by_id(scope, id)?;
+                if method_val.is_null_or_undefined() {
+                    return Ok(None);
+                }
+                if !method_val.is_object() || !unsafe { JS::IsCallable(method_val.to_object()) } {
+                    throw_type_error(scope, c"iterator method is not callable");
+                    return Err(ConversionError::ExnPending);
+                }
+                Ok(Some(method_val.get()))
+            };
 
-        if let Ok(true) = obj.has_property_by_id(scope, async_iter_id) {
-            let method_val = obj
-                .get_property_by_id(scope, async_iter_id)
-                .map_err(|_| ConversionError::ExnPending)?;
-            if !method_val.is_null_or_undefined() {
-                return Ok(AsyncSequence {
-                    object: Heap::from(val.get()),
-                    method: Heap::from(method_val.get()),
-                    is_async: true,
-                });
-            }
+        // Let method be ? GetMethod(V, %Symbol.asyncIterator%).
+        if let Some(method) = get_method(crate::native::SymbolCode::asyncIterator)? {
+            return Ok(AsyncSequence {
+                object: Heap::from(val.get()),
+                method: Heap::from(method),
+                is_async: true,
+            });
         }
 
-        // Fall back to Symbol.iterator (sync iterable).
-        let iter_key =
-            crate::symbol::get_well_known_key(scope, crate::native::SymbolCode::iterator);
-        let iter_id = scope.root_id(iter_key);
-
-        if let Ok(true) = obj.has_property_by_id(scope, iter_id) {
-            let method_val = obj
-                .get_property_by_id(scope, iter_id)
-                .map_err(|_| ConversionError::ExnPending)?;
-            if !method_val.is_null_or_undefined() {
-                return Ok(AsyncSequence {
-                    object: Heap::from(val.get()),
-                    method: Heap::from(method_val.get()),
-                    is_async: false,
-                });
-            }
+        // If method is undefined, let it be ? GetMethod(V, %Symbol.iterator%).
+        if let Some(method) = get_method(crate::native::SymbolCode::iterator)? {
+            return Ok(AsyncSequence {
+                object: Heap::from(val.get()),
+                method: Heap::from(method),
+                is_async: false,
+            });
         }
 
         Err(ConversionError::Failure(
@@ -1292,58 +1319,4 @@ impl FromJSVal<'_> for *mut JS::Symbol {
     }
 }
 
-/// A wrapper type over [`mozjs::jsapi::UTF8Chars`]. This is created to help transferring
-/// a rust string to mozjs. The inner [`mozjs::jsapi::UTF8Chars`] can be accessed via the
-/// [`std::ops::Deref`] trait.
-pub struct Utf8Chars<'s> {
-    lt_marker: std::marker::PhantomData<&'s ()>,
-    inner: mozjs::jsapi::UTF8Chars,
-}
-
-impl<'s> std::ops::Deref for Utf8Chars<'s> {
-    type Target = mozjs::jsapi::UTF8Chars;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<'s> From<&'s str> for Utf8Chars<'s> {
-    #[allow(unsafe_code)]
-    fn from(value: &'s str) -> Self {
-        use std::marker::PhantomData;
-
-        use mozjs::jsapi::mozilla::{Range, RangedPtr};
-        use mozjs::jsapi::UTF8Chars;
-
-        let range = value.as_bytes().as_ptr_range();
-        let range_start = range.start as *mut _;
-        let range_end = range.end as *mut _;
-        let start = RangedPtr {
-            _phantom_0: PhantomData,
-            mPtr: range_start,
-            #[cfg(feature = "debugmozjs")]
-            mRangeStart: range_start,
-            #[cfg(feature = "debugmozjs")]
-            mRangeEnd: range_end,
-        };
-        let end = RangedPtr {
-            _phantom_0: PhantomData,
-            mPtr: range_end,
-            #[cfg(feature = "debugmozjs")]
-            mRangeStart: range_start,
-            #[cfg(feature = "debugmozjs")]
-            mRangeEnd: range_end,
-        };
-        let base = Range {
-            _phantom_0: PhantomData,
-            mStart: start,
-            mEnd: end,
-        };
-        let inner = UTF8Chars { _base: base };
-        Self {
-            lt_marker: PhantomData,
-            inner,
-        }
-    }
-}
+pub use mozjs::conversions::Utf8Chars;

@@ -26,7 +26,6 @@
 //! let len: usize = s.len();
 //! ```
 
-use std::cell::Cell;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr::NonNull;
@@ -64,6 +63,16 @@ impl<'s> Str<'s> {
     // Construction from a raw handle
     // ---------------------------------------------------------------------------
 
+    /// Root a raw string pointer, mapping null to `ExnThrown`.
+    ///
+    /// JSAPI string functions return null with an exception pending, so
+    /// this is the standard wrapper for their results.
+    fn from_mozjs_rval(scope: &'s Scope<'_>, ptr: *mut JSString) -> Result<Self, ExnThrown> {
+        NonNull::new(ptr)
+            .map(|p| Str::from_handle(scope.root_string(p)))
+            .ok_or(ExnThrown)
+    }
+
     /// Wrap a rooted string handle.
     pub fn from_handle(handle: Handle<'s, *mut JSString>) -> Self {
         Str { handle }
@@ -93,27 +102,19 @@ impl<'s> Str<'s> {
     pub fn from_str(scope: &'s Scope<'_>, s: &str) -> Result<Self, ExnThrown> {
         let s = Utf8Chars::from(s);
         let jsstr = unsafe { JS_NewStringCopyUTF8N(scope.cx_mut(), &*s as *const _) };
-        if jsstr.is_null() {
-            return Err(ExnThrown);
-        }
-        let rooted = scope.root_string(NonNull::new(jsstr).unwrap());
-        Ok(Str::from_handle(rooted))
+        Self::from_mozjs_rval(scope, jsstr)
     }
 
     /// Create a new JS string from a null-terminated C string.
     pub fn from_cstr(scope: &'s Scope<'_>, s: &CStr) -> Result<Self, ExnThrown> {
         let js_str = unsafe { wrappers2::JS_NewStringCopyZ(scope.cx_mut(), s.as_ptr()) };
-        NonNull::new(js_str)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, js_str)
     }
 
     /// Create a new JS string from a UTF-16 slice.
     pub fn from_utf16(scope: &'s Scope<'_>, s: &[u16]) -> Result<Self, ExnThrown> {
         let js_str = unsafe { wrappers2::JS_NewUCStringCopyN(scope.cx_mut(), s.as_ptr(), s.len()) };
-        NonNull::new(js_str)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, js_str)
     }
 
     /// Get the empty string for this context.
@@ -127,18 +128,16 @@ impl<'s> Str<'s> {
         Str::from_handle(scope.root_string(nn))
     }
 
-    /// Convert any JS value to a string via `JS::ToStringSlow`.
+    /// Convert a JS value to a string via the `ToString` abstract operation.
     ///
-    /// Equivalent to the JS `String(value)` operation. Handles all value
-    /// types including symbols and objects.
+    /// Throws a `TypeError` for symbols — unlike `String(value)`, which
+    /// special-cases them to their description.
     pub fn from_value(
         scope: &'s Scope<'_>,
         val: mozjs::gc::HandleValue,
     ) -> Result<Self, ExnThrown> {
         let js_str = unsafe { mozjs::rust::ToString(scope.cx_mut().raw_cx(), val) };
-        NonNull::new(js_str)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, js_str)
     }
 
     // ---------------------------------------------------------------------------
@@ -147,17 +146,9 @@ impl<'s> Str<'s> {
 
     /// Encode this string to UTF-8, returning an owned Rust [`String`].
     pub fn to_utf8(&self, scope: &Scope<'_>) -> Result<String, ExnThrown> {
-        thread_local! {
-            static RESULT: Cell<Option<String>> = const { Cell::new(None) };
-        }
-        unsafe extern "C" fn cb(encoded: *const c_char) {
-            if !encoded.is_null() {
-                let cstr = CStr::from_ptr(encoded);
-                RESULT.with(|r| r.set(Some(cstr.to_string_lossy().into_owned())));
-            }
-        }
-        unsafe { wrappers2::EncodeStringToUTF8(scope.cx_mut(), self.handle, cb) };
-        RESULT.with(|r| r.take()).ok_or(ExnThrown)
+        NonNull::new(self.as_raw())
+            .map(|nn| crate::conversion::jsstr_to_string(scope, nn))
+            .ok_or(ExnThrown)
     }
 
     /// Get a single character (code unit) at the given index.
@@ -173,25 +164,50 @@ impl<'s> Str<'s> {
     // Atom operations
     // ---------------------------------------------------------------------------
 
-    /// Atomize a UTF-8 string (intern it for identity comparison).
+    /// Turns a Rust string into an atomized JS string.
+    ///
+    /// Atomized strings are canonicalized and deduplicated by the engine, so atomizing the same
+    /// string multiple times yields the same pointer, which can then be used for identity
+    /// comparison.
     pub fn atomize(scope: &'s Scope<'_>, s: &str) -> Result<Self, ExnThrown> {
-        let js_str = unsafe {
-            wrappers2::JS_AtomizeStringN(scope.cx(), s.as_ptr() as *const c_char, s.len())
+        let js_str = if s.is_ascii() {
+            unsafe {
+                wrappers2::JS_AtomizeStringN(scope.cx(), s.as_ptr() as *const c_char, s.len())
+            }
+        } else {
+            let units: Vec<u16> = s.encode_utf16().collect();
+            unsafe { wrappers2::JS_AtomizeUCStringN(scope.cx(), units.as_ptr(), units.len()) }
         };
-        NonNull::new(js_str)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, js_str)
     }
 
-    /// Atomize and pin a UTF-8 string (keep it alive for the lifetime of the
-    /// runtime).
+    /// Turns a Rust string into an atomized JS string that's kept alive for the lifetime of the
+    /// runtime.
+    ///
+    /// SpiderMonkey supports pinning only for Latin-1, so strings containing non-latin-1 characters are rejected with a TypeError.
+    ///
+    /// Note: use [`atomize`](Self::atomize) if pinning isn't needed.
     pub fn atomize_and_pin(scope: &'s Scope<'_>, s: &str) -> Result<Self, ExnThrown> {
-        let js_str = unsafe {
-            wrappers2::JS_AtomizeAndPinStringN(scope.cx(), s.as_ptr() as *const c_char, s.len())
+        let js_str = if s.is_ascii() {
+            unsafe {
+                wrappers2::JS_AtomizeAndPinStringN(scope.cx(), s.as_ptr() as *const c_char, s.len())
+            }
+        } else if s.chars().all(|c| (c as u32) <= 0xFF) {
+            let latin1: Vec<u8> = s.chars().map(|c| c as u8).collect();
+            unsafe {
+                wrappers2::JS_AtomizeAndPinStringN(
+                    scope.cx(),
+                    latin1.as_ptr() as *const c_char,
+                    latin1.len(),
+                )
+            }
+        } else {
+            return Err(crate::error::throw_type_error(
+                scope,
+                c"cannot pin an atom containing code points above U+00FF",
+            ));
         };
-        NonNull::new(js_str)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, js_str)
     }
 
     /// Check whether this atomized string has been pinned.
@@ -207,9 +223,7 @@ impl<'s> Str<'s> {
     pub fn concat(&self, scope: &'s Scope<'_>, other: Str<'_>) -> Result<Self, ExnThrown> {
         let result =
             unsafe { wrappers2::JS_ConcatStrings(scope.cx_mut(), self.handle, other.handle) };
-        NonNull::new(result)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, result)
     }
 
     /// Compare this string with another, returning a result like `strcmp`.
@@ -266,9 +280,7 @@ impl<'s> Str<'s> {
     ) -> Result<Self, ExnThrown> {
         let result =
             unsafe { wrappers2::JS_NewDependentString(scope.cx(), self.handle, start, length) };
-        NonNull::new(result)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, result)
     }
 
     /// Get the encoding (byte) length when encoded to Latin-1.
@@ -290,9 +302,7 @@ impl<'s> Str<'s> {
     ) -> Result<Self, ExnThrown> {
         let result =
             wrappers2::JS_NewExternalStringLatin1(scope.cx_mut(), chars, length, callbacks);
-        NonNull::new(result)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, result)
     }
 
     /// Create an external two-byte string backed by caller-owned memory.
@@ -308,9 +318,7 @@ impl<'s> Str<'s> {
         callbacks: *const mozjs::jsapi::JSExternalStringCallbacks,
     ) -> Result<Self, ExnThrown> {
         let result = wrappers2::JS_NewExternalUCString(scope.cx_mut(), chars, length, callbacks);
-        NonNull::new(result)
-            .map(|p| Str::from_handle(scope.root_string(p)))
-            .ok_or(ExnThrown)
+        Self::from_mozjs_rval(scope, result)
     }
 }
 

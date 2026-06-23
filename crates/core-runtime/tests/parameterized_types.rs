@@ -104,8 +104,9 @@ mod sequence_tests {
     }
 
     #[test]
-    fn optional_seq_null() {
-        assert_eq!(eval("new SeqAcceptor().optionalSeq(null)"), "none");
+    fn optional_seq_null_throws() {
+        // `null` is a present value (not absent); converting it to a sequence throws (not iterable).
+        assert!(throws("new SeqAcceptor().optionalSeq(null)"));
     }
 
     #[test]
@@ -155,23 +156,29 @@ mod record_tests {
 
         /// Accept a record of string values, return keys joined.
         #[method]
-        fn keys(&self, rec: Record<String>) -> String {
+        fn keys(&self, rec: Record<String, String>) -> String {
             rec.keys().cloned().collect::<Vec<_>>().join(",")
         }
 
         /// Accept a record of string values, return values joined.
         #[method]
-        fn values(&self, rec: Record<String>) -> String {
+        fn values(&self, rec: Record<String, String>) -> String {
             rec.values().cloned().collect::<Vec<_>>().join(",")
         }
 
         /// Accept an optional record.
         #[method]
-        fn optional_record(&self, rec: Option<Record<String>>) -> String {
+        fn optional_record(&self, rec: Option<Record<String, String>>) -> String {
             match rec {
                 Some(r) => r.keys().cloned().collect::<Vec<_>>().join(","),
                 None => "none".to_string(),
             }
+        }
+
+        /// Echo the record back to JS (exercises `Record::to_jsval`).
+        #[method]
+        fn echo(&self, rec: Record<String, String>) -> Record<String, String> {
+            rec
         }
     }
 
@@ -229,8 +236,37 @@ mod record_tests {
     }
 
     #[test]
-    fn optional_record_null() {
-        assert_eq!(eval("new RecordAcceptor().optionalRecord(null)"), "none");
+    fn optional_record_null_throws() {
+        // Per WebIDL, only `undefined`/a missing argument makes an optional argument absent; `null`
+        // is a present value, and converting it to a record throws (record conversion requires an
+        // object).
+        assert!(throws("new RecordAcceptor().optionalRecord(null)"));
+    }
+
+    #[test]
+    fn record_roundtrip_non_ascii_keys() {
+        // Keys must survive the JS→Rust→JS round trip; a Latin-1 write of
+        // the UTF-8 key bytes would mojibake the property name.
+        assert_eq!(
+            eval(
+                "const r = new RecordAcceptor().echo({'é🦊': 'vé'}); \
+                 Object.keys(r).join(',') + ':' + r['é🦊']"
+            ),
+            "é🦊:vé"
+        );
+    }
+
+    #[test]
+    fn record_roundtrip_interior_nul_key() {
+        // A NUL is a legal property-name code unit; a C-string write would
+        // fail and surface as a phantom exception.
+        assert_eq!(
+            eval(
+                "const r = new RecordAcceptor().echo({'a\\u0000b': 'v'}); \
+                 Object.keys(r).map(k => k.length).join(',') + ':' + r['a\\u0000b']"
+            ),
+            "3:v"
+        );
     }
 
     #[test]
@@ -239,12 +275,21 @@ mod record_tests {
     }
 
     #[test]
-    fn skips_symbol_keys() {
-        // Symbol keys should be ignored in record conversion.
-        assert_eq!(
-            eval("let o = {a: '1'}; o[Symbol('x')] = '2'; new RecordAcceptor().keys(o)"),
-            "a"
-        );
+    fn symbol_keys_throw() {
+        // Per WebIDL es-record, every enumerable own key — including symbols — is converted to the
+        // key type. Converting a Symbol to a string throws a TypeError, so an enumerable
+        // symbol-keyed property makes the whole conversion throw.
+        assert!(throws(
+            "let o = {a: '1'}; o[Symbol('x')] = '2'; new RecordAcceptor().keys(o)"
+        ));
+    }
+
+    #[test]
+    fn integer_keys_kept() {
+        // Integer-index property keys are own enumerable keys; per WebIDL they are converted to
+        // their string form and kept (the [[OwnPropertyKeys]] order lists them first, in ascending
+        // numeric order), not skipped.
+        assert_eq!(eval("new RecordAcceptor().keys({1: 'a', 0: 'b'})"), "0,1");
     }
 
     #[test]
@@ -281,6 +326,20 @@ mod union_tests {
         Bool(bool),
     }
 
+    // No string member: the numeric member is the §3.2.25 fallback (ToNumber).
+    #[webidl_union]
+    pub enum BoolOrLong {
+        Bool(bool),
+        Long(i32),
+    }
+
+    // No string or numeric member: the boolean member is the fallback (ToBoolean).
+    #[webidl_union]
+    pub enum SeqOrBool {
+        Items(Vec<String>),
+        Flag(bool),
+    }
+
     #[jsclass]
     struct UnionAcceptor {}
 
@@ -313,6 +372,22 @@ mod union_tests {
                 Some(StringOrLong::Str(s)) => format!("string:{s}"),
                 Some(StringOrLong::Long(n)) => format!("long:{n}"),
                 None => "none".to_string(),
+            }
+        }
+
+        #[method]
+        fn bool_or_long(&self, val: BoolOrLong) -> String {
+            match val {
+                BoolOrLong::Bool(b) => format!("bool:{b}"),
+                BoolOrLong::Long(n) => format!("long:{n}"),
+            }
+        }
+
+        #[method]
+        fn seq_or_bool(&self, val: SeqOrBool) -> String {
+            match val {
+                SeqOrBool::Items(v) => format!("seq:{}", v.len()),
+                SeqOrBool::Flag(b) => format!("flag:{b}"),
             }
         }
     }
@@ -356,7 +431,12 @@ mod union_tests {
 
     #[test]
     fn optional_union_null() {
-        assert_eq!(eval("new UnionAcceptor().optionalUnion(null)"), "none");
+        // `null` is a present value (not absent); a union with a string member converts null via
+        // that member, yielding "null".
+        assert_eq!(
+            eval("new UnionAcceptor().optionalUnion(null)"),
+            "string:null"
+        );
     }
 
     #[test]
@@ -382,6 +462,27 @@ mod union_tests {
         assert_eq!(
             eval("new UnionAcceptor().stringOrBool(false)"),
             "bool:false"
+        );
+    }
+
+    #[test]
+    fn numeric_fallback_without_string_member() {
+        // BoolOrLong has no string member, so a non-boolean value coerces to the
+        // numeric member via ToNumber (WebIDL §3.2.25 fallback).
+        assert_eq!(eval("new UnionAcceptor().boolOrLong('5')"), "long:5");
+        assert_eq!(eval("new UnionAcceptor().boolOrLong(7)"), "long:7");
+        assert_eq!(eval("new UnionAcceptor().boolOrLong(true)"), "bool:true");
+    }
+
+    #[test]
+    fn boolean_fallback_without_string_or_numeric_member() {
+        // SeqOrBool has neither a string nor a numeric member, so a non-iterable
+        // value coerces to the boolean member via ToBoolean.
+        assert_eq!(eval("new UnionAcceptor().seqOrBool(5)"), "flag:true");
+        assert_eq!(eval("new UnionAcceptor().seqOrBool(0)"), "flag:false");
+        assert_eq!(
+            eval("new UnionAcceptor().seqOrBool(['a', 'b', 'c'])"),
+            "seq:3"
         );
     }
 }
@@ -505,9 +606,11 @@ mod union_lifetime_tests {
 
     #[test]
     fn optional_buffer_or_string_null() {
+        // `null` is a present value (not absent); a union with a string member converts null via
+        // that member, yielding "null".
         assert_eq!(
             eval("new LifetimeUnionAcceptor().optionalBufferOrString(null)"),
-            "none"
+            "string:null"
         );
     }
 
@@ -568,7 +671,7 @@ mod union_sequence_record_tests {
     #[webidl_union]
     pub enum SeqOrRecordOrString {
         Pairs(Vec<Vec<String>>),
-        Record(Record<String>),
+        Record(Record<String, String>),
         Str(String),
     }
 
@@ -760,8 +863,11 @@ mod async_sequence_tests {
     }
 
     #[test]
-    fn optional_null() {
-        assert_eq!(eval("new AsyncAcceptor().optionalAsync(null)"), "none");
+    fn optional_null_throws() {
+        // Per WebIDL, only `undefined`/a missing argument makes an optional argument absent; `null`
+        // is a present value, and converting it to a sequence/async iterable throws (null is not
+        // iterable).
+        assert!(throws("new AsyncAcceptor().optionalAsync(null)"));
     }
 
     #[test]
@@ -777,5 +883,33 @@ mod async_sequence_tests {
     #[test]
     fn plain_object_throws() {
         assert!(throws("new AsyncAcceptor().isAsync({})"));
+    }
+
+    #[test]
+    fn throwing_getter_propagates() {
+        // GetMethod: a Get error propagates; it must not be swallowed and
+        // fall back to Symbol.iterator.
+        assert_eq!(
+            eval(
+                "let o = { get [Symbol.asyncIterator]() { throw new Error('trap') }, \
+                           [Symbol.iterator]() { return { next() { return { done: true } } } } }; \
+                 try { new AsyncAcceptor().isAsync(o); 'no throw' } catch (e) { e.message }"
+            ),
+            "trap"
+        );
+    }
+
+    #[test]
+    fn non_callable_method_throws() {
+        // GetMethod: a present, non-callable method is a TypeError, not a
+        // fallback to Symbol.iterator.
+        assert_eq!(
+            eval(
+                "let o = { [Symbol.asyncIterator]: 42, \
+                           [Symbol.iterator]() { return { next() { return { done: true } } } } }; \
+                 try { new AsyncAcceptor().isAsync(o); 'no throw' } catch (e) { e.constructor.name }"
+            ),
+            "TypeError"
+        );
     }
 }

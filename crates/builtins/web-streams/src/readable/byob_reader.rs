@@ -19,8 +19,8 @@ use js::Promise;
 pub struct BYOBReader {
     /// <https://streams.spec.whatwg.org/#BYOBReader-readintorequests>
     /// A list of read-into requests, used when a consumer requests chunks sooner than they are
-    /// available
-    pub(crate) read_into_requests: Vec<ReadIntoRequest>,
+    /// available.
+    pub(crate) read_into_requests: std::collections::VecDeque<ReadIntoRequest>,
     /// `ReadableStreamGenericReader` mixin slot `[[stream]]`: the stream owning
     /// this reader, or `None` once released.
     ///

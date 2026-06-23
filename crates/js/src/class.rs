@@ -8,7 +8,7 @@
 //! for defining JavaScript classes backed by Rust structs.
 
 use std::any::TypeId;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr, CString};
 use std::marker::PhantomData;
@@ -230,23 +230,52 @@ pub fn instance_of(scope: &Scope<'_>, obj: HandleObject, clasp: &JSClass) -> boo
 // ============================================================================
 
 impl<'s, T: JSType + ClassDef> Stack<'s, T> {
-    /// Get a reference to the private Rust data.
+    /// Borrow the private Rust data, returning a guard that dereferences to
+    /// `&T`.
     ///
     /// Returns `None` if the object doesn't have private data of type `T`.
-    pub fn data(&self) -> Option<&T> {
-        unsafe { get_private_or_ancestor::<T>(self.handle.get()) }
+    ///
+    /// # Panics
+    ///
+    /// Panics if the data is already mutably borrowed — i.e. a JS reentry
+    /// borrowed this object's data while a [`data_mut`](Self::data_mut) guard
+    /// was still live.
+    pub fn data(&self) -> Option<Ref<'_, T>> {
+        let obj = self.handle.get();
+        let flag = unsafe { get_borrow_flag(obj)? };
+        // Check (and panic on conflict) before materializing the `&T`, so the
+        // reference is never created while a mutable borrow is live.
+        acquire_shared(flag);
+        match unsafe { get_private_or_ancestor::<T>(obj) } {
+            Some(value) => Some(Ref { value, flag }),
+            None => {
+                flag.set(flag.get() - 1);
+                None
+            }
+        }
     }
 
-    /// Get a mutable reference to the private Rust data.
+    /// Mutably borrow the private Rust data, returning a guard that
+    /// dereferences to `&mut T`.
     ///
     /// Returns `None` if the object doesn't have private data of type `T`.
     ///
-    /// # Safety
+    /// # Panics
     ///
-    /// No other references to the data may exist simultaneously.
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn data_mut(&self) -> Option<&mut T> {
-        unsafe { get_private_or_ancestor_mut::<T>(self.handle.get()) }
+    /// Panics if the data is already borrowed (shared or mutable) — i.e. a JS
+    /// reentry borrowed this object's data while a borrow was still live. See
+    /// [`data`](Self::data).
+    pub fn data_mut(&self) -> Option<RefMut<'_, T>> {
+        let obj = self.handle.get();
+        let flag = unsafe { get_borrow_flag(obj)? };
+        acquire_mut(flag);
+        match unsafe { get_private_or_ancestor_mut::<T>(obj) } {
+            Some(value) => Some(RefMut { value, flag }),
+            None => {
+                flag.set(UNUSED);
+                None
+            }
+        }
     }
 }
 
@@ -258,15 +287,26 @@ impl<T: ClassDef> JSType for T {
     fn js_class() -> *const JSClass {
         T::class()
     }
+
+    #[inline]
+    unsafe fn is_instance(obj: *mut JSObject) -> bool {
+        // The class tag must match (allowing subclasses), and the object must carry private data.
+        // Both must be checked because the prototype object shares the instance JSClass but
+        // doesn't have the private slot.
+        is_derived_from_type(unsafe { get_class_tag(obj) }, Self::js_class() as usize)
+            && unsafe { get_raw_private(obj).is_some() }
+    }
 }
 
-/// Typed variadic rest arguments in `#[jsmethods]`.
+/// Typed variadic rest arguments in `#[jsmethods]` and `#[webidl_methods]`.
 ///
 /// Use this as the type of the last parameter to collect all remaining
-/// JS arguments. The macro generates code that converts each argument
-/// to the specified type `T` using the [`FromJSValue`] trait.
+/// JS arguments. `T` must implement [`FromJSVal`](crate::conversion::FromJSVal) and either not
+/// need rooting, such as `i32`, `f64` or `String`, or be a scope-rooted type, such as
+/// `HandleValue<'_>`, `Promise<'_>`, or `Request<'_>`.
 ///
-/// The default type parameter is `Value`, which collects raw JS values.
+/// Note that instead of `HandleValue<'_>`, you can also use `&CallArgs`, which gives you access
+/// to the raw, already rooted, arguments vector and count.
 ///
 /// # Examples
 ///
@@ -276,12 +316,8 @@ impl<T: ClassDef> JSType for T {
 /// fn sum(rest: RestArgs<f64>) -> f64 {
 ///     rest.iter().sum()
 /// }
-///
-/// // Raw Value access (same as the default):
-/// #[method]
-/// fn process(&self, rest: RestArgs<Value>) -> String { ... }
 /// ```
-pub struct RestArgs<T = Value>(Vec<T>);
+pub struct RestArgs<T>(Vec<T>);
 
 impl<T> RestArgs<T> {
     /// Creates a new `RestArgs` from a pre-converted vector.
@@ -418,13 +454,138 @@ impl<'s, T: ClassDef> StackType<'s> for Stack<'s, T> {
 // ============================================================================
 
 const PRIVATE_DATA_SLOT: u32 = 0;
+const BORROW_FLAG_SLOT: u32 = 1;
 
 /// Minimum number of reserved slots required for a class instance.
-/// All ClassDef instances use at least PRIVATE_DATA_SLOT (0) for private Rust data.
+///
+/// Slot 0 ([`PRIVATE_DATA_SLOT`]) holds the boxed Rust data; slot 1
+/// ([`BORROW_FLAG_SLOT`]) holds the boxed borrow flag that makes
+/// [`Stack::data`]/[`Stack::data_mut`] safe (see [`BorrowFlag`]).
 ///
 /// Public for use by generated `ClassDef::CLASS` implementations.
 #[doc(hidden)]
-pub const MIN_CLASS_RESERVED_SLOTS: u32 = PRIVATE_DATA_SLOT + 1;
+pub const MIN_CLASS_RESERVED_SLOTS: u32 = BORROW_FLAG_SLOT + 1;
+
+// ---------------------------------------------------------------------------
+// Runtime borrow tracking for private data
+// ---------------------------------------------------------------------------
+//
+// The private data lives behind a raw pointer in a reserved slot, so the borrow
+// checker cannot track aliasing of it: `data()` and `data_mut()` both conjure a
+// reference from that pointer, and a JS object is reachable through any number
+// of copyable `Stack` handles. The danger that remains is *reentrancy* — a
+// native method takes `&mut` data, calls back into JS, and the re-entered code
+// touches the same object's data, minting a second overlapping reference.
+//
+// To make `data_mut()` safe we track borrows at runtime with a per-object flag
+// stored in `BORROW_FLAG_SLOT`, exactly mirroring `RefCell`: a conflicting
+// borrow (mut/mut or mut/shared) panics rather than aliasing. The flag is a
+// single `Cell` per object shared across the whole inheritance hierarchy, so
+// borrowing a parent's slice conflicts with borrowing the child's. The check is
+// a single-threaded `Cell` read/compare/write, which we assume to have
+// negligible cost next to the JSAPI calls around it, so it's always on, in
+// release as well as debug builds.
+// TODO: benchmark this assumption and consider a debug-only check if it turns out to be costly.
+
+/// Borrow state for an object's private data: `0` = unborrowed, `n > 0` = `n`
+/// live shared borrows, `-1` = a live mutable borrow.
+type BorrowFlag = isize;
+
+const UNUSED: BorrowFlag = 0;
+const WRITING: BorrowFlag = -1;
+
+#[cold]
+#[inline(never)]
+fn borrow_conflict(mutable: bool) -> ! {
+    if mutable {
+        panic!(
+            "private data is already borrowed (a JS reentry mutably borrowed the \
+             same object's data while a borrow was live)"
+        );
+    } else {
+        panic!(
+            "private data is already mutably borrowed (a JS reentry borrowed the \
+             same object's data while a mutable borrow was live)"
+        );
+    }
+}
+
+/// Take a shared borrow on `flag`, panicking if it is mutably borrowed.
+///
+/// Must be called *before* materializing the `&T`, so the reference is never
+/// created while a conflicting borrow is live.
+fn acquire_shared(flag: &Cell<BorrowFlag>) {
+    let f = flag.get();
+    if f < UNUSED {
+        borrow_conflict(false);
+    }
+    flag.set(f + 1);
+}
+
+/// Take a mutable borrow on `flag`, panicking if it is borrowed at all.
+fn acquire_mut(flag: &Cell<BorrowFlag>) {
+    if flag.get() != UNUSED {
+        borrow_conflict(true);
+    }
+    flag.set(WRITING);
+}
+
+/// A shared guard over private data, released when dropped.
+///
+/// Returned by [`Stack::data`] and [`get_this_data`]. Dereferences to `&T`;
+/// holding it keeps a shared borrow live, so a reentrant mutable borrow of the
+/// same object panics.
+pub struct Ref<'a, T: ?Sized> {
+    value: &'a T,
+    flag: &'a Cell<BorrowFlag>,
+}
+
+impl<T: ?Sized> std::ops::Deref for Ref<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<T: ?Sized> Drop for Ref<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.flag.set(self.flag.get() - 1);
+    }
+}
+
+/// A mutable guard over private data, released when dropped.
+///
+/// Returned by [`Stack::data_mut`] and [`get_this_data_mut`]. Dereferences to
+/// `&mut T`; holding it keeps the object's data exclusively borrowed, so any
+/// reentrant borrow of the same object panics.
+pub struct RefMut<'a, T: ?Sized> {
+    value: &'a mut T,
+    flag: &'a Cell<BorrowFlag>,
+}
+
+impl<T: ?Sized> std::ops::Deref for RefMut<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<T: ?Sized> std::ops::DerefMut for RefMut<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        self.value
+    }
+}
+
+impl<T: ?Sized> Drop for RefMut<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.flag.set(UNUSED);
+    }
+}
 
 /// Store a Rust value in a JS object's reserved slot 0.
 ///
@@ -438,6 +599,12 @@ pub unsafe fn set_private<T: 'static>(obj: *mut JSObject, data: T) {
     let ptr = Box::into_raw(boxed);
     let val = unsafe { value::from_private(ptr as *const c_void) };
     unsafe { crate::object::set_reserved_slot(obj, PRIVATE_DATA_SLOT, &val) };
+
+    // Install the borrow flag (slot 1). One flag per object, shared across the
+    // inheritance hierarchy; dropped alongside the data in `drop_private`.
+    let flag = Box::into_raw(Box::new(Cell::new(UNUSED)));
+    let flag_val = unsafe { value::from_private(flag as *const c_void) };
+    unsafe { crate::object::set_reserved_slot(obj, BORROW_FLAG_SLOT, &flag_val) };
 }
 
 /// Get the `JSClass` pointer for a `ClassDef` type, cast to `usize`.
@@ -498,14 +665,24 @@ pub unsafe fn get_private_mut<'a, T: 'static>(obj: *mut JSObject) -> Option<&'a 
 /// - Must only be called once (typically from the GC finalize callback).
 pub unsafe fn drop_private<T: 'static>(obj: *mut JSObject) {
     let val = unsafe { crate::object::get_reserved_slot(obj, PRIVATE_DATA_SLOT) };
-    if val.is_undefined() {
-        return;
+    if !val.is_undefined() {
+        let ptr = val.to_private() as *mut T;
+        if !ptr.is_null() {
+            let _ = Box::from_raw(ptr);
+            let undef = value::undefined();
+            crate::object::set_reserved_slot(obj, PRIVATE_DATA_SLOT, &undef);
+        }
     }
-    let ptr = val.to_private() as *mut T;
-    if !ptr.is_null() {
-        let _ = Box::from_raw(ptr);
-        let undef = value::undefined();
-        crate::object::set_reserved_slot(obj, PRIVATE_DATA_SLOT, &undef);
+
+    // Drop the borrow flag installed by `set_private`.
+    let flag_val = unsafe { crate::object::get_reserved_slot(obj, BORROW_FLAG_SLOT) };
+    if !flag_val.is_undefined() {
+        let flag_ptr = flag_val.to_private() as *mut Cell<BorrowFlag>;
+        if !flag_ptr.is_null() {
+            let _ = Box::from_raw(flag_ptr);
+            let undef = value::undefined();
+            crate::object::set_reserved_slot(obj, BORROW_FLAG_SLOT, &undef);
+        }
     }
 }
 
@@ -529,6 +706,12 @@ struct ClassRegistry {
     /// identical across instances) and for functions for which the relevant spec
     /// requires per-global identity. Traced like prototypes.
     shared_functions: HashMap<usize, Box<MozHeap<*mut JSObject>>>,
+    /// Per-global monotonic `u64` counters keyed by an arbitrary `usize`. Used
+    /// where a spec requires ids unique across a whole global rather than per
+    /// call site — e.g. HTML's setTimeout/setInterval ids, which must not
+    /// collide across the concurrent event loops that share one global. Plain
+    /// integers, so no GC tracing.
+    counters: HashMap<usize, u64>,
 }
 
 impl ClassRegistry {
@@ -536,7 +719,17 @@ impl ClassRegistry {
         Self {
             map: HashMap::new(),
             shared_functions: HashMap::new(),
+            counters: HashMap::new(),
         }
+    }
+
+    /// Return the counter for `key` and advance it by one (wrapping on
+    /// overflow). Counters start at 0.
+    fn bump_counter(&mut self, key: usize) -> u64 {
+        let slot = self.counters.entry(key).or_insert(0);
+        let value = *slot;
+        *slot = slot.wrapping_add(1);
+        value
     }
 
     fn register(&mut self, type_id: TypeId, proto: *mut JSObject) {
@@ -602,7 +795,30 @@ unsafe fn get_or_init_class_registry(global: *mut JSObject) -> &'static mut Clas
     let registry = Box::into_raw(Box::new(ClassRegistry::new()));
     let pv = value::from_private(registry as *const c_void);
     crate::object::set_reserved_slot(global, CLASS_REGISTRY_SLOT, &pv);
+    LIVE_REGISTRIES.with(|regs| regs.borrow_mut().push(registry));
     &mut *registry
+}
+
+thread_local! {
+    /// All live `ClassRegistry` boxes on this thread, traced by [`trace_class_registries`].
+    static LIVE_REGISTRIES: RefCell<Vec<*mut ClassRegistry>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Trace each global's class registry, rooting prototype and shared-function objects.
+/// Registered as an extra-GC-roots tracer by [`crate::gc::init`].
+///
+/// # Safety
+///
+/// `trc` must be a valid `JSTracer` provided by SpiderMonkey's GC.
+pub(crate) unsafe extern "C" fn trace_class_registries(trc: *mut JSTracer, _data: *mut c_void) {
+    LIVE_REGISTRIES.with(|regs| {
+        // `as_ptr` bypasses RefCell borrow tracking: GC tracing pauses JS execution, so a borrow
+        // held by interrupted code isn't actively used while the list is read here.
+        let regs = &*regs.as_ptr();
+        for &registry in regs {
+            (*registry).trace(trc);
+        }
+    });
 }
 
 fn register_prototype<T: 'static>(global: Object, proto: *mut JSObject) {
@@ -621,9 +837,6 @@ fn get_prototype<T: 'static>(global: Object) -> Option<*mut JSObject> {
 
 /// Starling's global class, extending `SIMPLE_GLOBAL_CLASS` with one extra
 /// reserved slot for the per-global [`ClassRegistry`].
-///
-/// The trace hook is `JS_GlobalObjectTraceHook` (required by SpiderMonkey).
-/// Registry entries are traced by the `Runtime`'s GC roots tracer instead.
 /// The finalize hook drops the registry.
 pub static STARLING_GLOBAL_CLASS: JSClass = JSClass {
     name: c"global".as_ptr(),
@@ -656,26 +869,13 @@ unsafe extern "C" fn finalize_starling_global(_gc: *mut GCContext, obj: *mut JSO
     if !val.is_undefined() {
         let ptr = val.to_private() as *mut ClassRegistry;
         if !ptr.is_null() {
+            // Unregister from the tracer's list before freeing.
+            LIVE_REGISTRIES.with(|regs| regs.borrow_mut().retain(|&r| r != ptr));
             drop(Box::from_raw(ptr));
             // Clear the slot so we don't double-free.
             let undef = value::undefined();
             crate::object::set_reserved_slot(obj, CLASS_REGISTRY_SLOT, &undef);
         }
-    }
-}
-
-/// Trace the class registry stored in a global object's reserved slot.
-///
-/// Called by the `Runtime`'s GC roots tracer to keep registered prototype
-/// `Heap` pointers up-to-date across moving GC.
-///
-/// # Safety
-///
-/// `trc` must be a valid tracer. `global` must be a live global object
-/// that was created with [`STARLING_GLOBAL_CLASS`].
-pub unsafe fn trace_class_registry_for_global(trc: *mut JSTracer, global: *mut JSObject) {
-    if let Some(registry) = get_class_registry(global) {
-        registry.trace(trc);
     }
 }
 
@@ -770,6 +970,26 @@ unsafe fn get_raw_private(obj: *mut JSObject) -> Option<*const c_void> {
         return None;
     }
     Some(ptr)
+}
+
+/// Get the per-object borrow flag from slot 1.
+///
+/// Returns `None` for objects without private data (e.g. a prototype object).
+///
+/// # Safety
+///
+/// `obj` must be a valid JS object created with at least
+/// [`MIN_CLASS_RESERVED_SLOTS`] reserved slots.
+unsafe fn get_borrow_flag<'a>(obj: *mut JSObject) -> Option<&'a Cell<BorrowFlag>> {
+    let val = unsafe { crate::object::get_reserved_slot(obj, BORROW_FLAG_SLOT) };
+    if val.is_undefined() {
+        return None;
+    }
+    let ptr = val.to_private() as *const Cell<BorrowFlag>;
+    if ptr.is_null() {
+        return None;
+    }
+    Some(&*ptr)
 }
 
 /// Inheritance-aware immutable private data access.
@@ -1174,6 +1394,56 @@ impl<T: ClassDef> ClassBuilder<T> {
 // Class registration
 // ============================================================================
 
+/// Leaked per-type spec tables.
+///
+/// SpiderMonkey requires the method/property arrays to outlive the class.
+/// They are identical for every global, so they are built and leaked once
+/// per type and reused when the class is registered on further globals.
+#[derive(Clone, Copy)]
+struct SpecTables {
+    methods: *const JSFunctionSpec,
+    static_methods: *const JSFunctionSpec,
+    properties: *const JSPropertySpec,
+    static_properties: *const JSPropertySpec,
+}
+
+thread_local! {
+    static SPEC_TABLES: RefCell<HashMap<TypeId, SpecTables>> = RefCell::new(HashMap::new());
+}
+
+fn spec_tables_for<T: ClassDef>() -> SpecTables {
+    SPEC_TABLES.with(|tables| {
+        if let Some(t) = tables.borrow().get(&TypeId::of::<T>()) {
+            return *t;
+        }
+
+        let builder = ClassBuilder::<T>::new();
+        let builder = T::register_class_methods(builder);
+        let (methods, properties, _proto_constants) = builder.finalize();
+
+        let static_builder = ClassBuilder::<T>::new();
+        let static_builder = T::register_static_methods(static_builder);
+        let (static_methods, static_properties, _static_constants) = static_builder.finalize();
+
+        let t = SpecTables {
+            methods: Box::leak(methods.into_boxed_slice()).as_ptr(),
+            static_methods: Box::leak(static_methods.into_boxed_slice()).as_ptr(),
+            properties: if properties.len() > 1 {
+                Box::leak(properties.into_boxed_slice()).as_ptr()
+            } else {
+                ptr::null()
+            },
+            static_properties: if static_properties.len() > 1 {
+                Box::leak(static_properties.into_boxed_slice()).as_ptr()
+            } else {
+                ptr::null()
+            },
+        };
+        tables.borrow_mut().insert(TypeId::of::<T>(), t);
+        t
+    })
+}
+
 /// Register a class on the global object, making it available as a constructor.
 ///
 /// This creates the class's JSClass, constructor, prototype, and methods,
@@ -1204,34 +1474,13 @@ pub unsafe fn register_class<'s, T: ClassDef>(
     // Ensure the parent class is registered before we register ourselves.
     T::ensure_parent_registered(scope, global);
 
-    // Build method and property tables
-    let builder = ClassBuilder::<T>::new();
-    let builder = T::register_class_methods(builder);
-    let (methods, properties, _proto_constants) = builder.finalize();
-
-    let static_builder = ClassBuilder::<T>::new();
-    let static_builder = T::register_static_methods(static_builder);
-    let (static_methods, static_properties, _static_constants) = static_builder.finalize();
+    // The leaked method/property tables, shared across globals.
+    let tables = spec_tables_for::<T>();
 
     // Build constructor constants
     let const_builder = ClassBuilder::<T>::new();
     let const_builder = T::register_constants(const_builder);
     let (_cm, _cp, constants) = const_builder.finalize();
-
-    // Leak the method/property arrays so they live for the duration of the program.
-    // SpiderMonkey requires these arrays to be valid for the lifetime of the class.
-    let methods_ptr = Box::leak(methods.into_boxed_slice()).as_ptr();
-    let static_methods_ptr = Box::leak(static_methods.into_boxed_slice()).as_ptr();
-    let properties_ptr = if properties.len() > 1 {
-        Box::leak(properties.into_boxed_slice()).as_ptr()
-    } else {
-        ptr::null()
-    };
-    let static_properties_ptr = if static_properties.len() > 1 {
-        Box::leak(static_properties.into_boxed_slice()).as_ptr()
-    } else {
-        ptr::null()
-    };
 
     let class: &'static JSClass = T::class();
 
@@ -1253,10 +1502,10 @@ pub unsafe fn register_class<'s, T: ClassDef>(
         class.name,
         Some(generic_constructor::<T>),
         ctor_nargs,
-        properties_ptr,
-        methods_ptr,
-        static_properties_ptr,
-        static_methods_ptr,
+        tables.properties,
+        tables.methods,
+        tables.static_properties,
+        tables.static_methods,
     )
     .expect("init_class failed");
 
@@ -1406,10 +1655,38 @@ pub unsafe extern "C" fn generic_class_trace<T: ClassDef>(trc: *mut JSTracer, ob
 // Argument extraction helpers
 // ============================================================================
 
+/// Shared core of the `get_*arg*` extractors: optionally require the
+/// argument's presence, then convert it via `FromJSVal` with the given
+/// config, throwing a `TypeError` for conversion failures.
+///
+/// # Safety
+///
+/// - `scope` must be in a valid realm.
+/// - `args` must be from a valid JSNative call.
+unsafe fn extract_arg<'s, T: FromJSVal<'s>>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    index: u32,
+    required: bool,
+    config: T::Config,
+) -> Result<T, ExnThrown> {
+    if required && index >= args.argc_ {
+        return Err(crate::error::throw_type_error(
+            scope,
+            c"Not enough arguments",
+        ));
+    }
+    // `CallArgs::get` yields `undefined` for an out-of-range index.
+    let val = crate::native::Handle::from_raw(args.get(index));
+    T::from_jsval(scope, val, config).map_err(|e| match e {
+        ConversionError::ExnPending => ExnThrown,
+        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
+    })
+}
+
 /// Extract an argument from CallArgs and convert it to the desired Rust type.
 ///
-/// Returns `Ok(value)` on success, or `Err(())` if the argument is missing
-/// or conversion fails.
+/// Throws "Not enough arguments" if the argument is missing.
 ///
 /// # Safety
 ///
@@ -1420,17 +1697,7 @@ pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
     args: &CallArgs,
     index: u32,
 ) -> Result<T, ExnThrown> {
-    if index >= args.argc_ {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"Not enough arguments",
-        ));
-    }
-    let val = crate::native::Handle::from_raw(args.get(index));
-    T::from_jsval(scope, val, ()).map_err(|e| match e {
-        ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
-    })
+    extract_arg(scope, args, index, true, ())
 }
 
 /// Extract an argument like [`get_arg`], but treat a missing argument as
@@ -1438,8 +1705,7 @@ pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
 ///
 /// Used for optional `any` parameters (typed `HandleValue`/`Value`), where a
 /// missing argument is indistinguishable from an explicit `undefined` and both
-/// are valid values. `CallArgs::get` already yields `undefined` for an
-/// out-of-range index, so the conversion is an identity for those types.
+/// are valid values.
 ///
 /// # Safety
 ///
@@ -1450,11 +1716,7 @@ pub unsafe fn get_arg_or_undefined<'s, T: FromJSVal<'s, Config = ()>>(
     args: &CallArgs,
     index: u32,
 ) -> Result<T, ExnThrown> {
-    let val = crate::native::Handle::from_raw(args.get(index));
-    T::from_jsval(scope, val, ()).map_err(|e| match e {
-        ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
-    })
+    extract_arg(scope, args, index, false, ())
 }
 
 /// Extract an integer argument with configurable conversion behavior.
@@ -1469,17 +1731,7 @@ pub unsafe fn get_int_arg<'s, T: FromJSVal<'s, Config = ConversionBehavior>>(
     index: u32,
     behavior: ConversionBehavior,
 ) -> Result<T, ExnThrown> {
-    if index >= args.argc_ {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"Not enough arguments",
-        ));
-    }
-    let val = crate::native::Handle::from_raw(args.get(index));
-    T::from_jsval(scope, val, behavior).map_err(|e| match e {
-        ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
-    })
+    extract_arg(scope, args, index, true, behavior)
 }
 
 /// Extract an argument with an explicit conversion config.
@@ -1500,17 +1752,7 @@ pub unsafe fn get_arg_with_config<'s, T: FromJSVal<'s>>(
     index: u32,
     config: T::Config,
 ) -> Result<T, ExnThrown> {
-    if index >= args.argc_ {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"Not enough arguments",
-        ));
-    }
-    let val = crate::native::Handle::from_raw(args.get(index));
-    T::from_jsval(scope, val, config).map_err(|e| match e {
-        ConversionError::ExnPending => ExnThrown,
-        ConversionError::Failure(msg) => crate::error::throw_type_error(scope, &msg),
-    })
+    extract_arg(scope, args, index, true, config)
 }
 
 /// Extract a stack newtype argument from CallArgs.
@@ -1548,7 +1790,8 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
     let obj = val.to_object();
     let concrete_tag = crate::object::get_object_class(obj) as usize;
     let target_tag = class_tag::<T::Inner>();
-    if !is_derived_from_type(concrete_tag, target_tag) {
+    // Reject builtins' prototype objects, which match the class tag but carry no private data.
+    if !is_derived_from_type(concrete_tag, target_tag) || get_raw_private(obj).is_none() {
         let msg = CString::new(format!(
             "argument {} is not an instance of {}",
             index,
@@ -1570,9 +1813,9 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
 /// - The CallArgs must be from a valid JSNative call.
 /// - The `this` object must have private data of type `T`.
 pub unsafe fn get_this_data<'a, T: ClassDef>(
-    scope: &Scope<'_>,
+    scope: &'a Scope<'_>,
     args: &CallArgs,
-) -> Result<&'a T, ExnThrown> {
+) -> Result<Ref<'a, T>, ExnThrown> {
     let this_val = args.thisv();
     if !this_val.is_object() {
         return Err(crate::error::throw_type_error(
@@ -1581,9 +1824,16 @@ pub unsafe fn get_this_data<'a, T: ClassDef>(
         ));
     }
     let obj = this_val.to_object();
+    let Some(flag) = get_borrow_flag(obj) else {
+        return Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR));
+    };
+    acquire_shared(flag);
     match get_private_or_ancestor::<T>(obj) {
-        Some(data) => Ok(data),
-        None => Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR)),
+        Some(value) => Ok(Ref { value, flag }),
+        None => {
+            flag.set(flag.get() - 1);
+            Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR))
+        }
     }
 }
 
@@ -1595,9 +1845,9 @@ pub unsafe fn get_this_data<'a, T: ClassDef>(
 ///
 /// Same as [`get_this_data`], plus no other references to the data may exist.
 pub unsafe fn get_this_data_mut<'a, T: ClassDef>(
-    scope: &Scope<'_>,
+    scope: &'a Scope<'_>,
     args: &CallArgs,
-) -> Result<&'a mut T, ExnThrown> {
+) -> Result<RefMut<'a, T>, ExnThrown> {
     let this_val = args.thisv();
     if !this_val.is_object() {
         return Err(crate::error::throw_type_error(
@@ -1606,9 +1856,16 @@ pub unsafe fn get_this_data_mut<'a, T: ClassDef>(
         ));
     }
     let obj = this_val.to_object();
+    let Some(flag) = get_borrow_flag(obj) else {
+        return Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR));
+    };
+    acquire_mut(flag);
     match get_private_or_ancestor_mut::<T>(obj) {
-        Some(data) => Ok(data),
-        None => Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR)),
+        Some(value) => Ok(RefMut { value, flag }),
+        None => {
+            flag.set(UNUSED);
+            Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR))
+        }
     }
 }
 
@@ -1660,14 +1917,26 @@ where
 
 /// Set the return value of a JSNative callback.
 ///
+/// On conversion failure the error is thrown as a pending exception and `false` is returned.
+///
 /// # Safety
 ///
 /// - `cx` and `args` must be from a valid JSNative call.
-pub unsafe fn set_return<'s, T: ToJSVal<'s>>(scope: &'s Scope<'s>, args: &CallArgs, value: &T) {
-    let val = value
-        .to_jsval(scope)
-        .expect("Failed to convert return value to JS");
-    args.rval().set(val.get());
+pub unsafe fn set_return<'s, T: ToJSVal<'s>>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    value: &T,
+) -> bool {
+    match value.to_jsval(scope) {
+        Ok(val) => {
+            args.rval().set(val.get());
+            true
+        }
+        Err(e) => {
+            e.throw(scope);
+            false
+        }
+    }
 }
 
 // ============================================================================
@@ -1865,7 +2134,8 @@ pub unsafe fn create_instance_with<'s, T: ClassDef>(
 ) -> Result<Object<'s>, ExnThrown> {
     let global = scope.global();
     let proto = match get_prototype::<T>(global) {
-        Some(p) => Object::from_raw_obj(scope, p).unwrap(),
+        // SAFETY: builtins' prototypes are always valid objects.
+        Some(p) => unsafe { Object::from_raw(scope, p) }.unwrap(),
         None => return Err(ExnThrown), // TODO: Actually throw an error here.
     };
 
@@ -1894,8 +2164,11 @@ pub fn get_or_init_shared_function<'s>(
     key: usize,
     init: impl FnOnce(&'s Scope<'_>) -> Result<crate::Function<'s>, ExnThrown>,
 ) -> Result<crate::Function<'s>, ExnThrown> {
-    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
-    if let Some(f) = registry.get_shared_function(key) {
+    // Scope the registry borrow to the lookup so nothing under `init` can cause a second borrow.
+    let cached = unsafe {
+        get_class_registry(scope.global().as_raw()).and_then(|r| r.get_shared_function(key))
+    };
+    if let Some(f) = cached {
         // SAFETY: `f` is a live JSFunction cached for this global and kept alive
         // by the registry's tracer.
         if let Some(func) = unsafe { crate::Function::from_raw(scope, f) } {
@@ -1903,8 +2176,39 @@ pub fn get_or_init_shared_function<'s>(
         }
     }
     let func = init(scope)?;
+    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
     registry.set_shared_function(key, func.as_raw());
     Ok(func)
+}
+
+/// Read-and-increment a per-global monotonic `u64` counter keyed by `key`.
+///
+/// Returns the counter's current value and advances it (wrapping on overflow);
+/// counters start at 0. The counter lives on the global's [`ClassRegistry`], so
+/// every caller on a given global draws from one sequence — use this for ids a
+/// spec requires to be unique per global rather than per call site, such as
+/// HTML's setTimeout/setInterval ids, which must not collide across the
+/// concurrent event loops that share a single global.
+///
+/// `key` is an arbitrary namespace token; pass the address of a dedicated
+/// `static` to get a process-unique key, mirroring how shared functions key on
+/// their native pointer.
+///
+/// Note: the counter is a u64 instead of a u32 because otherwise it'd be possible
+/// (though implausible) for a long-running script to wrap the counter and reuse ids,
+/// which would violate the uniqueness guarantee. We convert the id to a JS value,
+/// which can represent about 53 bits of integer precision, making wrap-around
+/// effectively impossible.
+pub fn next_global_counter(scope: &Scope<'_>, key: usize) -> u64 {
+    // The bump is a HashMap entry plus an integer add — no JS-GC-capable call
+    // in between — so briefly holding the `&mut ClassRegistry` aliases nothing.
+    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
+    let counter = registry.bump_counter(key);
+    assert!(
+        counter < crate::conversion::Number::MAX,
+        "counter for key {key} wrapped around"
+    );
+    counter
 }
 
 // ---------------------------------------------------------------------------

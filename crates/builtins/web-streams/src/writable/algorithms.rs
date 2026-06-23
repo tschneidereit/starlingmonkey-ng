@@ -3,18 +3,20 @@
 //! Standalone algorithms from <https://streams.spec.whatwg.org/>
 
 use js::error::ExnThrown;
+use js::exception::take_pending_or_undefined;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
 use js::native::Value;
 use js::prelude::{CallbackArgs, HandleValue};
 use js::value;
-use js::{Object, Promise};
+use js::Promise;
 use web_globals::signals::abort_controller::AbortController;
 
 use crate::algorithms::{
     cast_payload, dequeue_value, enqueue_value_with_size, is_non_negative_number, make_type_error,
-    reset_queue, resolve_promise_slot_undefined, resolved_undefined_promise,
+    pair_parts, pair_payload, reset_queue, resolve_promise_slot_undefined,
+    resolved_undefined_promise,
 };
 use crate::queuing::{QueueWithSizes, ValueWithSize};
 use crate::support;
@@ -93,7 +95,7 @@ fn ws_write_promise_fulfilled(
         state,
         WritableStreamState::Writable | WritableStreamState::Erroring
     ));
-    dequeue_value(scope, controller.data_mut());
+    dequeue_value(scope, &mut *controller.data_mut());
     if !writable_stream_close_queued_or_in_flight(&stream) && state == WritableStreamState::Writable
     {
         let backpressure = writable_stream_default_controller_get_backpressure(&controller);
@@ -149,12 +151,11 @@ fn abort_reaction_payload<'r>(
     stream: &WritableStream<'_>,
     abort_promise: &Promise<'_>,
 ) -> Result<HandleValue<'r>, ExnThrown> {
-    let arr = Object::new_plain(scope)?;
-    let stream_v = scope.root_value(stream.as_value());
-    let promise_v = scope.root_value(abort_promise.as_value());
-    arr.set_element(scope, 0, stream_v)?;
-    arr.set_element(scope, 1, promise_v)?;
-    Ok(scope.root_value(arr.as_value()))
+    pair_payload(
+        scope,
+        scope.root_value(stream.as_value()),
+        scope.root_value(abort_promise.as_value()),
+    )
 }
 
 /// Unpack the `[stream, abortPromise]` abort-reaction payload.
@@ -162,18 +163,11 @@ fn abort_reaction_parts<'r>(
     scope: &'r Scope<'_>,
     payload: HandleValue<'_>,
 ) -> (WritableStream<'r>, Promise<'r>) {
-    let arr = Object::from_value(scope, *payload).expect("payload is an array");
-    let stream_v = arr.get_element(scope, 0).expect("element 0");
-    let promise_v = arr.get_element(scope, 1).expect("element 1");
-    let stream = Object::from_value(scope, *stream_v)
-        .expect("stream object")
-        .cast::<WritableStream>()
-        .expect("WritableStream");
-    let promise = Object::from_value(scope, *promise_v)
-        .expect("promise object")
-        .cast::<Promise>()
-        .expect("Promise");
-    (stream, promise)
+    let (stream_v, promise_v) = pair_parts(scope, payload);
+    (
+        cast_payload::<WritableStream>(scope, stream_v),
+        cast_payload::<Promise>(scope, promise_v),
+    )
 }
 
 /// `WritableStreamFinishErroring` step 13.
@@ -226,7 +220,7 @@ pub(crate) fn abort_steps<'r>(
 /// [[ErrorSteps]]() implements the [[ErrorSteps]] contract. It performs the following steps:
 pub(crate) fn error_steps(controller: &WritableStreamDefaultController<'_>) {
     // Step 1: Perform ! `ResetQueue`(`this`).
-    reset_queue(controller.data_mut());
+    reset_queue(&mut *controller.data_mut());
 }
 
 /// <https://streams.spec.whatwg.org/#acquire-writable-stream-default-writer>
@@ -295,7 +289,7 @@ pub(crate) fn create_writable_stream<'r>(
 /// <https://streams.spec.whatwg.org/#initialize-writable-stream>
 /// InitializeWritableStream(stream) performs the following steps:
 pub(crate) fn initialize_writable_stream(stream: &WritableStream<'_>) {
-    let data = stream.data_mut();
+    let mut data = stream.data_mut();
     // Step 1: Set _stream_.`[[state]]` to "`writable`".
     data.state = WritableStreamState::Writable;
     // Step 2: Set _stream_.`[[storedError]]`, _stream_.`[[writer]]`, _stream_.`[[controller]]`,
@@ -870,7 +864,7 @@ pub(crate) fn writable_stream_mark_close_request_in_flight(stream: &WritableStre
     // Step 4: Set _stream_.`[[closeRequest]]` to undefined.
     // Move the slot between two traced fields in one borrow, with no `#[must_root]`
     // local in between.
-    let data = stream.data_mut();
+    let mut data = stream.data_mut();
     data.in_flight_close_request = data.close_request.take();
 }
 
@@ -886,7 +880,7 @@ pub(crate) fn writable_stream_mark_first_write_request_in_flight(stream: &Writab
     // Step 5: Set _stream_.`[[inFlightWriteRequest]]` to _writeRequest_.
     // Move the slot between two traced fields in one borrow, with no `#[must_root]`
     // local in between.
-    let data = stream.data_mut();
+    let mut data = stream.data_mut();
     data.in_flight_write_request = Some(data.write_requests.pop_front().unwrap());
 }
 
@@ -1209,7 +1203,7 @@ pub(crate) fn set_up_writable_stream_default_controller(
     // Step 4: Set _stream_.`[[controller]]` to _controller_.
     stream.data_mut().controller = Some(Heap::from(*controller));
     // Step 5: Perform ! `ResetQueue`(_controller_).
-    reset_queue(controller.data_mut());
+    reset_queue(&mut *controller.data_mut());
     // Step 6: Set _controller_.`[[abortController]]` to a new ``AbortController``.
     // Already done by `WritableStreamDefaultController::new`, because the field
     // needs to be initialized before that returns.
@@ -1401,7 +1395,7 @@ pub(crate) fn writable_stream_default_controller_advance_queue_if_needed(
     } else {
         // Step 10: Otherwise, perform ! `WritableStreamDefaultControllerProcessWrite`(_controller_,
         //          _value_).
-        let value = peek_queue_value(scope, controller.data());
+        let value = peek_queue_value(scope, &*controller.data());
         writable_stream_default_controller_process_write(scope, controller, value);
     }
 }
@@ -1527,7 +1521,7 @@ pub(crate) fn writable_stream_default_controller_get_chunk_size(
         //         `WritableStreamDefaultControllerErrorIfNeeded`(_controller_,
         //         _returnValue_.[[Value]]). Return 1.
         Err(_) => {
-            let value = js::exception::get_and_clear_pending(scope).unwrap();
+            let value = take_pending_or_undefined(scope);
             writable_stream_default_controller_error_if_needed(scope, controller, value);
             1.0
         }
@@ -1554,7 +1548,7 @@ pub(crate) fn writable_stream_default_controller_process_close(
     // Step 2: Perform ! `WritableStreamMarkCloseRequestInFlight`(_stream_).
     writable_stream_mark_close_request_in_flight(&stream);
     // Step 3: Perform ! `DequeueValue`(_controller_).
-    dequeue_value(scope, controller.data_mut());
+    dequeue_value(scope, &mut *controller.data_mut());
     // Step 4: Assert: _controller_.`[[queue]]` is empty.
     debug_assert!(controller.data().queue.is_empty());
     // Step 5: Let _sinkClosePromise_ be the result of performing _controller_.`[[closeAlgorithm]]`.
@@ -1640,8 +1634,8 @@ pub(crate) fn writable_stream_default_controller_write(
     // Step 2: If _enqueueResult_ is an abrupt completion, Perform !
     //         `WritableStreamDefaultControllerErrorIfNeeded`(_controller_,
     //         _enqueueResult_.[[Value]]). Return.
-    if enqueue_value_with_size(scope, controller.data_mut(), chunk, chunk_size).is_err() {
-        let value = js::exception::get_and_clear_pending(scope).unwrap();
+    if enqueue_value_with_size(scope, &mut *controller.data_mut(), chunk, chunk_size).is_err() {
+        let value = take_pending_or_undefined(scope);
         writable_stream_default_controller_error_if_needed(scope, controller, value);
         return;
     }

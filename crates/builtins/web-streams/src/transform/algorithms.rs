@@ -3,6 +3,7 @@
 //! Standalone algorithms from <https://streams.spec.whatwg.org/>
 
 use js::error::ExnThrown;
+use js::exception::take_pending_or_undefined;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
@@ -683,7 +684,7 @@ pub(crate) fn transform_stream_default_controller_enqueue(
     //         `TransformStreamErrorWritableAndUnblockWrite`(_stream_, _enqueueResult_.[[Value]]).
     //         Throw _stream_.`[[readable]]`.`[[storedError]]`.
     if readable_stream_default_controller_enqueue(scope, &readable_controller, chunk).is_err() {
-        let error = js::exception::get_and_clear_pending(scope).unwrap();
+        let error = take_pending_or_undefined(scope);
         transform_stream_error_writable_and_unblock_write(scope, &stream, error);
         let stored_error = readable.data().stored_error.get(scope);
         js::exception::set_pending(

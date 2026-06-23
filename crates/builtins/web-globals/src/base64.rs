@@ -111,10 +111,24 @@ fn base64_encode(input: &[u8]) -> String {
 
 /// WHATWG `atob`: forgiving-base64 decode.
 ///
-/// Strips ASCII whitespace (U+0009, U+000A, U+000C, U+000D, U+0020),
-/// validates the base64 alphabet, handles padding, and returns the decoded
-/// byte string as a Latin-1 string.
+/// Forgiving-base64 decodes `data` and returns the decoded byte string as a
+/// Latin-1 string (each byte maps directly to a code point in U+0000..U+00FF).
 pub(crate) fn atob(data: &str) -> Result<String, String> {
+    let bytes = forgiving_base64_decode(data)?;
+    // Convert bytes to a Latin-1 string. In UTF-8 encoding, some non-ASCII characters
+    // have multi-byte representantation, so we need to loop over the vec instead of
+    // using `String::from_utf8_unchecked`.
+    Ok(bytes.into_iter().map(|b| b as char).collect())
+}
+
+/// WHATWG [forgiving-base64 decode]: decode `data` to its byte sequence.
+///
+/// Strips ASCII whitespace (U+0009, U+000A, U+000C, U+000D, U+0020), validates
+/// the base64 alphabet, handles padding, and returns the decoded bytes, or an
+/// error message on invalid input.
+///
+/// [forgiving-base64 decode]: https://infra.spec.whatwg.org/#forgiving-base64-decode
+pub fn forgiving_base64_decode(data: &str) -> Result<Vec<u8>, String> {
     // Step 1: Remove ASCII whitespace.
     let stripped: String = data
         .chars()
@@ -169,8 +183,7 @@ pub(crate) fn atob(data: &str) -> Result<String, String> {
         i += 4;
     }
 
-    // Convert bytes to a Latin-1 string (each byte maps directly to a char).
-    Ok(output.iter().map(|&b| b as char).collect())
+    Ok(output)
 }
 
 #[cfg(test)]

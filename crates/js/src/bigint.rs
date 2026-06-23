@@ -63,6 +63,18 @@ pub fn to_bigint<'s>(
         .ok_or(ExnThrown)
 }
 
+/// Convert a `BigInt` to a signed 64-bit integer, modulo 2^64.
+pub fn to_int64(bi: Handle<*mut BigInt>) -> i64 {
+    // SAFETY: `bi` is a rooted handle to a live `BigInt`.
+    unsafe { mozjs::jsapi::JS::ToBigInt64(bi.get()) }
+}
+
+/// Convert a `BigInt` to an unsigned 64-bit integer, modulo 2^64.
+pub fn to_uint64(bi: Handle<*mut BigInt>) -> u64 {
+    // SAFETY: `bi` is a rooted handle to a live `BigInt`.
+    unsafe { mozjs::jsapi::JS::ToBigUint64(bi.get()) }
+}
+
 /// Convert a `BigInt` to a string in the given radix (2–36).
 pub fn to_string<'s>(
     scope: &'s Scope<'_>,

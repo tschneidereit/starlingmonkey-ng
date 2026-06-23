@@ -20,7 +20,6 @@ use mozjs::rust::wrappers2;
 use mozjs::rust::HandleObject;
 
 use super::error::ExnThrown;
-use crate::Object;
 
 /// Marker type for JavaScript `RegExp` objects.
 ///
@@ -51,9 +50,7 @@ impl<'s> Stack<'s, RegExp> {
         let bytes = pattern.as_ptr();
         let len = pattern.to_bytes().len();
         let obj = unsafe { wrappers2::NewRegExpObject(scope.cx_mut(), bytes, len, flags) };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Create a new `RegExp` object from a UTF-16 pattern and flags.
@@ -65,9 +62,7 @@ impl<'s> Stack<'s, RegExp> {
         let obj = unsafe {
             wrappers2::NewUCRegExpObject(scope.cx_mut(), chars.as_ptr(), chars.len(), flags)
         };
-        NonNull::new(obj)
-            .map(|nn| unsafe { Self::from_handle_unchecked(scope.root_object(nn)) })
-            .ok_or(ExnThrown)
+        unsafe { Self::from_mozjs_rval(scope, obj) }
     }
 
     /// Check whether an object is a `RegExp`.
@@ -146,12 +141,4 @@ impl<'s> Stack<'s, RegExp> {
     }
 }
 
-impl<'s> std::ops::Deref for Stack<'s, RegExp> {
-    type Target = Object<'s>;
-
-    fn deref(&self) -> &Object<'s> {
-        // SAFETY: Stack<RegExp> and Stack<Object> are both repr(transparent)
-        // over Handle<'s, *mut JSObject>.
-        unsafe { &*(self as *const Stack<'s, RegExp> as *const Object<'s>) }
-    }
-}
+crate::gc::handle::deref_to_object!(RegExp);

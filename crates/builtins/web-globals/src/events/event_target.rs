@@ -128,7 +128,12 @@ impl EventTarget {
         // Step 2: If `this`'s `event listener list` `contains` an `event listener` whose `type`
         //         is _type_, `callback` is _callback_, and `capture` is _capture_, then `remove an
         //         event listener` with `this` and that `event listener`.
-        algorithms::remove_an_event_listener(self.data_mut(), &event_type, &callback, capture);
+        algorithms::remove_an_event_listener(
+            &mut *self.data_mut(),
+            &event_type,
+            &callback,
+            capture,
+        );
     }
 
     /// <https://dom.spec.whatwg.org/#dom-eventtarget-dispatchevent>
@@ -140,14 +145,16 @@ impl EventTarget {
     ) -> Result<bool, DOMExceptionError> {
         // Step 1: If _event_'s `dispatch flag` is set, or if its `initialized flag` is not set,
         //         then `throw` an "``InvalidStateError``" ``DOMException``.
-        let event_data = event.data();
-        if event_data.dispatch_flag || !event_data.initialized_flag {
-            return Err(DOMExceptionError::new(
-                "InvalidStateError",
-                "The event is already being dispatched or has not been initialized",
-            ));
+        // Scope the borrow so its guard drops before the `data_mut()` below.
+        {
+            let event_data = event.data();
+            if event_data.dispatch_flag || !event_data.initialized_flag {
+                return Err(DOMExceptionError::new(
+                    "InvalidStateError",
+                    "The event is already being dispatched or has not been initialized",
+                ));
+            }
         }
-        let _ = event_data;
 
         // Step 2: Initialize _event_'s ``isTrusted`` attribute to false.
         event.data_mut().is_trusted = false;

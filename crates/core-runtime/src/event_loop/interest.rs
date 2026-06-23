@@ -4,59 +4,111 @@
 //!
 //! An [`InterestTracker`] counts external "keep-alive" requests — things
 //! that should prevent the event loop from exiting even when no tasks are
-//! queued. Builtins like `fetch` call [`acquire`](InterestTracker::acquire)
-//! when they start an operation and [`release`](InterestTracker::release)
-//! when it finishes.
+//! queued. Builtins acquire an [`InterestHandle`] when they start an
+//! operation; dropping the handle releases the interest.
 //!
-//! The event loop is considered alive when **either** the task queue has
-//! pending work **or** the interest count is positive.
+//! The handle owns a reference to the acquiring loop's counter, so the
+//! release always lands on the right loop no matter where the handle is
+//! dropped. That matters in cases where multiple incoming events are handled with multiple event
+//! loops, but sharing the same global object: a promise reaction holding a handle can run during
+//! another event loop's turn, and a release routed through "the active loop" would decrement that
+//! other loop's counter, hanging the acquiring loop and underflowing the active one.
+//!
+//! The event loop is considered alive when either the task queue has
+//! pending work or the interest count is positive.
 
-/// Tracks external keep-alive interest in the event loop.
+use std::cell::Cell;
+use std::rc::Rc;
+
+use event_listener::Event;
+
+/// State shared between a loop's [`InterestTracker`] and its issued
+/// [`InterestHandle`]s.
+struct InterestState {
+    count: Cell<u32>,
+    /// The owning loop's driver notification: a release may happen while the
+    /// owning loop is parked in its await branch (the handle dropped during
+    /// another loop's turn), and must wake it so it can observe `Done`.
+    notify: Rc<Event>,
+}
+
+/// Tracks external keep-alive interest in one event loop.
 ///
-/// The counter starts at zero. `acquire` increments it and `release`
-/// decrements it. The event loop should keep running as long as
-/// `has_interest()` returns true (or there are pending tasks).
-///
-/// # Panics
-///
-/// `release` panics if the counter would underflow,
-/// which indicates a mismatched acquire/release pair.
-#[derive(Debug, Default)]
+/// The counter starts at zero; [`acquire_handle`](Self::acquire_handle)
+/// increments it and returns a handle whose drop decrements it. The event
+/// loop should keep running as long as `has_interest()` returns true (or
+/// there are pending tasks).
 pub struct InterestTracker {
-    count: u32,
+    state: Rc<InterestState>,
 }
 
 impl InterestTracker {
-    /// Create a new tracker with zero interest.
-    pub fn new() -> Self {
-        Self { count: 0 }
+    /// Create a tracker with zero interest. `notify` is the owning loop's
+    /// driver notification, woken on each release.
+    pub fn new(notify: Rc<Event>) -> Self {
+        Self {
+            state: Rc::new(InterestState {
+                count: Cell::new(0),
+                notify,
+            }),
+        }
     }
 
-    /// Register interest — the event loop should stay alive.
-    pub fn acquire(&mut self) {
-        self.count = self.count.checked_add(1).expect("interest count overflow");
-    }
-
-    /// Release interest previously registered with [`acquire`](Self::acquire).
-    ///
-    /// # Panics
-    ///
-    /// Panics if no matching `acquire` was called (counter would underflow).
-    pub fn release(&mut self) {
-        self.count = self
+    /// Register interest — the owning event loop stays alive until the
+    /// returned handle is dropped.
+    pub fn acquire_handle(&self) -> InterestHandle {
+        let count = self.state.count.get();
+        self.state
             .count
-            .checked_sub(1)
-            .expect("InterestTracker::release called without matching acquire");
+            .set(count.checked_add(1).expect("interest count overflow"));
+        InterestHandle {
+            state: Rc::clone(&self.state),
+        }
     }
 
     /// Returns `true` if at least one interest is held.
     pub fn has_interest(&self) -> bool {
-        self.count > 0
+        self.state.count.get() > 0
     }
 
     /// Returns the current interest count.
     pub fn count(&self) -> u32 {
-        self.count
+        self.state.count.get()
+    }
+}
+
+/// A keep-alive on the event loop it was acquired from. Dropping the handle
+/// releases the interest on that loop, regardless of which loop (if any)
+/// is active at the time, and wakes the loop's driver.
+pub struct InterestHandle {
+    state: Rc<InterestState>,
+}
+
+impl InterestHandle {
+    /// Release the interest now. Equivalent to dropping the handle; spelled
+    /// out for call sites where the release is the point.
+    pub fn release(self) {}
+}
+
+impl Drop for InterestHandle {
+    fn drop(&mut self) {
+        let count = self.state.count.get();
+        self.state.count.set(
+            count
+                .checked_sub(1)
+                .expect("InterestHandle outlived its tracker's count"),
+        );
+        // Wake the owning loop's driver — interest may have dropped to zero
+        // while it was parked.
+        self.state.notify.notify(1);
+    }
+}
+
+impl std::fmt::Debug for InterestTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InterestTracker")
+            .field("count", &self.count())
+            .finish()
     }
 }
 
@@ -64,42 +116,46 @@ impl InterestTracker {
 mod tests {
     use super::*;
 
+    fn tracker() -> InterestTracker {
+        InterestTracker::new(Rc::new(Event::new()))
+    }
+
     #[test]
     fn starts_at_zero() {
-        let tracker = InterestTracker::new();
+        let tracker = tracker();
         assert!(!tracker.has_interest());
         assert_eq!(tracker.count(), 0);
     }
 
     #[test]
     fn acquire_and_release() {
-        let mut tracker = InterestTracker::new();
-        tracker.acquire();
+        let tracker = tracker();
+        let first = tracker.acquire_handle();
         assert!(tracker.has_interest());
         assert_eq!(tracker.count(), 1);
 
-        tracker.acquire();
+        let second = tracker.acquire_handle();
         assert_eq!(tracker.count(), 2);
 
-        tracker.release();
+        first.release();
         assert_eq!(tracker.count(), 1);
         assert!(tracker.has_interest());
 
-        tracker.release();
+        drop(second);
         assert_eq!(tracker.count(), 0);
         assert!(!tracker.has_interest());
     }
 
     #[test]
-    #[should_panic(expected = "without matching acquire")]
-    fn release_underflow_panics() {
-        let mut tracker = InterestTracker::new();
-        tracker.release();
-    }
-
-    #[test]
-    fn default_is_zero() {
-        let tracker = InterestTracker::default();
-        assert!(!tracker.has_interest());
+    fn release_targets_its_own_tracker() {
+        // A handle dropped while another tracker is "current" still decrements
+        // its own tracker — the serve-mode cross-request case.
+        let a = tracker();
+        let b = tracker();
+        let handle_a = a.acquire_handle();
+        let _handle_b = b.acquire_handle();
+        drop(handle_a);
+        assert_eq!(a.count(), 0);
+        assert_eq!(b.count(), 1);
     }
 }

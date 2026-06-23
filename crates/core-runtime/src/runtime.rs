@@ -4,7 +4,6 @@ use std::{
     cell::{RefCell, UnsafeCell},
     env,
     ffi::c_void,
-    path::Path,
     process,
     ptr::NonNull,
     rc::Rc,
@@ -44,12 +43,19 @@ thread_local! {
 /// functions and constants on every global without creating a dependency
 /// from `core-runtime` to the builtins crate.
 ///
-/// Must be called before `Runtime::init()` to take effect on the default global.
+/// Must be called before `Runtime::init()` to take effect on the default
+/// global. Registration is idempotent and applies to all future runtimes and global objects.
 pub fn register_global_initializer(init: GlobalInitFn) {
-    GLOBAL_INITIALIZERS.with(|inits| inits.borrow_mut().push(init));
+    GLOBAL_INITIALIZERS.with(|inits| {
+        let mut inits = inits.borrow_mut();
+        if !inits.contains(&init) {
+            inits.push(init);
+        }
+    });
 }
 
-/// Clear all registered global initializers (used between tests).
+/// Clear all registered global initializers (used between tests that need
+/// disjoint initializer sets).
 pub fn clear_global_initializers() {
     GLOBAL_INITIALIZERS.with(|inits| inits.borrow_mut().clear());
 }
@@ -81,6 +87,20 @@ static ENGINE: OnceLock<Mutex<EngineState>> = OnceLock::new();
 
 unsafe extern "C" {
     fn atexit(func: unsafe extern "C" fn()) -> std::os::raw::c_int;
+    fn _exit(status: std::os::raw::c_int) -> !;
+}
+
+/// Exit the process with `code` without running C `atexit` handlers or C++
+/// static destructors.
+///
+/// Used on error paths that fire while a [`Runtime`] is still alive, avoiding
+/// failing asserts inside of SpiderMonkey.
+fn exit_without_cleanup(code: std::os::raw::c_int) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `_exit` is always safe to call; it terminates the process.
+    unsafe { _exit(code) }
 }
 
 /// `atexit` callback: takes the `JSEngine` out of the global and drops it,
@@ -90,7 +110,15 @@ unsafe extern "C" fn shutdown_engine() {
     if let Some(mutex) = ENGINE.get() {
         // If the lock is poisoned we're already in a bad state; just skip.
         if let Ok(mut guard) = mutex.lock() {
-            drop(guard.0.take());
+            // A `Runtime` can still be alive here, e.g because `process::exit` was called from an
+            // error path. Its `MozJSRuntime` holds an engine handle, and `JSEngine::drop` asserts
+            // the handle count is zero, so dropping anyway would trap.
+            // To avoid that, we leave the
+            // engine in the static instead and skip `JS_ShutDown`:
+            // We're about to exit anyway, so process cleanup will handle it.
+            if guard.0.as_ref().is_some_and(|engine| engine.can_shutdown()) {
+                drop(guard.0.take());
+            }
         }
     }
 }
@@ -214,33 +242,23 @@ impl Runtime {
         // objects are properly traced.
         module::init_module_gc_tracer(rt.mozjs_rt_mut().cx());
 
-        // Determine base directory for import resolution.
-        let base_path = if config.eval_script.is_some() {
-            // For eval scripts, resolve relative to cwd.
-            std::env::current_dir().unwrap()
-        } else {
-            let p = Path::new(&config.script_path);
-            let abs = if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(p)
-            };
-            abs.parent().map(|p| p.to_path_buf()).unwrap()
-        };
         unsafe {
-            module::init_module_loader(rt.rt(), base_path);
+            module::init_module_loader(rt.rt(), config.base_path());
         }
 
         // Create the default global and register builtins.
-        // `new_global` sets `default_global` before registering classes
-        // so the GC trace callback can trace the ClassRegistry during
-        // class registration (where compacting GC may fire).
         drop(rt.new_global());
         rt.run_initializer_script(config);
 
         rt
     }
 
+    /// Create a new global object (and realm), install all registered global initializers on it,
+    /// and return a scope entered into it.
+    ///
+    /// The first global created becomes the runtime's default global (see
+    /// [`default_global`](Self::default_global)), later ones are additional realms and leave the
+    /// default untouched.
     pub fn new_global(&self) -> RootScope<'_, js::gc::scope::EnteredRealm> {
         let cx = self.mozjs_rt_mut().cx();
         let scope = RootScope::new_global(
@@ -249,24 +267,23 @@ impl Runtime {
             RealmOptions::default(),
         );
 
-        // Store the global in `default_global` before any class registration.
-        // Class registration allocates JS objects, which can trigger compacting
-        // GC (especially under GC zeal mode 14). The GC trace callback needs
-        // `default_global` to be set so it can find and trace the ClassRegistry's
-        // Heap entries — otherwise compaction moves prototype objects without
-        // updating the Heap pointers, leaving them stale.
-        self.default_global.set(scope.global());
+        if !self.default_global.is_initialized() {
+            self.default_global.set(scope.global());
+        }
 
         unsafe {
             event_loop::timer::install_timer_globals(&scope, scope.global());
         }
 
         // Call any registered global initializers (e.g., web-globals, WPT builtins).
-        GLOBAL_INITIALIZERS.with(|inits| {
-            for init in inits.borrow().iter() {
-                init(&scope, scope.global());
-            }
-        });
+        // Snapshot the list first: an initializer (or JS it runs) may itself
+        // register further initializers, and calling out under the borrow
+        // would panic. Initializers registered mid-call apply to subsequent
+        // globals only.
+        let inits = GLOBAL_INITIALIZERS.with(|inits| inits.borrow().clone());
+        for init in inits {
+            init(&scope, scope.global());
+        }
 
         scope
     }
@@ -281,19 +298,48 @@ impl Runtime {
     }
 
     fn run_initializer_script(&self, config: &RuntimeConfig) {
-        let scope = self.default_global();
         // Run initializer script if provided (always as legacy script).
-        if let Some(ref init_path) = config.initializer_script_path {
-            let init_source = std::fs::read_to_string(init_path).unwrap_or_else(|e| {
-                eprintln!("Error reading initializer script '{}': {}", init_path, e);
-                process::exit(1);
-            });
-            let filename = init_path.as_str();
-            if js::compile::evaluate_with_filename(&scope, &init_source, filename, 1).is_err() {
-                eprintln!("Error evaluating initializer script '{init_path}':");
-                unsafe { report_pending_exception(&scope) };
-                process::exit(1);
+        let Some(ref init_path) = config.initializer_script_path else {
+            return;
+        };
+        let scope = self.default_global();
+        let init_source = std::fs::read_to_string(init_path).unwrap_or_else(|e| {
+            eprintln!("Error reading initializer script '{}': {}", init_path, e);
+            exit_without_cleanup(1);
+        });
+        let filename = init_path.as_str();
+
+        // The initializer runs with its own event loop active, so scheduling APIs such as
+        // `setTimeout` work during initialization. Its microtasks drain before the content script
+        // runs.
+        let invocation = crate::invocation::InvocationState::new();
+        // SAFETY: `invocation` stays at this address until the guard drops at
+        // the end of this function.
+        let _guard = unsafe { crate::invocation::InvocationGuard::new(self, &invocation) };
+        let failed = event_loop::with_event_loop(invocation.event_loop(), |_| {
+            let failed =
+                js::compile::evaluate_with_filename(&scope, &init_source, filename, 1).is_err();
+            if !failed {
+                event_loop::run_microtasks(&scope);
             }
+            failed
+        });
+        if failed {
+            eprintln!("Error evaluating initializer script '{init_path}':");
+            unsafe { report_pending_exception(&scope) };
+            exit_without_cleanup(1);
+        }
+
+        // Nothing drives this loop after initialization: leftover async work
+        // (a live timer, an in-flight promise-backed operation) would be
+        // silently dropped, so make it a hard error instead.
+        if invocation.event_loop().is_alive() {
+            eprintln!(
+                "Error: initializer script '{init_path}' left asynchronous work \
+                 (timers or pending operations) behind. Initializer scripts must \
+                 complete synchronously"
+            );
+            exit_without_cleanup(1);
         }
     }
 
@@ -363,10 +409,6 @@ impl Drop for Runtime {
         // GC zeal — the module tracer must still be registered.
         module::clear_module_state();
 
-        // Clear global initializers so they don't accumulate across
-        // multiple Runtime instances (e.g. in test suites).
-        clear_global_initializers();
-
         // Remove GC tracers (module registry is empty, so the tracer
         // is a no-op even if called during barrier processing).
         // The class registry is owned by the global object and cleaned
@@ -380,18 +422,15 @@ impl Drop for Runtime {
             );
         }
         module::remove_module_gc_tracer(self.mozjs_rt().cx_no_gc());
-        js::gc::shutdown();
+        js::gc::shutdown(self.mozjs_rt().cx_no_gc());
     }
 }
 
-/// GC trace callback for this `Runtime`'s `default_global` Heap and
-/// the per-global class registry.
+/// GC trace callback for this `Runtime`'s `default_global` Heap and the
+/// event loops of all registered invocations.
 ///
 /// `data` is a raw pointer to the `Runtime` (passed via
-/// `add_extra_gc_roots_tracer`). SpiderMonkey calls this during GC so
-/// that the stored `Heap<Object>` is properly traced and updated,
-/// and the class registry's prototype Heaps are kept in sync with
-/// compacting GC.
+/// `add_extra_gc_roots_tracer`).
 ///
 /// # Safety
 ///
@@ -401,11 +440,6 @@ impl Drop for Runtime {
 unsafe extern "C" fn trace_runtime_cb(trc: *mut JSTracer, data: *mut c_void) {
     let rt = &*(data as *const Runtime);
     rt.default_global.trace(trc);
-    // Trace the per-global class registry stored in the global's reserved slot.
-    let global = rt.default_global.as_ptr();
-    if !global.is_null() {
-        js::class::trace_class_registry_for_global(trc, global);
-    }
     // Trace all event loops across registered invocations.
     //
     // Use `as_ptr()` to bypass `RefCell` borrow tracking. GC tracing runs

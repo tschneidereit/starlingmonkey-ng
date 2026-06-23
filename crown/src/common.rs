@@ -2,17 +2,35 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use rustc_errors::{Diag, DiagDecorator};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_infer::traits::{EvaluationResult, Obligation, ObligationCause};
-use rustc_lint::LateContext;
+use rustc_lint::{LateContext, Lint, LintContext};
 use rustc_middle::ty::{self, GenericArg, TraitRef, Ty, TyCtxt, TypeVisitableExt};
 use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::symbol::Symbol;
 use rustc_span::{Span, DUMMY_SP};
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt as _;
 use rustc_type_ir::Upcast as _;
+
+/// Emit a lint whose diagnostic is built by a closure.
+///
+/// rustc dropped the closure-based `LintContext::lint` in favour of
+/// `opt_span_lint`, which takes a value implementing the `Diagnostic` trait.
+/// This restores the ergonomic closure form the lint passes were written
+/// against by wrapping the closure in [`DiagDecorator`]. As before, the span is
+/// set inside the closure via `Diag::span`, so no span is passed here.
+pub trait LateContextExt {
+    fn lint(&self, lint: &'static Lint, decorate: impl FnOnce(&mut Diag<'_, ()>));
+}
+
+impl<'tcx> LateContextExt for LateContext<'tcx> {
+    fn lint(&self, lint: &'static Lint, decorate: impl FnOnce(&mut Diag<'_, ()>)) {
+        self.opt_span_lint(lint, None::<Span>, DiagDecorator(decorate));
+    }
+}
 
 /// check if a DefId's path matches the given absolute type path
 /// usage e.g. with

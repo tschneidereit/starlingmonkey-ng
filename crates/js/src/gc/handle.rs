@@ -122,12 +122,81 @@ impl<'s, T: JSType> Stack<'s, T> {
     ///
     /// `ptr` must point to a JS object of type `T` (or a subtype).
     pub unsafe fn from_raw(scope: &'s Scope<'_>, ptr: *mut JSObject) -> Option<Self> {
-        NonNull::new(ptr).map(|nn| Stack {
-            handle: scope.root_object(nn),
-            _marker: PhantomData,
+        NonNull::new(ptr).map(|nn| {
+            debug_assert!(
+                Self::is_instance(ptr),
+                "raw pointer {:p} is not a {}",
+                ptr,
+                T::JS_NAME
+            );
+            Stack {
+                handle: scope.root_object(nn),
+                _marker: PhantomData,
+            }
         })
     }
+
+    /// Root a raw pointer in the given scope, mapping null to `ExnThrown`.
+    ///
+    /// JSAPI creation functions return null with an exception pending, so
+    /// this is the standard wrapper for their results.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be null or point to a JS object of type `T` (or a
+    /// subtype).
+    pub(crate) unsafe fn from_mozjs_rval(
+        scope: &'s Scope<'_>,
+        ptr: *mut JSObject,
+    ) -> Result<Self, crate::error::ExnThrown> {
+        Self::from_raw(scope, ptr).ok_or(crate::error::ExnThrown)
+    }
 }
+
+/// Implements `Deref<Target = Object<'s>>` for a builtin marker's stack
+/// handle, making all property-access methods available on it.
+///
+/// Sound because every `Stack<'s, T>` is `repr(transparent)` over
+/// `Handle<'s, *mut JSObject>`, so the layouts are identical.
+macro_rules! deref_to_object {
+    ($marker:ty) => {
+        impl<'s> std::ops::Deref for $crate::gc::handle::Stack<'s, $marker> {
+            type Target = $crate::Object<'s>;
+
+            fn deref(&self) -> &$crate::Object<'s> {
+                // SAFETY: both are repr(transparent) over the same handle.
+                unsafe { &*(self as *const Self as *const $crate::Object<'s>) }
+            }
+        }
+    };
+}
+pub(crate) use deref_to_object;
+
+/// Implements `FromJSVal` for a builtin marker's stack handle via a
+/// type-checked [`cast`](Stack::cast) from `Object`, with the given
+/// wrong-type message.
+macro_rules! from_jsval_via_cast {
+    ($marker:ty, $err:literal) => {
+        impl<'s> $crate::conversion::FromJSVal<'s> for $crate::gc::handle::Stack<'s, $marker> {
+            type Config = ();
+
+            fn from_jsval(
+                scope: &'s $crate::gc::scope::Scope<'s>,
+                val: mozjs::gc::HandleValue<'s>,
+                _option: Self::Config,
+            ) -> Result<Self, $crate::conversion::ConversionError> {
+                $crate::Object::from_value(scope, *val)?
+                    .cast::<Self>()
+                    .map_err(|_| {
+                        $crate::conversion::ConversionError::Failure(std::borrow::Cow::Borrowed(
+                            $err,
+                        ))
+                    })
+            }
+        }
+    };
+}
+pub(crate) use from_jsval_via_cast;
 
 impl<'s, T: JSType> std::fmt::Debug for Stack<'s, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -141,7 +210,7 @@ impl<'s, T: JSType> std::fmt::Debug for Stack<'s, T> {
 // ToJSValConvertible: allows returning Stack newtypes from methods/getters.
 impl<'s, T: JSType> ToJSVal<'s> for Stack<'s, T> {
     #[inline]
-    fn to_jsval(&self, scope: &Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
         Ok(scope.root_value(unsafe { crate::value::from_object(self.as_raw()) }))
     }
 }

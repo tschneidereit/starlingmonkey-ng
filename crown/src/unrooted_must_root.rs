@@ -3,13 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use rustc_hir::{self as hir, intravisit as visit, AmbigArg, ExprKind};
-use rustc_lint::{LateContext, LateLintPass, Lint, LintContext, LintPass, LintStore};
+use rustc_lint::{LateContext, LateLintPass, Lint, LintPass, LintStore};
 use rustc_middle::ty;
 use rustc_session::declare_tool_lint;
 use rustc_span::def_id::{DefId, LocalDefId};
 use rustc_span::symbol::{sym, Symbol};
 
-use crate::common::{in_derive_expn, match_def_path};
+use crate::common::{in_derive_expn, match_def_path, LateContextExt};
 use crate::symbols;
 
 declare_tool_lint! {
@@ -75,12 +75,16 @@ fn associated_type_has_attr<'tcx>(
                     &[sym.crown, sym.unrooted_must_root_lint, attr],
                 );
             },
-            ty::Alias(
-                ty::AliasTyKind::Projection | ty::AliasTyKind::Inherent | ty::AliasTyKind::Free,
-                ty,
-            ) => {
+            ty::Alias(alias)
+                if matches!(
+                    alias.kind,
+                    ty::AliasTyKind::Projection { .. }
+                        | ty::AliasTyKind::Inherent { .. }
+                        | ty::AliasTyKind::Free { .. }
+                ) =>
+            {
                 return cx.tcx.has_attrs_with_path(
-                    ty.def_id,
+                    alias.kind.def_id(),
                     &[sym.crown, sym.unrooted_must_root_lint, attr],
                 )
             },
@@ -131,12 +135,16 @@ fn is_unrooted_ty<'tcx>(
                     let inner = substs.type_at(0);
                     match inner.kind() {
                         ty::Adt(did, _) => !has_attr(did.did(), sym.allow_unrooted_in_rc),
-                        ty::Alias(
-                            ty::AliasTyKind::Projection
-                            | ty::AliasTyKind::Inherent
-                            | ty::AliasTyKind::Free,
-                            ty,
-                        ) => !has_attr(ty.def_id, sym.allow_unrooted_in_rc),
+                        ty::Alias(alias)
+                            if matches!(
+                                alias.kind,
+                                ty::AliasTyKind::Projection { .. }
+                                    | ty::AliasTyKind::Inherent { .. }
+                                    | ty::AliasTyKind::Free { .. }
+                            ) =>
+                        {
+                            !has_attr(alias.kind.def_id(), sym.allow_unrooted_in_rc)
+                        },
                         _ => true,
                     }
                 } else if match_def_path(cx, did.did(), &[sym::core, sym.cell, sym.Ref])
@@ -233,22 +241,25 @@ fn is_unrooted_ty<'tcx>(
                 false
             },
             ty::FnDef(..) | ty::FnPtr(..) => false,
-            ty::Alias(
-                kind @ ty::AliasTyKind::Projection
-                | kind @ ty::AliasTyKind::Inherent
-                | kind @ ty::AliasTyKind::Free,
-                ty,
-            ) => {
-                if has_attr(ty.def_id, sym.must_root) {
+            ty::Alias(alias)
+                if matches!(
+                    alias.kind,
+                    ty::AliasTyKind::Projection { .. }
+                        | ty::AliasTyKind::Inherent { .. }
+                        | ty::AliasTyKind::Free { .. }
+                ) =>
+            {
+                let def_id = alias.kind.def_id();
+                if has_attr(def_id, sym.must_root) {
                     ret = true;
                     false
-                } else if has_attr(ty.def_id, sym.allow_unrooted_interior) {
+                } else if has_attr(def_id, sym.allow_unrooted_interior) {
                     false
                 } else {
                     // If this is a projection (i.e. Self::FOO), recursing will
                     // make us consider Self, which is overly conservative for
                     // this analysys.
-                    *kind != ty::AliasTyKind::Projection
+                    !matches!(alias.kind, ty::AliasTyKind::Projection { .. })
                 }
             },
             _ => true,

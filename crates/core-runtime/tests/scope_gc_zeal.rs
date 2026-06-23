@@ -348,6 +348,23 @@ fn test_scope_gc_zeal() {
             assert!(!arr.as_raw().is_null());
             assert!(!map.as_raw().is_null());
 
+            // Array::with_contents roots its value copies: the array
+            // allocation compacts (zeal 14), and the nursery-fresh string
+            // value must be read from the traced buffer, not a stale copy.
+            {
+                let s = js::JSString::from_str(&inner, "compact_contents").unwrap();
+                let sv = inner.root_value(s.as_value());
+                let iv = inner.root_value(value::from_i32(7));
+                let arr = Array::with_contents(&inner, &[sv, iv]).unwrap();
+                assert_eq!(arr.length(&inner).unwrap(), 2);
+                let got = arr.get_element(&inner, 0).unwrap();
+                let got_str = js::JSString::from_handle(
+                    inner.root_string(std::ptr::NonNull::new(got.to_string()).unwrap()),
+                );
+                assert_eq!(got_str.to_utf8(&inner).unwrap(), "compact_contents");
+                assert_eq!(arr.get_element(&inner, 1).unwrap().to_int32(), 7);
+            }
+
             reset_zeal(&inner);
         }
 

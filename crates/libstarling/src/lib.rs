@@ -60,13 +60,13 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
     };
 
     // Register `invocation` for GC tracing now that it has reached its final,
-    // stable location (it is not moved again before `unregister` below). `setup`
-    // hands it back unregistered precisely because moving it here would have
-    // invalidated any earlier registration.
+    // stable location. `setup` hands it back unregistered precisely because
+    // moving it here would have invalidated any earlier registration. The guard
+    // unregisters on every exit, including this future being dropped.
     //
-    // SAFETY: `invocation` lives at this address until `unregister_invocation`
-    // below, so the tracer never dereferences a freed or moved-from slot.
-    unsafe { runtime.register_invocation(&invocation) };
+    // SAFETY: `invocation` lives in this frame, declared before the guard, so
+    // it outlives it at a stable address.
+    let _invocation_guard = unsafe { invocation::InvocationGuard::new(&runtime, &invocation) };
 
     // Enter the default global's realm for the lifetime of the event loop.
     // Tasks running inside `run_to_completion` (timers, promise reactions,
@@ -88,7 +88,6 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
     }
 
     drop(scope);
-    runtime.unregister_invocation(&invocation);
     Ok(())
 }
 
@@ -105,13 +104,13 @@ fn drive_event_loop_native(
         .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
 
     // Register `invocation` for GC tracing now that it has reached its final,
-    // stable location (it is not moved again before `unregister` below). `setup`
-    // hands it back unregistered precisely because moving it here would have
-    // invalidated any earlier registration.
+    // stable location. `setup` hands it back unregistered precisely because
+    // moving it here would have invalidated any earlier registration. The guard
+    // unregisters on every exit.
     //
-    // SAFETY: `invocation` lives at this address until `unregister_invocation`
-    // below, so the tracer never dereferences a freed or moved-from slot.
-    unsafe { runtime.register_invocation(&invocation) };
+    // SAFETY: `invocation` lives in this frame, declared before the guard, so
+    // it outlives it at a stable address.
+    let _invocation_guard = unsafe { invocation::InvocationGuard::new(&runtime, &invocation) };
 
     // Enter the default global's realm for the lifetime of the event loop.
     // Tasks running inside `run_to_completion` (timers, promise reactions,
@@ -128,6 +127,5 @@ fn drive_event_loop_native(
     });
 
     drop(scope);
-    runtime.unregister_invocation(&invocation);
     Ok(())
 }

@@ -150,6 +150,72 @@ impl Default for InvocationRegistry {
     }
 }
 
+/// Keeps an [`InvocationState`] registered for GC tracing in a [`Runtime`],
+/// unregistering when dropped.
+///
+/// [`Runtime`]: crate::runtime::Runtime
+pub struct InvocationGuard<'rt> {
+    runtime: &'rt crate::runtime::Runtime,
+    state: *const InvocationState,
+}
+
+impl<'rt> InvocationGuard<'rt> {
+    /// Register `state` for GC tracing until the guard drops.
+    ///
+    /// # Safety
+    ///
+    /// `state` must stay alive and at a stable address for the guard's whole
+    /// lifetime. In an async fn, keep the guard and the state in the same
+    /// frame and declare the guard after the state, so the guard drops
+    /// first.
+    pub unsafe fn new(runtime: &'rt crate::runtime::Runtime, state: &InvocationState) -> Self {
+        runtime.register_invocation(state);
+        Self {
+            runtime,
+            state: state as *const _,
+        }
+    }
+}
+
+impl Drop for InvocationGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: per `new`'s contract, the state outlives the guard.
+        self.runtime.unregister_invocation(unsafe { &*self.state });
+    }
+}
+
+/// An [`InvocationState`] owned together with its GC registration: the state is
+/// boxed (its address is stable no matter where the handle moves) and stays
+/// registered until the handle drops. Unlike [`InvocationGuard`], this is fully
+/// safe and freely movable, e.g. into a spawned task that keeps driving the
+/// loop after the request handler returned (a streamed response body's pump).
+pub struct OwnedInvocation {
+    runtime: std::rc::Rc<crate::runtime::Runtime>,
+    state: Box<InvocationState>,
+}
+
+impl OwnedInvocation {
+    /// Box `state` and register it for GC tracing until the handle drops.
+    pub fn new(runtime: std::rc::Rc<crate::runtime::Runtime>, state: InvocationState) -> Self {
+        let state = Box::new(state);
+        // SAFETY: the boxed state's heap address is stable for the handle's
+        // lifetime; `Drop` unregisters before the box is freed.
+        unsafe { runtime.register_invocation(&state) };
+        Self { runtime, state }
+    }
+
+    /// The invocation state (e.g. to drive its event loop).
+    pub fn state_mut(&mut self) -> &mut InvocationState {
+        &mut self.state
+    }
+}
+
+impl Drop for OwnedInvocation {
+    fn drop(&mut self) {
+        self.runtime.unregister_invocation(&self.state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

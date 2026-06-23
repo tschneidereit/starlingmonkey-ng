@@ -304,7 +304,7 @@ pub(crate) fn dispatch(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarge
 
     // Step 10: Unset _event_'s `dispatch flag`, `stop propagation flag`, and `stop immediate
     //          propagation flag`.
-    let data = event.data_mut();
+    let mut data = event.data_mut();
     data.dispatch_flag = false;
     data.stop_propagation_flag = false;
     data.stop_immediate_propagation_flag = false;
@@ -313,7 +313,7 @@ pub(crate) fn dispatch(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarge
     // Step 12: (activation behavior — not applicable.)
 
     // Step 13: Return false if _event_'s `canceled flag` is set; otherwise true.
-    !event.data().canceled_flag
+    !data.canceled_flag
 }
 
 /// Invoke event listeners on a single target.
@@ -403,10 +403,8 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
 
             if Function::call(scope, this_val, callback_val, &[event_val]).is_err() {
                 // Per the spec, exceptions from event listeners are "reported"
-                // but do not stop event dispatch. Clear the pending exception
-                // so it doesn't leak out of the dispatch call.
-                // TODO: report the exception to the console or a user-provided handler.
-                js::exception::clear(scope);
+                // but do not stop event dispatch.
+                js::exception::report_and_clear(scope, "event listener");
             }
         }
 

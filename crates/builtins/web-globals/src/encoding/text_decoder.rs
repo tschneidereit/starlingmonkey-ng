@@ -47,7 +47,7 @@ impl TextDecoder<'_> {
                 ))
             })?;
 
-        let data = self.data_mut();
+        let mut data = self.data_mut();
         data.encoding_name = encoding.name().to_ascii_lowercase();
         data.encoding = Some(encoding);
         data.fatal = options.fatal;
@@ -90,7 +90,7 @@ impl TextDecoder<'_> {
         let stream = options.is_some_and(|o| o.stream);
         let last = !stream;
 
-        let data = self.data_mut();
+        let mut data = self.data_mut();
         let encoding = data
             .encoding
             .expect("encoding must be set after construction");

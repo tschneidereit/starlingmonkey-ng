@@ -28,16 +28,18 @@
 //! # Task lifecycle
 //!
 //! ```text
-//! queue(task) → Queued → signal_ready(id) → Ready → pop_ready() → run(scope)
-//!                 │                                                   │
-//!                 └── cancel(id) ────────────────────────── dropped ◄─┘
+//! queue(task) → Queued → signal_ready(id) → Ready → step() → run(scope)
+//!                 │                                              │
+//!                 └── cancel(id) ───────────────────── dropped ◄─┘
 //! ```
 //!
 //! Tasks start in the **Queued** state. External events (timer expiry, I/O
 //! completion, a future resolving) move them to **Ready** via
-//! [`EventLoop::signal_ready`]. The platform driver calls
-//! [`EventLoop::pop_ready`] to take the next ready task and then runs it.
-//! Running consumes the task (`self: Box<Self>`); repeating behaviors like
+//! [`EventLoop::signal_ready`]. Each [`EventLoop::step`] runs the batch of tasks that are ready
+//! at its start. Alternatively, embedders can use [`EventLoop::pop_ready`] to drive the loop by
+//! hand.
+//!
+//! Running consumes the task, repeating behaviors like
 //! `setInterval` re-queue themselves inside `run()`.
 //!
 //! # GC integration
@@ -75,8 +77,9 @@
 pub mod interest;
 pub mod timer;
 
-use std::cell::RefCell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use event_listener::{Event, EventListener};
@@ -86,84 +89,70 @@ use js::native::JSTracer;
 use js::gc::scope::Scope;
 use js::jobs;
 
-pub use interest::InterestTracker;
+pub use interest::{InterestHandle, InterestTracker};
 
 // ---------------------------------------------------------------------------
 // Current event loop pointer
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    /// Temporary reference to the active [`EventLoop`], set by the platform
-    /// driver while it is running. `JSNative` callbacks (`setTimeout` etc.)
-    /// have no other way to reach Rust state, so they read this pointer.
+    /// Pointer to the active [`EventLoop`], set by [`with_event_loop`] for the
+    /// duration of its closure. `JSNative` callbacks (`setTimeout` etc.) have
+    /// no other way to reach Rust state, so they read this pointer via
+    /// [`with_active_event_loop`].
     ///
-    /// Valid only while the driver holds a `&mut EventLoop` — set before
-    /// calling any JS and cleared immediately after.
-    pub(crate) static CURRENT_EVENT_LOOP: RefCell<Option<*mut EventLoop>> = const { RefCell::new(None) };
+    /// The pointee is only ever accessed through shared references, so re-entrant access from JS
+    /// callbacks aliases nothing.
+    static CURRENT_EVENT_LOOP: Cell<Option<*const EventLoop>> = const { Cell::new(None) };
 }
 
-/// Set the current event loop for the duration of a closure.
+/// Run a closure with `event_loop` installed as the thread's active loop.
 ///
-/// Saves and restores the previous value, so calls may be nested.
+/// Saves and restores the previous value so calls may be
+/// nested. While the closure runs, JS callbacks reach the loop through
+/// [`with_active_event_loop`].
 ///
-/// # Safety
-///
-/// `event_loop` must remain valid (not dropped or moved) for the entire
-/// duration of `f`. The caller must not create any other `&mut EventLoop`
-/// to the same event loop during `f()` — in particular, `with_active_event_loop`
-/// must not be called on the same loop re-entrantly in a way that could alias
-/// the caller's borrow.
-///
-/// This function is inherently unsafe because `JSNative` callbacks are C
-/// function pointers (`fn(*mut RawJSContext, u32, *mut Value) -> bool`) that
-/// carry no Rust lifetime information. There is no way to tie the event loop
-/// pointer to the `Scope` lifetime through the C ABI boundary.
-pub unsafe fn with_event_loop<R>(
-    event_loop: &mut EventLoop,
-    f: impl FnOnce(&mut EventLoop) -> R,
-) -> R {
-    let ptr = event_loop as *mut EventLoop;
-    CURRENT_EVENT_LOOP.with(|el| {
-        let prev = *el.borrow();
-        *el.borrow_mut() = Some(ptr);
-        let result = f(event_loop);
-        *el.borrow_mut() = prev;
-        result
-    })
+/// The shared borrow of `event_loop` outlives `f`, and the installed pointer
+/// is only dereferenced within `f`'s dynamic extent, so this is safe: the
+/// loop cannot be dropped or moved while it is installed.
+pub fn with_event_loop<R>(event_loop: &EventLoop, f: impl FnOnce(&EventLoop) -> R) -> R {
+    /// Restores the previous active loop and `future` owner.
+    struct Restore {
+        prev_loop: Option<*const EventLoop>,
+        prev_owner: u64,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT_EVENT_LOOP.with(|el| el.set(self.prev_loop));
+            js::promise::set_current_future_owner(self.prev_owner);
+        }
+    }
+
+    // Attribute futures spawned during `f` (e.g. a `fetch`) to this loop, so a concurrent loop
+    // does not drive or settle them. Restored on exit.
+    let prev_owner = js::promise::set_current_future_owner(event_loop.loop_id);
+    let prev_loop = CURRENT_EVENT_LOOP.with(|el| el.replace(Some(event_loop as *const EventLoop)));
+    let _restore = Restore {
+        prev_loop,
+        prev_owner,
+    };
+    f(event_loop)
 }
 
-/// Run a closure with a mutable reference to the active event loop.
+/// Run a closure with a reference to the active event loop.
 ///
 /// Returns `None` if no event loop is active (i.e. we're not inside a
 /// driver's run loop). The raw pointer never escapes this function.
-pub fn with_active_event_loop<R>(f: impl FnOnce(&mut EventLoop) -> R) -> Option<R> {
+pub fn with_active_event_loop<R>(f: impl FnOnce(&EventLoop) -> R) -> Option<R> {
     CURRENT_EVENT_LOOP.with(|el| {
-        el.borrow().map(|ptr| {
-            // SAFETY: The pointer is set by the platform driver immediately
-            // before calling JS and cleared immediately after, so it is
-            // valid for at least the lifetime of this closure.
-            f(unsafe { &mut *ptr })
+        el.get().map(|ptr| {
+            // SAFETY: the pointer was installed by `with_event_loop`, whose
+            // shared borrow of the loop spans the closure currently on the
+            // stack. The loop is alive, and all its state is behind cells,
+            // so shared access from here aliases nothing.
+            f(unsafe { &*ptr })
         })
     })
-}
-
-/// Set the thread-local current event loop pointer.
-///
-/// Must be called before running any JS code that might invoke
-/// `setTimeout` / `setInterval`. Call [`clear_current_event_loop`] when done.
-///
-/// # Safety
-///
-/// `event_loop` must remain valid and at a stable address for as long as
-/// the pointer is set.
-pub unsafe fn set_current_event_loop(event_loop: &mut EventLoop) {
-    let ptr = event_loop as *mut EventLoop;
-    CURRENT_EVENT_LOOP.with(|el| *el.borrow_mut() = Some(ptr));
-}
-
-/// Clear the thread-local current event loop pointer.
-pub fn clear_current_event_loop() {
-    CURRENT_EVENT_LOOP.with(|el| *el.borrow_mut() = None);
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +271,12 @@ struct TaskEntry {
 // EventLoop
 // ---------------------------------------------------------------------------
 
+/// Namespace token for the per-global setTimeout/setInterval id counter. Its
+/// address is a process-unique, stable `usize` key for
+/// [`js::class::next_global_counter`], mirroring how shared functions key on
+/// their native pointer.
+static TIMER_ID_COUNTER_KEY: u8 = 0;
+
 /// The event loop task registry.
 ///
 /// Owns all queued tasks and tracks which are ready to run. Platform
@@ -291,34 +286,55 @@ struct TaskEntry {
 /// The `EventLoop` is stored on the [`Runtime`](crate::runtime::Runtime)
 /// and its [`trace`](EventLoop::trace) method is called during GC to keep
 /// JS references inside tasks alive.
+/// All mutable state lives in cells, so every method takes `&self`: JS
+/// callbacks re-entering through [`with_active_event_loop`] while the driver
+/// is mid-[`step`](Self::step) only ever alias shared references.
+///
+/// Note that this only works because all state on `EventLoop` is of a nature where borrows are
+/// naturally very short-lived: holding a borrow across JS calls would run the risk of double-borrows, which aren't guarded against.
+// TODO: investigate whether we should hide this behind some kind of no-JS guard to prevent accidental long-lived borrows.
 pub struct EventLoop {
+    /// A process-unique id so async-promise futures (`js::promise`) can be attributed to the loop
+    /// that spawned them: concurrent event loops drive and settle only their own.
+    loop_id: u64,
     /// Monotonically increasing counter for generating unique [`TaskId`]s.
-    next_id: u64,
+    next_id: Cell<u64>,
     /// All live tasks. Order is not significant — tasks are looked up by
     /// [`TaskId`].
-    tasks: Vec<TaskEntry>,
-    /// IDs that were cancelled while the corresponding task was being
-    /// executed (i.e. popped from `tasks`). Used to suppress interval
-    /// timer re-queuing when `clearInterval` is called from within the
-    /// interval callback.
-    cancelled_while_running: HashSet<TaskId>,
+    tasks: RefCell<Vec<TaskEntry>>,
+    /// HTML's per-loop "map of setTimeout and setInterval IDs": the timer ids
+    /// JS sees, mapped to the internal task they control.
+    js_timers: RefCell<HashMap<u64, TaskId>>,
+    /// Scratch buffer for [`step`](Self::step)'s per-batch dispatch list,
+    /// reused across steps so the hot path stays allocation-free.
+    batch_buf: RefCell<Vec<(Option<Instant>, TaskId)>>,
+    /// Set by [`request_stop`](Self::request_stop); consumed by
+    /// [`run_to_completion`] to end this loop after its current step.
+    stop_requested: Cell<bool>,
     /// External keep-alive interest. When positive, the event loop stays
     /// alive even with an empty task queue.
     interest: InterestTracker,
     /// Notification event: signaled whenever a task becomes ready or a
     /// timer is queued. The async driver awaits this to avoid busy-polling.
-    notify: Event,
+    /// Shared with this loop's [`InterestHandle`]s, whose release
+    /// must wake this loop even when it happens during another loop's turn.
+    notify: Rc<Event>,
 }
 
 impl EventLoop {
-    /// Create a new, empty event loop.
+    /// Create a new, empty event loop with a fresh process-unique id.
     pub fn new() -> Self {
+        static NEXT_LOOP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let notify = Rc::new(Event::new());
         Self {
-            next_id: 0,
-            tasks: Vec::new(),
-            cancelled_while_running: HashSet::new(),
-            interest: InterestTracker::new(),
-            notify: Event::new(),
+            loop_id: NEXT_LOOP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            next_id: Cell::new(0),
+            tasks: RefCell::new(Vec::new()),
+            js_timers: RefCell::new(HashMap::new()),
+            batch_buf: RefCell::new(Vec::new()),
+            stop_requested: Cell::new(false),
+            interest: InterestTracker::new(Rc::clone(&notify)),
+            notify,
         }
     }
 
@@ -328,9 +344,9 @@ impl EventLoop {
     /// [`signal_ready`](Self::signal_ready) to mark it runnable.
     ///
     /// Returns the [`TaskId`] assigned to this task.
-    pub fn queue(&mut self, task: Box<dyn Task>) -> TaskId {
+    pub fn queue(&self, task: Box<dyn Task>) -> TaskId {
         let id = self.next_task_id();
-        self.tasks.push(TaskEntry {
+        self.tasks.borrow_mut().push(TaskEntry {
             id,
             task,
             ready: false,
@@ -339,13 +355,13 @@ impl EventLoop {
         id
     }
 
-    /// Queue a task that is **immediately ready** to run.
+    /// Queue a task that is immediately ready to run.
     ///
     /// This is a convenience for tasks that don't need to wait for an
     /// external event (e.g. resolved promises, `queueMicrotask` work).
-    pub fn queue_ready(&mut self, task: Box<dyn Task>) -> TaskId {
+    pub fn queue_ready(&self, task: Box<dyn Task>) -> TaskId {
         let id = self.next_task_id();
-        self.tasks.push(TaskEntry {
+        self.tasks.borrow_mut().push(TaskEntry {
             id,
             task,
             ready: true,
@@ -360,9 +376,9 @@ impl EventLoop {
     /// The task will become ready when [`advance_timers`](Self::advance_timers)
     /// detects that the deadline has passed. For `setTimeout(fn, 0)` or
     /// similar, use a deadline of `Instant::now()`.
-    pub fn queue_timer(&mut self, task: Box<dyn Task>, deadline: Instant) -> TaskId {
+    pub fn queue_timer(&self, task: Box<dyn Task>, deadline: Instant) -> TaskId {
         let id = self.next_task_id();
-        self.tasks.push(TaskEntry {
+        self.tasks.borrow_mut().push(TaskEntry {
             id,
             task,
             ready: false,
@@ -375,33 +391,48 @@ impl EventLoop {
 
     /// Cancel a queued task, removing it from the event loop.
     ///
-    /// Returns `true` if the task was found and removed. If the task is
-    /// not in the queue (e.g. it is currently being executed by the
-    /// driver), the ID is recorded so that interval re-queuing is
-    /// suppressed for that ID.
-    pub fn cancel(&mut self, id: TaskId) -> bool {
-        if let Some(pos) = self.tasks.iter().position(|e| e.id == id) {
-            self.tasks.swap_remove(pos);
+    /// Returns `true` if the task was found and removed. A task that is not
+    /// in the queue (already run, or currently being executed by the driver)
+    /// is left alone.
+    pub fn cancel_if_queued(&self, id: TaskId) -> bool {
+        let mut tasks = self.tasks.borrow_mut();
+        if let Some(pos) = tasks.iter().position(|e| e.id == id) {
+            tasks.swap_remove(pos);
             true
         } else {
-            // The task may be currently running (popped for execution).
-            // Record it so requeue_timer can check.
-            self.cancelled_while_running.insert(id);
             false
         }
     }
 
-    /// Re-queue an interval timer task with a specific [`TaskId`].
+    /// Queue a `setTimeout`/`setInterval` task under a fresh JS timer id.
+    pub fn queue_js_timer(
+        &self,
+        scope: &Scope<'_>,
+        deadline: Instant,
+        make_task: impl FnOnce(u64) -> Box<dyn Task>,
+    ) -> u64 {
+        let timer_id = self.allocate_js_timer_id(scope);
+        let task_id = self.queue_timer(make_task(timer_id), deadline);
+        self.js_timers.borrow_mut().insert(timer_id, task_id);
+        timer_id
+    }
+
+    /// Re-queue an interval timer with the same JS timer id and [`TaskId`].
     ///
-    /// If the ID was cancelled during execution (via `clearInterval`
-    /// called from within the callback), the task is silently dropped
-    /// instead of re-queued.
-    pub fn requeue_timer(&mut self, id: TaskId, task: Box<dyn Task>, deadline: Instant) {
-        if self.cancelled_while_running.remove(&id) {
-            // clearInterval was called during the callback — don't re-queue.
+    /// If the timer was cleared while its callback ran (via `clearInterval`
+    /// from within the callback), the id no longer maps to this task and the
+    /// task is silently dropped instead of re-queued.
+    pub fn requeue_js_timer(
+        &self,
+        timer_id: u64,
+        id: TaskId,
+        task: Box<dyn Task>,
+        deadline: Instant,
+    ) {
+        if self.js_timers.borrow().get(&timer_id) != Some(&id) {
             return;
         }
-        self.tasks.push(TaskEntry {
+        self.tasks.borrow_mut().push(TaskEntry {
             id,
             task,
             ready: false,
@@ -411,12 +442,47 @@ impl EventLoop {
         self.notify.notify(1);
     }
 
+    /// Cancel a JS timer by its `setTimeout`/`setInterval` id.
+    ///
+    /// Invalid IDs are silently ignored per spec.
+    pub fn clear_js_timer(&self, timer_id: u64) {
+        let removed = self.js_timers.borrow_mut().remove(&timer_id);
+        if let Some(task_id) = removed {
+            // If the task is still queued, remove it. If it is currently
+            // running (an interval clearing itself from its own callback),
+            // the now-missing map entry suppresses the re-queue instead.
+            self.cancel_if_queued(task_id);
+        }
+    }
+
+    /// Release a one-shot JS timer's id after it fired.
+    ///
+    /// Mirrors HTML's "remove global's map of setTimeout and setInterval
+    /// IDs[id]" task substep for non-repeating timers.
+    pub fn js_timer_fired(&self, timer_id: u64) {
+        self.js_timers.borrow_mut().remove(&timer_id);
+    }
+
+    /// Allocate the next JS timer id: greater than zero and not currently in
+    /// this loop's timer map.
+    fn allocate_js_timer_id(&self, scope: &Scope<'_>) -> u64 {
+        let key = &TIMER_ID_COUNTER_KEY as *const u8 as usize;
+        let js_timers = self.js_timers.borrow();
+        loop {
+            let id = js::class::next_global_counter(scope, key);
+            if id != 0 && !js_timers.contains_key(&id) {
+                return id;
+            }
+        }
+    }
+
     /// Mark a queued task as ready to run.
     ///
     /// Has no effect if the task ID is not found (the task may have
     /// already been cancelled or run).
-    pub fn signal_ready(&mut self, id: TaskId) {
-        if let Some(entry) = self.tasks.iter_mut().find(|e| e.id == id) {
+    pub fn signal_ready(&self, id: TaskId) {
+        let mut tasks = self.tasks.borrow_mut();
+        if let Some(entry) = tasks.iter_mut().find(|e| e.id == id) {
             entry.ready = true;
             self.notify.notify(1);
         }
@@ -426,9 +492,16 @@ impl EventLoop {
     ///
     /// Returns `None` if no tasks are currently ready. The returned task
     /// is removed from the event loop — the caller must `run()` it.
-    pub fn pop_ready(&mut self) -> Option<(TaskId, Box<dyn Task>)> {
-        let pos = self.tasks.iter().position(|e| e.ready)?;
-        let entry = self.tasks.remove(pos);
+    /// "Next" follows [`step`](Self::step)'s dispatch order: ready non-timer
+    /// tasks in allocation order, then expired timers by deadline.
+    pub fn pop_ready(&self) -> Option<(TaskId, Box<dyn Task>)> {
+        let mut tasks = self.tasks.borrow_mut();
+        let (pos, _) = tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.ready)
+            .min_by_key(|(_, e)| (e.deadline, e.id.0))?;
+        let entry = tasks.swap_remove(pos);
         Some((entry.id, entry.task))
     }
 
@@ -437,10 +510,10 @@ impl EventLoop {
     ///
     /// Returns the number of timers that became ready.
     // TODO: consider merging with `time_to_next_timer` and returning the tasks directly.
-    pub fn advance_timers(&mut self) -> usize {
+    pub fn advance_timers(&self) -> usize {
         let now = Instant::now();
         let mut count = 0;
-        for entry in &mut self.tasks {
+        for entry in self.tasks.borrow_mut().iter_mut() {
             if let Some(deadline) = entry.deadline {
                 if !entry.ready && deadline <= now {
                     entry.ready = true;
@@ -460,6 +533,7 @@ impl EventLoop {
     pub fn time_to_next_timer(&self) -> Option<Duration> {
         let now = Instant::now();
         self.tasks
+            .borrow()
             .iter()
             .filter_map(|e| {
                 if !e.ready {
@@ -473,45 +547,35 @@ impl EventLoop {
 
     /// Returns `true` if there are any tasks (ready or not) in the queue.
     pub fn has_pending(&self) -> bool {
-        !self.tasks.is_empty()
+        !self.tasks.borrow().is_empty()
     }
 
     /// Returns `true` if at least one task is in the ready state.
     pub fn has_ready(&self) -> bool {
-        self.tasks.iter().any(|e| e.ready)
+        self.tasks.borrow().iter().any(|e| e.ready)
     }
 
     /// Returns the number of tasks currently queued (ready or not).
     pub fn len(&self) -> usize {
-        self.tasks.len()
+        self.tasks.borrow().len()
     }
 
     /// Returns `true` if the event loop has no tasks.
     pub fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
+        self.tasks.borrow().is_empty()
     }
 
     // -----------------------------------------------------------------------
     // Interest tracking
     // -----------------------------------------------------------------------
 
-    /// Register external interest — the event loop should stay alive even
-    /// with no pending tasks.
-    pub fn acquire_interest(&mut self) {
-        self.interest.acquire();
-    }
-
-    /// Release previously registered interest.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no matching [`acquire_interest`](Self::acquire_interest)
-    /// was called.
-    pub fn release_interest(&mut self) {
-        self.interest.release();
-        // Wake the driver — if interest dropped to zero and no tasks
-        // remain, the loop should discover `Done` and exit.
-        self.notify.notify(1);
+    /// Register external interest — the event loop stays alive until the
+    /// returned handle is dropped. The handle targets *this* loop's counter
+    /// directly (and wakes this loop's driver on release), so releasing it
+    /// during another request's turn, e.g. by a promise settling in a
+    /// foreign loop's microtask drain, still lands on the right loop.
+    pub fn acquire_interest_handle(&self) -> InterestHandle {
+        self.interest.acquire_handle()
     }
 
     /// Returns `true` if at least one external interest is held.
@@ -519,10 +583,26 @@ impl EventLoop {
         self.interest.has_interest()
     }
 
-    /// Returns `true` if the event loop should stay alive: either there
-    /// are pending tasks or external interest is held.
+    /// Returns `true` if the event loop should stay alive: there are pending
+    /// tasks, external interest is held, or an async-promise future (e.g. a
+    /// `fetch`) is in flight.
     pub fn is_alive(&self) -> bool {
-        self.has_pending() || self.has_interest()
+        self.has_pending() || self.has_interest() || js::promise::has_pending_futures(self.loop_id)
+    }
+
+    /// Returns `true` if any external interest or async-promise future (a
+    /// `fetch`, a Component Model stream/future pump, an async import) is still
+    /// in flight — the loop's *non-timer* work.
+    ///
+    /// This is [`is_alive`](Self::is_alive) minus [`has_pending`](Self::has_pending):
+    /// it deliberately ignores bare timer tasks (`setTimeout`/`setInterval`).
+    /// The async-export trailing-work driver uses it to keep driving while a
+    /// stream/future pump is still running, yet stop once only timers remain —
+    /// timers never gate an async export's subtask completion (they are not
+    /// canonical-ABI waitables, so wit-bindgen's `FutureState` never counts them
+    /// as outstanding work).
+    pub fn has_async_work(&self) -> bool {
+        self.has_interest() || js::promise::has_pending_futures(self.loop_id)
     }
 
     /// Returns an [`EventListener`] future that resolves when the event
@@ -535,6 +615,24 @@ impl EventLoop {
     pub fn notified(&self) -> EventListener<()> {
         self.notify.listen()
     }
+
+    /// Request that this loop's [`run_to_completion`] return after the
+    /// current step completes, even if tasks, timers, or futures remain.
+    pub fn request_stop(&self) {
+        self.stop_requested.set(true);
+    }
+}
+
+/// Request that the active loop's [`run_to_completion`] return after the
+/// current step completes, even if tasks, timers, or futures remain.
+///
+/// WPT mode calls this from the test's completion callback (`done()`): a finished WPT test may leave
+/// a live `setInterval` running, which would otherwise keep the loop alive and hang the process.
+/// The request targets the loop running the caller's JS; with no active loop it is dropped: there
+/// is nothing it could meaningfully stop, and a thread-global flag would instead stop whichever
+/// unrelated loop stepped next on this thread.
+pub fn request_stop() {
+    with_active_event_loop(|el| el.request_stop());
 }
 
 /// Run the event loop to completion asynchronously.
@@ -560,8 +658,32 @@ impl EventLoop {
 /// lifetime of this future (i.e. the `Runtime` must not be dropped).
 pub async unsafe fn run_to_completion<S, F>(
     raw_cx: *mut js::native::RawJSContext,
-    event_loop: &mut EventLoop,
+    event_loop: &EventLoop,
     sleep: S,
+) where
+    S: Fn(Duration) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    unsafe { run_until(raw_cx, event_loop, sleep, |_| false).await }
+}
+
+/// Like [`run_to_completion`], but additionally returns once `should_stop`
+/// reports true — checked with the step's rooting scope after every step —
+/// leaving the loop's remaining work (tasks, timers, futures, interest) in
+/// place for a later driver.
+///
+/// The serve path uses this to send a response as soon as the `fetch`
+/// event's `respondWith` promise settles, driving `waitUntil` work and body
+/// pumps afterwards, concurrently with (and beyond) the response write.
+///
+/// # Safety
+///
+/// Same contract as [`run_to_completion`].
+pub async unsafe fn run_until<S, F>(
+    raw_cx: *mut js::native::RawJSContext,
+    event_loop: &EventLoop,
+    sleep: S,
+    should_stop: impl Fn(&Scope<'_>) -> bool,
 ) where
     S: Fn(Duration) -> F,
     F: std::future::Future<Output = ()>,
@@ -571,31 +693,104 @@ pub async unsafe fn run_to_completion<S, F>(
         // technique JSNative trampolines use. It is dropped before any
         // await point so GC roots don't span a suspension.
         let scope = js::gc::scope::RootScope::from_current_realm(raw_cx);
-
         let outcome = with_event_loop(event_loop, |el| el.step(&scope));
-
+        let caller_stop = should_stop(&scope);
         drop(scope);
 
+        // A step may request the loop end — e.g. WPT mode once a test's completion callback fired —
+        // even though a leftover `setInterval` keeps `is_alive` true. Consume the request and return.
+        if event_loop.stop_requested.replace(false) {
+            // Drop this loop's still-pending futures while the JSContext is alive: each cancels its
+            // in-flight host I/O and unregisters its rooted promise box, so engine teardown's
+            // `finishRoots` doesn't trace a freed box (a shutdown crash for a test stopped with a
+            // cancelled/disturbed body read still in flight).
+            js::promise::cancel_pending_futures_for(event_loop.loop_id);
+            return;
+        }
+
+        // The caller's stop condition holds — its work is done; whatever the
+        // loop still carries stays in place for a later driver.
+        if caller_stop {
+            return;
+        }
+
+        // `fetch` and other async-IO builtins return a JS promise backed by a Rust
+        // future (see `js::promise`). Those futures aren't event-loop tasks, so the
+        // loop must stay alive — and keep polling them — while any of *its own* is in
+        // flight, even when `step` reports `Done`.
+        let owner = event_loop.loop_id;
+        let have_futures = js::promise::has_pending_futures(owner);
+
         match outcome {
-            StepOutcome::Done => return,
-            StepOutcome::Progressed => continue,
-            StepOutcome::Idle => {
-                // Wait for either the next timer to fire or an external
-                // notification (a task was signaled ready, a new timer
-                // was queued, etc.).
+            StepOutcome::Done if !have_futures => return,
+            StepOutcome::Progressed => {
+                // A perpetually-ready task chain — a self-rescheduling timer
+                // whose handler outlasts the 4ms nested-timer clamp — never
+                // reaches the await arm below, where async-promise futures
+                // are normally polled: a fetch would never even issue its
+                // request. Give the executor one turn (so the platform
+                // reactor can deliver I/O readiness) and this loop's futures
+                // one poll before re-stepping; completions settle with the
+                // loop active, same as in the await arm.
+                futures_lite::future::yield_now().await;
+                let completed = std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(js::promise::poll_pending_futures(owner, cx))
+                })
+                .await;
+                if !completed.is_empty() {
+                    with_event_loop(event_loop, |_| unsafe {
+                        let scope = js::gc::scope::RootScope::from_current_realm(raw_cx);
+                        js::promise::settle_completed_futures(&scope, completed);
+                    });
+                }
+                continue;
+            }
+            StepOutcome::Done | StepOutcome::Idle => {
+                // Wait for the next timer, an external notification (a task was
+                // signaled ready, a new timer was queued), or progress on an
+                // async-promise future (its I/O became ready). Whichever happens
+                // first wakes us; we then loop and re-`step` to drain any microtasks
+                // a settled promise queued.
                 let timer_wait = async {
                     if let Some(wait) = event_loop.time_to_next_timer() {
                         sleep(wait).await;
                     } else {
-                        // No timers — pend forever; the notified branch
-                        // will wake us.
+                        // No timers — pend forever; another branch will wake us.
                         std::future::pending::<()>().await;
                     }
                 };
                 let notified = event_loop.notified();
+                // Poll *this loop's* async-promise futures with the real task waker so their I/O
+                // readiness wakes this await; complete once one settles, stashing the completions to
+                // settle below. Polling runs no JS, so it needs no active loop and does not borrow
+                // `event_loop` (which `timer_wait`/`notified` borrow).
+                let mut completed = Vec::new();
+                let drive_futures = std::future::poll_fn(|cx| {
+                    let done = js::promise::poll_pending_futures(owner, cx);
+                    if done.is_empty() {
+                        std::task::Poll::Pending
+                    } else {
+                        completed = done;
+                        std::task::Poll::Ready(())
+                    }
+                });
 
                 // Race: first one to complete wins.
-                futures_lite::future::or(timer_wait, notified).await;
+                futures_lite::future::or(
+                    futures_lite::future::or(timer_wait, notified),
+                    drive_futures,
+                )
+                .await;
+
+                // Settle any completed futures with this loop active, so a reaction (a timer, or
+                // releasing the loop's interest, e.g. a FetchEvent's respondWith resolving from a
+                // `fetch`) runs against this loop rather than no loop or another request's.
+                if !completed.is_empty() {
+                    with_event_loop(event_loop, |_| unsafe {
+                        let scope = js::gc::scope::RootScope::from_current_realm(raw_cx);
+                        js::promise::settle_completed_futures(&scope, completed);
+                    });
+                }
             }
         }
     }
@@ -627,7 +822,7 @@ impl EventLoop {
     ///    for exceptions after each).
     ///
     /// Returns a [`StepOutcome`] telling the driver what to do next.
-    pub fn step(&mut self, scope: &Scope<'_>) -> StepOutcome {
+    pub fn step(&self, scope: &Scope<'_>) -> StepOutcome {
         // 1. Assert that there are no pending microtasks.
         debug_assert!(
             !js::jobs::has_pending_jobs(scope),
@@ -643,10 +838,41 @@ impl EventLoop {
         // 3. Advance timers.
         self.advance_timers();
 
-        // 4. Run all ready tasks.
+        // 4. Run the tasks that are ready, one batch per step. A task that
+        //    becomes ready while the batch runs (a zero-delay interval re-queueing
+        //    itself, a timer expiring during a long handler) runs on the next step:
+        //    re-popping inside this loop would let a perpetually-ready task pin the
+        //    loop inside a single `step` forever, starving the driver's await branch
+        //    (where async-promise futures are polled and the platform reactor turns).
+        //
+        //    Dispatch order: ready non-timer tasks first (in allocation order),
+        //    then expired timers by deadline, with allocation order breaking deadline
+        //    ties.
+        //
+        //    The batch buffer is reused across steps to keep this path allocation-free.
+        let mut batch = self.batch_buf.take();
+        batch.extend(
+            self.tasks
+                .borrow()
+                .iter()
+                .filter(|entry| entry.ready)
+                .map(|entry| (entry.deadline, entry.id)),
+        );
+        batch.sort_unstable_by_key(|&(deadline, id)| (deadline, id.0));
         let mut ran_any = false;
-        while let Some((id, task)) = self.pop_ready() {
-            if task.run(scope, id).is_err() {
+        for &(_, id) in &batch {
+            // Take the task out before running it, ending the borrow: the
+            // task's JS can re-enter this loop (setTimeout, clearTimeout)
+            // through `with_active_event_loop`. Re-locate by id — an earlier
+            // task in the batch may have cancelled this one.
+            let entry = {
+                let mut tasks = self.tasks.borrow_mut();
+                let Some(pos) = tasks.iter().position(|entry| entry.id == id && entry.ready) else {
+                    continue;
+                };
+                tasks.swap_remove(pos)
+            };
+            if entry.task.run(scope, id).is_err() {
                 eprintln!("[event_loop] Task error (id={:?})", id);
                 handle_and_clear_exception(scope);
             }
@@ -659,11 +885,9 @@ impl EventLoop {
             if js::exception::is_pending(scope) {
                 handle_and_clear_exception(scope);
             }
-
-            // Re-advance timers in case task execution took long enough
-            // for more timers to expire.
-            self.advance_timers();
         }
+        batch.clear();
+        *self.batch_buf.borrow_mut() = batch;
 
         if ran_any {
             return StepOutcome::Progressed;
@@ -685,16 +909,18 @@ impl EventLoop {
     /// # Safety
     ///
     /// `trc` must be a valid `JSTracer` pointer provided by SpiderMonkey.
+    /// GC only runs at JS allocation points, and no `tasks` borrow is ever
+    /// held across a call into JS, so the borrow here cannot conflict.
     pub unsafe fn trace(&self, trc: *mut JSTracer) {
-        for entry in &self.tasks {
+        for entry in self.tasks.borrow().iter() {
             entry.task.trace(trc);
         }
     }
 
     /// Allocate the next unique [`TaskId`].
-    fn next_task_id(&mut self) -> TaskId {
-        let id = TaskId(self.next_id);
-        self.next_id += 1;
+    fn next_task_id(&self) -> TaskId {
+        let id = TaskId(self.next_id.get());
+        self.next_id.set(id.0 + 1);
         id
     }
 }
