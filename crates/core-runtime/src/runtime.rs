@@ -87,6 +87,20 @@ static ENGINE: OnceLock<Mutex<EngineState>> = OnceLock::new();
 
 unsafe extern "C" {
     fn atexit(func: unsafe extern "C" fn()) -> std::os::raw::c_int;
+    fn _exit(status: std::os::raw::c_int) -> !;
+}
+
+/// Exit the process with `code` without running C `atexit` handlers or C++
+/// static destructors.
+///
+/// Used on error paths that fire while a [`Runtime`] is still alive, avoiding
+/// failing asserts inside of SpiderMonkey.
+fn exit_without_cleanup(code: std::os::raw::c_int) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `_exit` is always safe to call; it terminates the process.
+    unsafe { _exit(code) }
 }
 
 /// `atexit` callback: takes the `JSEngine` out of the global and drops it,
@@ -291,7 +305,7 @@ impl Runtime {
         let scope = self.default_global();
         let init_source = std::fs::read_to_string(init_path).unwrap_or_else(|e| {
             eprintln!("Error reading initializer script '{}': {}", init_path, e);
-            process::exit(1);
+            exit_without_cleanup(1);
         });
         let filename = init_path.as_str();
 
@@ -313,7 +327,7 @@ impl Runtime {
         if failed {
             eprintln!("Error evaluating initializer script '{init_path}':");
             unsafe { report_pending_exception(&scope) };
-            process::exit(1);
+            exit_without_cleanup(1);
         }
 
         // Nothing drives this loop after initialization: leftover async work
@@ -325,7 +339,7 @@ impl Runtime {
                  (timers or pending operations) behind. Initializer scripts must \
                  complete synchronously"
             );
-            process::exit(1);
+            exit_without_cleanup(1);
         }
     }
 
