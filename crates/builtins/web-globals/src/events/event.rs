@@ -74,25 +74,19 @@ pub(crate) fn current_high_res_time() -> f64 {
     elapsed.as_secs_f64() * 1000.0
 }
 
-// Event phase constants — accessible from algorithms and other modules.
-// TODO: Instead of these, `Event::CONSTANT` should be used, but the WebIDL macro installs them on `EventImpl`.
-pub(crate) const NONE: u16 = 0;
-pub(crate) const CAPTURING_PHASE: u16 = 1;
-pub(crate) const AT_TARGET: u16 = 2;
-pub(crate) const BUBBLING_PHASE: u16 = 3;
-
 #[webidl_methods]
 impl Event {
-    pub const NONE: u16 = NONE;
-    pub const CAPTURING_PHASE: u16 = CAPTURING_PHASE;
-    pub const AT_TARGET: u16 = AT_TARGET;
-    pub const BUBBLING_PHASE: u16 = BUBBLING_PHASE;
+    // TODO: the macro should install these on `Event` itself, not `EventImpl`.
+    pub const NONE: u16 = 0;
+    pub const CAPTURING_PHASE: u16 = 1;
+    pub const AT_TARGET: u16 = 2;
+    pub const BUBBLING_PHASE: u16 = 3;
 
     /// <https://dom.spec.whatwg.org/#concept-event-constructor>
     #[constructor]
-    fn new(event_type: String, event_init_dict: Option<EventInit>) -> Self {
+    pub fn new(event_type: String, event_init_dict: Option<EventInit>) -> Self {
         let opts = event_init_dict.unwrap_or_default();
-        EventImpl {
+        Self {
             event_type,
             target: None,
             current_target: None,

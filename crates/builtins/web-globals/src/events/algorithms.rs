@@ -14,8 +14,9 @@ use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::{Function, Object};
 
-use super::event::{self, Event};
+use super::event::Event;
 use super::event_target::{EventListener, EventTarget, EventTargetImpl};
+use crate::events::event::EventImpl;
 use crate::signals::abort_signal::AbortSignal;
 use crate::signals::algorithms as signal_algorithms;
 
@@ -288,13 +289,13 @@ pub(crate) fn dispatch(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarge
 
     // Step 6: Simplified — set target and invoke at AT_TARGET only.
     event.data_mut().target = Some(Heap::from(*target));
-    event.data_mut().event_phase = event::AT_TARGET;
+    event.data_mut().event_phase = EventImpl::AT_TARGET;
     event.data_mut().current_target = Some(Heap::from(*target));
 
     invoke_listeners(scope, event, target);
 
     // Step 7: Set _event_'s ``eventPhase`` attribute to ``NONE``.
-    event.data_mut().event_phase = event::NONE;
+    event.data_mut().event_phase = EventImpl::NONE;
 
     // Step 8: Set _event_'s ``currentTarget`` attribute to null.
     event.data_mut().current_target = None;
@@ -360,10 +361,10 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
         }
 
         // At AT_TARGET, fire both capturing and bubbling listeners.
-        if event_phase == event::CAPTURING_PHASE && !snap.capture {
+        if event_phase == EventImpl::CAPTURING_PHASE && !snap.capture {
             continue;
         }
-        if event_phase == event::BUBBLING_PHASE && snap.capture {
+        if event_phase == EventImpl::BUBBLING_PHASE && snap.capture {
             continue;
         }
 

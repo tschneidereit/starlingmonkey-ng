@@ -28,21 +28,29 @@ use crate::events::event_target::{EventTarget, EventTargetImpl};
 /// both the GC tracer and crown); keeping the GC pointer in an explicit field
 /// makes it traceable.
 ///
-/// This will have to be improved once we support more types of abort algorithm,
-/// but it's sufficient for now.
-#[js::allow_unrooted_interior]
-pub(crate) struct AbortAlgorithm {
-    /// The EventTarget whose listener is removed when the signal aborts. Traced
-    /// so it stays alive until then.
-    pub(crate) held: Heap<EventTargetImpl>,
-    /// Identity of the listener to remove.
-    pub(crate) listener_id: u64,
+#[js::must_root]
+pub(crate) enum AbortAlgorithm {
+    /// Remove the event listener identified by `listener_id` from `held` (an
+    /// EventTarget) when the signal aborts. Registered by "add an event listener".
+    RemoveListener {
+        /// The EventTarget whose listener is removed. Traced so it stays alive
+        /// until then.
+        held: Heap<EventTargetImpl>,
+        /// Identity of the listener to remove.
+        listener_id: u64,
+    },
+    /// Call `callback` with the signal's abort reason when the signal aborts.
+    /// Registered by callers such as `fetch` that need to react to abort.
+    RunSteps(Heap<js::function::Function>),
 }
 
-// Safety: the only GC pointer is the `held` Heap; `listener_id` is primitive.
+// Safety: `trc` must be the JS engine's `JSTracer` function.
 unsafe impl js::heap::Trace for AbortAlgorithm {
     unsafe fn trace(&self, trc: *mut js::native::JSTracer) {
-        self.held.trace(trc);
+        match self {
+            AbortAlgorithm::RemoveListener { held, .. } => held.trace(trc),
+            AbortAlgorithm::RunSteps(callback) => callback.trace(trc),
+        }
     }
 }
 

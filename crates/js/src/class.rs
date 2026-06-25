@@ -30,16 +30,15 @@ use crate::Object;
 use mozjs::gc::Handle;
 use mozjs::jsapi::{
     JSClass, JSClassOps, JSFunctionSpec, JSPrincipals, JSPropertySpec, JSProtoKey,
-    OnNewGlobalHookOption, PropertyKey, RealmOptions, JSCLASS_FOREGROUND_FINALIZE,
-    JSCLASS_IS_GLOBAL,
+    JS_IsGlobalObject, OnNewGlobalHookOption, PropertyKey, RealmOptions,
+    JSCLASS_FOREGROUND_FINALIZE, JSCLASS_GLOBAL_FLAGS, JSCLASS_IS_GLOBAL,
 };
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
 
 use crate::class_spec::{
     JS_EnumerateStandardClasses, JS_GlobalObjectTraceHook, JS_MayResolveStandardClass,
-    JS_ResolveStandardClass, JSCLASS_GLOBAL_SLOT_COUNT, JSCLASS_RESERVED_SLOTS_MASK,
-    JSCLASS_RESERVED_SLOTS_SHIFT,
+    JS_ResolveStandardClass,
 };
 
 /// Initialize a class on a global object.
@@ -690,9 +689,11 @@ pub unsafe fn drop_private<T: 'static>(obj: *mut JSObject) {
 // Per-global class prototype registry
 // ============================================================================
 
-/// Reserved slot index for the per-global class registry, placed right after
-/// SpiderMonkey's own global slots.
-const CLASS_REGISTRY_SLOT: u32 = JSCLASS_GLOBAL_SLOT_COUNT;
+/// Reserved slot index for the per-global class registry, placed after
+/// private class data.
+///
+/// Note: SpiderMonkey global objects have their first 5 reserved slots available for embedder use.
+const CLASS_REGISTRY_SLOT: u32 = MIN_CLASS_RESERVED_SLOTS + 1;
 
 /// Per-global map from `TypeId` to class prototype.
 ///
@@ -712,6 +713,18 @@ struct ClassRegistry {
     /// collide across the concurrent event loops that share one global. Plain
     /// integers, so no GC tracing.
     counters: HashMap<usize, u64>,
+    /// Type-erased GC glue for the global's private data,
+    /// installed by [`set_global_private`].
+    ///
+    /// `None` until a parent class stores its data on the global.
+    global_private: Option<GlobalPrivateGlue>,
+}
+
+/// Type-erased GC glue for a global's private data, captured at the
+/// embedder's typed [`set_global_private`] call site.
+struct GlobalPrivateGlue {
+    trace: unsafe extern "C" fn(*mut JSTracer, *mut JSObject),
+    finalize: unsafe extern "C" fn(*mut GCContext, *mut JSObject),
 }
 
 impl ClassRegistry {
@@ -720,6 +733,7 @@ impl ClassRegistry {
             map: HashMap::new(),
             shared_functions: HashMap::new(),
             counters: HashMap::new(),
+            global_private: None,
         }
     }
 
@@ -839,11 +853,8 @@ fn get_prototype<T: 'static>(global: Object) -> Option<*mut JSObject> {
 /// reserved slot for the per-global [`ClassRegistry`].
 /// The finalize hook drops the registry.
 pub static STARLING_GLOBAL_CLASS: JSClass = JSClass {
-    name: c"global".as_ptr(),
-    flags: JSCLASS_IS_GLOBAL
-        | JSCLASS_FOREGROUND_FINALIZE
-        | (((JSCLASS_GLOBAL_SLOT_COUNT + 1) & JSCLASS_RESERVED_SLOTS_MASK)
-            << JSCLASS_RESERVED_SLOTS_SHIFT),
+    name: c"ServiceWorkerGlobal".as_ptr(),
+    flags: JSCLASS_IS_GLOBAL | JSCLASS_FOREGROUND_FINALIZE | JSCLASS_GLOBAL_FLAGS,
     cOps: &STARLING_GLOBAL_OPS as *const JSClassOps,
     spec: ptr::null(),
     ext: ptr::null(),
@@ -863,12 +874,17 @@ static STARLING_GLOBAL_OPS: JSClassOps = JSClassOps {
     trace: Some(JS_GlobalObjectTraceHook),
 };
 
-/// Destructor for Starling's global class — drops the class registry.
-unsafe extern "C" fn finalize_starling_global(_gc: *mut GCContext, obj: *mut JSObject) {
+/// Destructor for Starling's global class — drops the global's
+/// class's private data (if any) and the class registry.
+unsafe extern "C" fn finalize_starling_global(gc: *mut GCContext, obj: *mut JSObject) {
     let val = crate::object::get_reserved_slot(obj, CLASS_REGISTRY_SLOT);
     if !val.is_undefined() {
         let ptr = val.to_private() as *mut ClassRegistry;
         if !ptr.is_null() {
+            // Drop the global's private data before the registry that owns its glue.
+            if let Some(glue) = &(*ptr).global_private {
+                (glue.finalize)(gc, obj);
+            }
             // Unregister from the tracer's list before freeing.
             LIVE_REGISTRIES.with(|regs| regs.borrow_mut().retain(|&r| r != ptr));
             drop(Box::from_raw(ptr));
@@ -877,6 +893,66 @@ unsafe extern "C" fn finalize_starling_global(_gc: *mut GCContext, obj: *mut JSO
             crate::object::set_reserved_slot(obj, CLASS_REGISTRY_SLOT, &undef);
         }
     }
+}
+
+/// Store `data` as the global's private class data and record the GC glue
+/// needed to trace and finalize it, and set `proto` as the `__proto__`.
+///
+/// # Safety
+///
+/// - `global` must be a [`STARLING_GLOBAL_CLASS`] global.
+/// - Must be called at most once per global; the data outlives every borrow.
+pub unsafe fn set_global_private_and_proto<T: ClassDef>(
+    scope: &Scope<'_>,
+    global: crate::Object<'_>,
+    data: T,
+    proto: crate::Object<'_>,
+) {
+    unsafe {
+        assert!(JS_IsGlobalObject(global.as_raw()));
+        assert!(
+            get_private::<T>(global.as_raw()).is_none(),
+            "global private data already set"
+        );
+    }
+    set_private(global.as_raw(), data);
+    global.set_prototype(scope, proto.handle()).unwrap();
+    let success = global
+        .make_proto_immutable(&scope)
+        .expect("Making the global's proto immutable mustn't error");
+
+    assert!(success, "Making the global's proto immutable must succeed");
+    let registry = get_or_init_class_registry(global.as_raw());
+    registry.global_private = Some(GlobalPrivateGlue {
+        trace: generic_class_trace::<T>,
+        finalize: generic_class_finalize::<T>,
+    });
+    register_global_parent::<T>();
+}
+
+/// Custom global trace op for private data, installed via
+/// [`install_global_private_trace`].
+///
+/// # Safety
+///
+/// `trc` and `global` must be the valid tracer and global supplied by the GC.
+unsafe extern "C" fn global_private_trace(trc: *mut JSTracer, global: *mut JSObject) {
+    if let Some(registry) = get_class_registry(global) {
+        if let Some(glue) = &registry.global_private {
+            (glue.trace)(trc, global);
+        }
+    }
+}
+
+/// Install the custom global trace op that traces a global's private
+/// data as the realm's `setTrace` op.
+///
+/// Must be called on the [`RealmOptions`](crate::engine::RealmOptions) used to
+/// create a [`STARLING_GLOBAL_CLASS`] global, before `JS_NewGlobalObject`. The
+/// op is a no-op until [`set_global_private`] populates the global, so it is
+/// safe to install unconditionally for Starling globals.
+pub fn install_global_private_trace(options: &mut crate::engine::RealmOptions) {
+    options.creationOptions_.traceGlobal_ = Some(global_private_trace);
 }
 
 /// Get the registered prototype for a class type. Public for generated code.
@@ -919,24 +995,18 @@ thread_local! {
     static INHERITANCE_REGISTRY: RefCell<HashMap<usize, InheritanceInfo>> = RefCell::new(HashMap::new());
 }
 
-/// Register the parent relationship for a child class.
+/// Register a child→parent derivation in the inheritance registry, keyed by the
+/// child's runtime `JSClass` tag.
 ///
-/// Called from generated `__ParentPrototypeRegistrar` code.
-#[doc(hidden)]
-pub fn register_parent_info<C: HasParent>() {
-    unsafe fn immutable_accessor<T: HasParent>(ptr: *const c_void) -> *const c_void {
-        let concrete = &*(ptr as *const T);
-        T::as_parent(concrete) as *const T::Parent as *const c_void
-    }
-
-    unsafe fn mutable_accessor<T: HasParent>(ptr: *mut c_void) -> *mut c_void {
-        let concrete = &mut *(ptr as *mut T);
-        T::as_parent_mut(concrete) as *mut T::Parent as *mut c_void
-    }
-
-    let child_tag = class_tag::<C>();
-    let parent_tag = class_tag::<C::Parent>();
-
+/// `accessor`/`accessor_mut` map a pointer to the child's private data onto a
+/// pointer to the embedded parent data, so [`get_private_or_ancestor`] can reach
+/// a `Parent`'s data through a concrete child instance.
+fn register_parent_info_raw(
+    child_tag: usize,
+    parent_tag: usize,
+    accessor: unsafe fn(*const c_void) -> *const c_void,
+    accessor_mut: unsafe fn(*mut c_void) -> *mut c_void,
+) {
     INHERITANCE_REGISTRY.with(|reg| {
         let mut map = reg.borrow_mut();
 
@@ -952,11 +1022,56 @@ pub fn register_parent_info<C: HasParent>() {
             InheritanceInfo {
                 parent_tag,
                 ancestors,
-                accessor: immutable_accessor::<C>,
-                accessor_mut: mutable_accessor::<C>,
+                accessor,
+                accessor_mut,
             },
         );
     });
+}
+
+/// Register the parent relationship for a child class.
+///
+/// Called from generated `__ParentPrototypeRegistrar` code.
+#[doc(hidden)]
+pub fn register_parent_info<C: HasParent>() {
+    unsafe fn immutable_accessor<T: HasParent>(ptr: *const c_void) -> *const c_void {
+        let concrete = &*(ptr as *const T);
+        T::as_parent(concrete) as *const T::Parent as *const c_void
+    }
+
+    unsafe fn mutable_accessor<T: HasParent>(ptr: *mut c_void) -> *mut c_void {
+        let concrete = &mut *(ptr as *mut T);
+        T::as_parent_mut(concrete) as *mut T::Parent as *mut c_void
+    }
+
+    register_parent_info_raw(
+        class_tag::<C>(),
+        class_tag::<C::Parent>(),
+        immutable_accessor::<C>,
+        mutable_accessor::<C>,
+    );
+}
+
+/// Register that the [`STARLING_GLOBAL_CLASS`] global derives from `P`, whose
+/// data is stored as the global's private data (slot 0) via
+/// [`set_global_private_and_proto`].
+///
+/// This makes brand checks and casts against `P` succeed on the global — e.g.
+/// `global instanceof EventTarget` and `obj.cast::<EventTarget>()`.
+fn register_global_parent<P: ClassDef>() {
+    unsafe fn identity_const(ptr: *const c_void) -> *const c_void {
+        ptr
+    }
+    unsafe fn identity_mut(ptr: *mut c_void) -> *mut c_void {
+        ptr
+    }
+
+    register_parent_info_raw(
+        &STARLING_GLOBAL_CLASS as *const JSClass as usize,
+        class_tag::<P>(),
+        identity_const,
+        identity_mut,
+    );
 }
 
 /// Get the raw private data pointer from slot 0 without type interpretation.
@@ -1804,6 +1919,42 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
     Ok(unsafe { T::from_handle_unchecked(scope.root_object(nn)) })
 }
 
+/// Resolve a WebIDL operation's receiver object from the call's `this`.
+///
+/// Returns the `this` value as an object, except that — per WebIDL `[Global]`
+/// operation semantics — a null or undefined `this` resolves to the global
+/// object when the global implements `target_tag`. This is what lets a bare,
+/// unqualified `addEventListener('fetch', …)` in a ServiceWorker script reach
+/// the global's own `EventTarget` data: an unqualified sloppy-mode call passes
+/// `this = undefined`, and SpiderMonkey performs no global substitution for
+/// native callees. The substitution is gated on the same inheritance registry
+/// the brand check uses, so for any interface the global does not implement, a
+/// non-object `this` is rejected exactly as before.
+///
+/// # Safety
+///
+/// - `args` must be from a valid `JSNative` call.
+unsafe fn resolve_webidl_this(
+    scope: &Scope<'_>,
+    args: &CallArgs,
+    target_tag: usize,
+) -> Result<*mut JSObject, ExnThrown> {
+    let this_val = args.thisv();
+    if this_val.is_object() {
+        return Ok(this_val.to_object());
+    }
+    if this_val.is_null_or_undefined() {
+        let global = scope.global().as_raw();
+        if is_derived_from_type(crate::object::get_object_class(global) as usize, target_tag) {
+            return Ok(global);
+        }
+    }
+    Err(crate::error::throw_type_error(
+        scope,
+        c"'this' is not an object",
+    ))
+}
+
 /// Extract the `this` object's private data in a method callback.
 ///
 /// This is used inside `JSNative` methods to get the Rust struct backing `this`.
@@ -1816,14 +1967,7 @@ pub unsafe fn get_this_data<'a, T: ClassDef>(
     scope: &'a Scope<'_>,
     args: &CallArgs,
 ) -> Result<Ref<'a, T>, ExnThrown> {
-    let this_val = args.thisv();
-    if !this_val.is_object() {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"'this' is not an object",
-        ));
-    }
-    let obj = this_val.to_object();
+    let obj = resolve_webidl_this(scope, args, class_tag::<T>())?;
     let Some(flag) = get_borrow_flag(obj) else {
         return Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR));
     };
@@ -1848,14 +1992,7 @@ pub unsafe fn get_this_data_mut<'a, T: ClassDef>(
     scope: &'a Scope<'_>,
     args: &CallArgs,
 ) -> Result<RefMut<'a, T>, ExnThrown> {
-    let this_val = args.thisv();
-    if !this_val.is_object() {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"'this' is not an object",
-        ));
-    }
-    let obj = this_val.to_object();
+    let obj = resolve_webidl_this(scope, args, class_tag::<T>())?;
     let Some(flag) = get_borrow_flag(obj) else {
         return Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR));
     };
@@ -1886,14 +2023,7 @@ pub unsafe fn get_this<'s, T: StackType<'s>>(
 where
     T::Inner: ClassDef,
 {
-    let this_val = args.thisv();
-    if !this_val.is_object() {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"'this' is not an object",
-        ));
-    }
-    let obj = this_val.to_object();
+    let obj = resolve_webidl_this(scope, args, class_tag::<T::Inner>())?;
     let concrete_tag = crate::object::get_object_class(obj) as usize;
     let target_tag = class_tag::<T::Inner>();
     if !is_derived_from_type(concrete_tag, target_tag) {

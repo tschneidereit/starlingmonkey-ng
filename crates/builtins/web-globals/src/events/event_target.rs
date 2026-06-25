@@ -128,12 +128,7 @@ impl EventTarget {
         // Step 2: If `this`'s `event listener list` `contains` an `event listener` whose `type`
         //         is _type_, `callback` is _callback_, and `capture` is _capture_, then `remove an
         //         event listener` with `this` and that `event listener`.
-        algorithms::remove_an_event_listener(
-            &mut *self.data_mut(),
-            &event_type,
-            &callback,
-            capture,
-        );
+        algorithms::remove_an_event_listener(&mut self.data_mut(), &event_type, &callback, capture);
     }
 
     /// <https://dom.spec.whatwg.org/#dom-eventtarget-dispatchevent>
