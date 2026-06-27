@@ -8,11 +8,11 @@ use core_runtime::event_loop::{with_active_event_loop, Task, TaskId};
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
-use js::heap::RootedTraceableBox;
 use js::heap::Trace;
 use js::native::JSTracer;
 use js::prelude::HandleValue;
 use js::prelude::ToJSVal;
+use js::Function;
 
 use super::abort_signal::{AbortAlgorithm, AbortSignal, AbortSignalImpl};
 use crate::events;
@@ -59,7 +59,7 @@ fn create_timeout_error<'s>(scope: &'s Scope<'_>) -> Result<HandleValue<'s>, Exn
 /// unreachable source↔dependent pair. The only difference is `WeakRef`/
 /// `FinalizationRegistry` observability, which is not exercised by the enabled
 /// tests; revisit this if the GC-oriented abort-signal tests get enabled.
-pub(crate) fn create_dependent_abort_signal<'r>(
+pub fn create_dependent_abort_signal<'r>(
     scope: &'r Scope<'_>,
     signals: &[AbortSignal<'_>],
 ) -> Result<AbortSignal<'r>, ExnThrown> {
@@ -174,21 +174,54 @@ pub(crate) fn signal_abort(
     Ok(())
 }
 
-/// <https://dom.spec.whatwg.org/#abortsignal-abort-algorithms>
+/// <https://dom.spec.whatwg.org/#run-the-abort-steps>
 ///
-/// To run the abort steps for an AbortSignal signal.
+/// To run the abort steps for an AbortSignal _signal_.
 fn run_the_abort_steps(scope: &Scope<'_>, signal: &AbortSignal<'_>) -> Result<(), ExnThrown> {
-    // Step 1: `For each` _algorithm_ of _signal_'s `abort algorithms`: run _algorithm_.
-    // Each registered algorithm removes the event listener it was added for.
-    let algorithms =
-        RootedTraceableBox::new(std::mem::take(&mut signal.data_mut().abort_algorithms));
-    for algo in algorithms.iter() {
-        let target = algo.held.get(scope);
-        events::algorithms::remove_an_event_listener_by_id(&target, algo.listener_id);
+    // Snapshot the abort algorithms, then run step two before step 1 to avoid reentrant signals
+    // creating loops.
+    enum Pending<'s> {
+        RemoveListener(EventTarget<'s>, u64),
+        RunSteps(Function<'s>),
     }
+    let pending: Vec<Pending<'_>> = signal
+        .data()
+        .abort_algorithms
+        .iter()
+        .map(|algorithm| match algorithm {
+            AbortAlgorithm::RemoveListener { held, listener_id } => {
+                Pending::RemoveListener(held.get(scope), *listener_id)
+            }
+            AbortAlgorithm::RunSteps(callback) => Pending::RunSteps(callback.get(scope)),
+        })
+        .collect();
 
-    // Step 2: `Empty` _signal_'s `abort algorithms`.
-    // (Emptied by `mem::take` above.)
+    // Step 2: `Empty` _signal_'s `abort algorithms` (before running, per above).
+    signal.data_mut().abort_algorithms.clear();
+
+    let reason = signal.data().abort_reason.get(scope);
+    // Step 1: `For each` _algorithm_ of _signal_'s `abort algorithms`: run _algorithm_.
+    for algorithm in &pending {
+        match algorithm {
+            // Remove the event listener this algorithm was added for.
+            Pending::RemoveListener(target, listener_id) => {
+                events::algorithms::remove_an_event_listener_by_id(target, *listener_id);
+            }
+            // Call the registered callback with the signal's abort reason.
+            Pending::RunSteps(callback) => {
+                // An abort algorithm is infallible in the spec. A throwing
+                // callback is reported and must not keep the remaining
+                // algorithms, the `abort` event (step 3), or dependent
+                // signals' abort steps (signal abort step 6) from running.
+                let callback_val = scope.root_value(callback.as_value());
+                if js::Function::call(scope, HandleValue::undefined(), callback_val, &[reason])
+                    .is_err()
+                {
+                    js::exception::report_and_clear(scope, "abort algorithm");
+                }
+            }
+        }
+    }
 
     // Step 3: `Fire an event` named ``abort`` at _signal_.
     events::algorithms::fire_an_event(scope, "abort", signal)?;
@@ -218,10 +251,47 @@ pub(crate) fn add_listener_removal_algorithm(
     }
 
     // Step 2: `Append` _algorithm_ to _signal_'s `abort algorithms`.
-    signal.data_mut().abort_algorithms.push(AbortAlgorithm {
-        held: Heap::from(*target),
-        listener_id,
-    });
+    signal
+        .data_mut()
+        .abort_algorithms
+        .push(AbortAlgorithm::RemoveListener {
+            held: Heap::from(*target),
+            listener_id,
+        });
+}
+
+/// <https://dom.spec.whatwg.org/#abortsignal-add>
+///
+/// Add an abort algorithm to `signal` that calls `callback` (with the abort
+/// reason as its argument) when the signal is aborted. For callers such as
+/// `fetch` that react to abort.
+pub fn add_abort_algorithm(signal: &AbortSignal<'_>, callback: &js::Function<'_>) {
+    // Step 1: If _signal_ is `aborted`, then return.
+    if is_aborted(signal) {
+        return;
+    }
+
+    // Step 2: `Append` _algorithm_ to _signal_'s `abort algorithms`.
+    signal
+        .data_mut()
+        .abort_algorithms
+        .push(AbortAlgorithm::RunSteps(Heap::from(*callback)));
+}
+
+/// <https://dom.spec.whatwg.org/#abortsignal-remove>
+///
+/// Remove the run-steps abort algorithm registered for `callback` (matched by
+/// object identity). For callers such as pipeTo that detach their abort handler
+/// when they finish before the signal aborts. A no-op if the signal already
+/// aborted (its abort algorithms were emptied when it ran the abort steps).
+pub fn remove_abort_algorithm(signal: &AbortSignal<'_>, callback: &js::Function<'_>) {
+    signal
+        .data_mut()
+        .abort_algorithms
+        .retain(|algo| match algo {
+            AbortAlgorithm::RunSteps(cb) => !cb.eq_stack(callback),
+            AbortAlgorithm::RemoveListener { .. } => true,
+        });
 }
 
 /// An event-loop task that signals abort on a timeout signal with a

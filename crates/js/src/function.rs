@@ -10,20 +10,21 @@
 //!
 //! # Callbacks
 //!
-//! Use [`Function::new_callback`] to create a JS function backed by a Rust
-//! callback. The callback receives a [`Scope`] for interacting with the JS
-//! engine and a [`CallbackArgs`] struct for safe argument access.
+//! Use [`Function::new_callback`](Stack::new_callback) to create a JS
+//! function backed by a Rust function pointer. The callback receives a
+//! [`Scope`] for interacting with the JS engine, a [`CallbackArgs`] struct
+//! for safe argument access, and a rooted payload value.
 //!
 //! ```ignore
 //! # use core_runtime::js::gc::scope::Scope;
 //! # fn example(scope: &Scope<'_>) {
 //! use core_runtime::js;
 //!
-//! let add = js::Function::new_closure(&scope, c"add", 2, |_scope, args| {
+//! let add = js::Function::new_callback(&scope, c"add", 2, |_scope, args, _payload| {
 //!     let a = args.get_i32(0).unwrap_or(0);
 //!     let b = args.get_i32(1).unwrap_or(0);
 //!     Ok(js::value::from_i32(a + b))
-//! }).unwrap();
+//! }, js::value::undefined()).unwrap();
 //! # }
 //! ```
 //!
@@ -33,14 +34,13 @@
 //! [`call_by_name`](Stack::call_by_name) methods to invoke JS functions
 //! from Rust.
 
-use std::borrow::Cow;
 use std::ffi::CStr;
 use std::os::raw::c_uint;
 use std::ptr::NonNull;
 
 use super::error::{report_error_ascii, ExnThrown};
 use crate::builtins::JSType;
-use crate::conversion::{ConversionError, FromJSVal, ToJSVal};
+use crate::conversion::ToJSVal;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
 use crate::value::ValueArrayRooter;
@@ -296,19 +296,14 @@ impl<'s> Stack<'s, Function> {
     }
 
     // ---------------------------------------------------------------------------
-    // Closure-based callbacks
+    // Rust-native callbacks
     // ---------------------------------------------------------------------------
 
-    /// Create a new JS function backed by a Rust closure.
+    /// Create a new JS function backed by a Rust function pointer plus a
+    /// JS-value payload.
     ///
-    /// The closure receives a [`Scope`] for interacting with the JS engine
-    /// (creating strings, objects, calling functions, etc.) and a [`CallbackArgs`]
-    /// for safe argument access. It returns a [`Value`] (or an error) that is
-    /// automatically set as the function's return value.
-    ///
-    /// The closure is stored in a hidden carrier object that is traced from the
-    /// function's reserved slot. When the function is garbage-collected the
-    /// carrier becomes unreachable, and its finalizer frees the closure.
+    /// The callback receives a [`Scope`], a [`CallbackArgs`], and the provided `payload` value.
+    /// The returned `Ok(JSVal)` is set as the function's return value.
     ///
     /// # Example
     ///
@@ -317,9 +312,13 @@ impl<'s> Stack<'s, Function> {
     /// # fn example(scope: &Scope<'_>) {
     /// use core_runtime::js;
     ///
-    /// let greet = js::Function::new_closure(scope, c"greet", 1, |scope, args| {
-    ///     Ok(js::value::from_i32(42))
-    /// }).unwrap();
+    /// let greet = js::Function::new_callback(
+    ///     scope,
+    ///     c"greet",
+    ///     1,
+    ///     |_scope, _args, _payload| Ok(js::value::from_i32(42)),
+    ///     js::value::undefined(),
+    /// ).unwrap();
     /// # }
     /// ```
     pub fn new_callback(
@@ -329,8 +328,47 @@ impl<'s> Stack<'s, Function> {
         cb: Callback,
         payload: impl ToJSVal<'s>,
     ) -> Result<Self, ExnThrown> {
-        // Create the function itself.
-        let fun = Self::new_with_reserved(scope, Some(callback_trampoline), nargs, 0, name)?;
+        Self::new_callback_with_flags(scope, name, nargs, 0, cb, payload)
+    }
+
+    /// Create a callback-backed function that can be invoked with `new`.
+    ///
+    /// Identical to [`new_callback`](Self::new_callback) but the resulting
+    /// function carries `JSFUN_CONSTRUCTOR`, so `new f(...)` runs the callback as
+    /// a constructor. A constructor callback whose return value is an object has
+    /// that object adopted as the constructed instance; a non-object return yields a freshly
+    /// allocated `this`. The component-model interpreter uses this to synthesize
+    /// imported-resource constructors.
+    pub fn new_constructor_callback(
+        scope: &'s Scope<'_>,
+        name: &CStr,
+        nargs: c_uint,
+        cb: Callback,
+        payload: impl ToJSVal<'s>,
+    ) -> Result<Self, ExnThrown> {
+        Self::new_callback_with_flags(
+            scope,
+            name,
+            nargs,
+            mozjs::jsapi::JSFUN_CONSTRUCTOR,
+            cb,
+            payload,
+        )
+    }
+
+    /// Shared body of [`new_callback`](Self::new_callback) and
+    /// [`new_constructor_callback`](Self::new_constructor_callback): create the
+    /// reserved-slot function with the given creation `flags` and stash the
+    /// callback pointer and payload.
+    fn new_callback_with_flags(
+        scope: &'s Scope<'_>,
+        name: &CStr,
+        nargs: c_uint,
+        flags: c_uint,
+        cb: Callback,
+        payload: impl ToJSVal<'s>,
+    ) -> Result<Self, ExnThrown> {
+        let fun = Self::new_with_reserved(scope, Some(callback_trampoline), nargs, flags, name)?;
 
         unsafe {
             fun.set_reserved(
@@ -358,53 +396,6 @@ impl From<ReservedSlot> for usize {
     fn from(slot: ReservedSlot) -> Self {
         slot as usize
     }
-}
-
-// ---------------------------------------------------------------------------
-// Safe callback trait
-// ---------------------------------------------------------------------------
-
-/// Trait for defining safe native callbacks callable from JavaScript.
-///
-/// Implementors provide a `call` method that receives a safe context and
-/// parsed arguments, instead of raw pointers.
-///
-/// # Example
-///
-/// ```ignore
-/// use crate::function::JSCallable;
-/// use crate::error::ExnThrown;
-/// use mozjs::context::JSContext;
-/// use mozjs::jsapi::CallArgs;
-///
-/// struct MyFunction;
-///
-/// impl JSCallable for MyFunction {
-///     fn call(
-///         &self,
-///         cx: &mut JSContext,
-///         args: &CallArgs,
-///     ) -> Result<(), ExnThrown> {
-///         // Implementation here
-///         Ok(())
-///     }
-/// }
-/// ```
-///
-/// Register a `JSCallable` implementor as a native function by wrapping it
-/// in an `unsafe extern "C"` callback. The raw callback is inherently unsafe
-/// at the FFI boundary, but the *implementation* via [`JSCallable::call`] can
-/// be safe.
-pub trait JSCallable {
-    /// Handle a call from JavaScript.
-    ///
-    /// `args` provides access to `this`, the arguments, and the return value
-    /// slot. Set the return value via `args.rval().set(...)`.
-    fn call(
-        &self,
-        cx: &mut mozjs::context::JSContext,
-        args: &mozjs::jsapi::CallArgs,
-    ) -> Result<(), ExnThrown>;
 }
 
 // ---------------------------------------------------------------------------

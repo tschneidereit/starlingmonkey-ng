@@ -69,10 +69,7 @@ starling --legacy-script old-code.js
 
 ## Built-in APIs
 
-StarlingMonkey's suite of builtins is currently in its infancy, only providing
-a small set of builtins that were written to test out the API:
-spec-compliant Rust implementations of `DOMException` and `atob`/`btoa` exist, as well as basic versions `setTimeout`/`clearTimeout`,
-`setInterval`/ `clearInterval`.
+StarlingMonkey's suite of builtins is a work in progress for now.
 
 ### C++ built-ins
 
@@ -96,7 +93,7 @@ Arguments:
 
 Options:
   -e, --eval <SCRIPT>                Evaluate inline script instead of a file
-  -i, --initializer-script <PATH>    Run an init script in a separate global first
+  -i, --initializer-script <PATH>    Run an init script (classic, synchronous) before the content script
       --legacy-script                Run as a classic script instead of an ES module
   -v, --verbose                      Enable verbose logging
   -d, --debug                        Enable script debugging via socket

@@ -67,10 +67,9 @@ use mozjs::context::JSContext;
 use mozjs::gc::{Handle, MutableHandle};
 use mozjs::jsapi::JSContext as RawJSContext;
 use mozjs::jsapi::JS::{BigInt, Symbol};
-use mozjs::jsapi::{
-    jsid, JSAutoRealm, JSClass, JSFunction, JSObject, JSScript, JSString, OnNewGlobalHookOption,
-    Value,
-};
+use mozjs::jsapi::{jsid, JSAutoRealm, JSClass, JSFunction, JSObject, JSScript, JSString, Value};
+
+pub use mozjs::jsapi::OnNewGlobalHookOption;
 
 // ---------------------------------------------------------------------------
 // Typestate markers
@@ -396,7 +395,12 @@ impl<'cx> RootScope<'cx, EnteredRealm> {
     ///
     /// let engine = JSEngine::init().unwrap();
     /// let mut rt = Runtime::new(engine.handle());
-    /// let scope = RootScope::new_global(rt.cx(), &SIMPLE_GLOBAL_CLASS, RealmOptions::default());
+    /// let scope = RootScope::new_global(
+    ///     rt.cx(),
+    ///     &SIMPLE_GLOBAL_CLASS,
+    ///     OnNewGlobalHookOption::DontFireOnNewGlobalHook,
+    ///     RealmOptions::default()
+    /// );
     /// ```
     ///
     /// # Panics
@@ -405,6 +409,7 @@ impl<'cx> RootScope<'cx, EnteredRealm> {
     pub fn new_global(
         cx: &'cx mut JSContext,
         class: &JSClass,
+        hook_option: OnNewGlobalHookOption,
         options: mozjs::rust::RealmOptions,
     ) -> RootScope<'cx, EnteredRealm> {
         let scope_no_realm = RootScope::new(cx);
@@ -413,7 +418,7 @@ impl<'cx> RootScope<'cx, EnteredRealm> {
                 scope_no_realm.cx_mut(),
                 class,
                 std::ptr::null_mut(),
-                OnNewGlobalHookOption::FireOnNewGlobalHook,
+                hook_option,
                 &*options,
             )
         };

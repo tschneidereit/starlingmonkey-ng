@@ -25,6 +25,7 @@ use std::ptr::NonNull;
 
 use crate::builtins::JSType;
 use crate::conversion::ConversionError;
+use crate::exception;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
 use crate::prelude::{FromJSVal, ToJSVal};
@@ -433,6 +434,28 @@ impl<'s> Stack<'s, Object> {
     pub fn set_prototype(&self, scope: &Scope<'_>, proto: HandleObject) -> Result<(), ExnThrown> {
         let ok = unsafe { wrappers2::JS_SetPrototype(scope.cx_mut(), self.handle(), proto) };
         ExnThrown::check(ok)
+    }
+
+    /// Attempt to make this object's prototype immutable.
+    ///
+    /// The `Ok(bool)` result indicates whether the attempt was successful.
+    ///
+    /// This is a nonstandard internal method mainly used to ensure the integrity of the global
+    /// object's prototype chain.
+    pub fn make_proto_immutable(&self, scope: &Scope<'_>) -> Result<bool, ExnThrown> {
+        let mut success = false;
+        let ok = unsafe {
+            wrappers2::JS_SetImmutablePrototype(scope.cx_mut(), self.handle(), &mut success)
+        };
+        if ok {
+            Ok(success)
+        } else {
+            debug_assert!(
+                exception::is_pending(scope),
+                "We don't handle uncatchable exceptions in this method"
+            );
+            Err(ExnThrown)
+        }
     }
 
     /// Whether this object is callable, which is true for functions, bound

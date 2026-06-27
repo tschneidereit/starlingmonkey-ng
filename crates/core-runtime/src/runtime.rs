@@ -16,10 +16,12 @@ use crate::{
 };
 use js::{
     engine::{JSEngine, JSEngineHandle, MozJSRuntime, RealmOptions},
-    gc::{handle::Heap, scope::Scope},
+    gc::{
+        handle::Heap,
+        scope::{OnNewGlobalHookOption, Scope},
+    },
     heap::Trace,
-    native::JS_GetRuntime,
-    native::{JSRuntime, JSTracer},
+    native::{JSRuntime, JSTracer, JS_GetRuntime},
     prelude::RootScope,
     Object,
 };
@@ -261,10 +263,15 @@ impl Runtime {
     /// default untouched.
     pub fn new_global(&self) -> RootScope<'_, js::gc::scope::EnteredRealm> {
         let cx = self.mozjs_rt_mut().cx();
+        // Trace any private data a global initializer stores on the
+        // global via `set_global_private_and_proto`.
+        let mut options = RealmOptions::default();
+        js::class::install_global_private_trace(&mut options);
         let scope = RootScope::new_global(
             cx,
             &js::class::STARLING_GLOBAL_CLASS,
-            RealmOptions::default(),
+            OnNewGlobalHookOption::DontFireOnNewGlobalHook,
+            options,
         );
 
         if !self.default_global.is_initialized() {

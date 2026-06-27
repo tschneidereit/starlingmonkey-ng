@@ -18,6 +18,34 @@ use core_runtime::test_util::eval_with_setup;
 fn setup() {
     core_runtime::runtime::register_global_initializer(|scope, global| {
         web_globals::add_to_global(scope, global);
+        // Test-only hook: `__addAbortAlgorithm(signal, fn)` registers `fn` as a
+        // native abort algorithm — the internal API builtins like fetch use —
+        // so tests can exercise algorithm semantics that have no public JS
+        // surface (notably: a throwing algorithm must not short-circuit the
+        // remaining algorithms, the `abort` event, or dependent signals).
+        let helper = js::Function::new_callback(
+            scope,
+            c"__addAbortAlgorithm",
+            2,
+            |scope, args, _| {
+                let signal = js::Object::from_value(scope, *args.get(0))
+                    .map_err(|e| e.throw(scope))?
+                    .cast::<web_globals::signals::AbortSignal>()
+                    .map_err(|_| js::error::throw_type_error(scope, c"not an AbortSignal"))?;
+                let callback = js::Object::from_value(scope, *args.get(1))
+                    .map_err(|e| e.throw(scope))?
+                    .cast::<js::Function>()
+                    .map_err(|_| js::error::throw_type_error(scope, c"not a function"))?;
+                web_globals::signals::algorithms::add_abort_algorithm(&signal, &callback);
+                Ok(js::value::undefined())
+            },
+            (),
+        )
+        .expect("create __addAbortAlgorithm");
+        let helper_val = scope.root_value(helper.as_value());
+        global
+            .set_property(scope, c"__addAbortAlgorithm", helper_val)
+            .expect("install __addAbortAlgorithm");
     });
 }
 
@@ -95,5 +123,49 @@ fn onabort_set_null_removes_handler() {
             "#
         ),
         "false"
+    );
+}
+
+// ── Abort algorithms
+
+#[test]
+fn throwing_abort_algorithm_does_not_short_circuit() {
+    // A throwing algorithm is reported, and must not keep the remaining
+    // algorithms or the `abort` event from running (run-the-abort-steps is
+    // infallible in the spec).
+    assert_eq!(
+        eval(
+            r#"
+            var ac = new AbortController();
+            var events = [];
+            __addAbortAlgorithm(ac.signal, function() { throw new Error("algo-1 boom"); });
+            __addAbortAlgorithm(ac.signal, function() { events.push("algo-2"); });
+            ac.signal.addEventListener("abort", function() { events.push("event"); });
+            ac.abort();
+            events.join(",")
+            "#
+        ),
+        "algo-2,event"
+    );
+}
+
+#[test]
+fn throwing_abort_algorithm_still_aborts_dependents() {
+    // Signal-abort step 6: dependent signals' abort steps run even when one of
+    // the parent's algorithms throws.
+    assert_eq!(
+        eval(
+            r#"
+            var ac = new AbortController();
+            var dep = AbortSignal.any([ac.signal]);
+            var events = [];
+            __addAbortAlgorithm(ac.signal, function() { throw new Error("boom"); });
+            dep.addEventListener("abort", function() { events.push("dep-event"); });
+            ac.abort();
+            events.push("dep-aborted=" + dep.aborted);
+            events.join(",")
+            "#
+        ),
+        "dep-event,dep-aborted=true"
     );
 }
