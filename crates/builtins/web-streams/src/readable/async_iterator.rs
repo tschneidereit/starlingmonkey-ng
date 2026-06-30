@@ -32,7 +32,9 @@ use crate::support;
 ///
 /// The prototype's `[[Prototype]]` is set to `%AsyncIteratorPrototype%` at
 /// registration (see `add_to_global`), which supplies `[Symbol.asyncIterator]`.
-#[webidl_interface(no_ctor)]
+// WebIDL §3.7.10: the class string of an asynchronous iterator prototype object
+// is the interface identifier followed by " AsyncIterator" (with a space).
+#[webidl_interface(hidden, to_string_tag = "ReadableStream AsyncIterator")]
 pub struct ReadableStreamAsyncIterator {
     /// The `DefaultReader` acquired for this iteration.
     pub(crate) reader: Option<Heap<js::object::Object>>,
@@ -48,7 +50,7 @@ pub struct ReadableStreamAsyncIterator {
 
 #[webidl_methods]
 impl ReadableStreamAsyncIterator {
-    /// Not exposed to JS (see `no_ctor`). Produces the default-initialized data;
+    /// Not exposed to JS (see `hidden`). Produces the default-initialized data;
     /// the fields are populated by `ReadableStream.prototype.values`.
     #[constructor]
     fn new() -> Self {

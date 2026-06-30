@@ -47,6 +47,9 @@ struct AttrOpts {
     /// Bare flag: `#[webidl_interface(no_ctor)]` marks an interface
     /// with no exposed `constructor` operation, so `new Foo()` throws TypeError.
     no_ctor: bool,
+    /// Bare flag: `#[webidl_interface(hidden)]` marks an interface
+    /// that's not installed as a property on the global object. Implies `no_ctor`.
+    hidden: bool,
     /// Bare flag: `#[getter(unforgeable)]` marks a `[LegacyUnforgeable]`
     /// accessor — installed per-instance as an own property, not on the prototype.
     unforgeable: bool,
@@ -59,6 +62,14 @@ impl Parse for AttrOpts {
             let key: Ident = input.parse()?;
             // Bare flags take no `= value`.
             if key == "no_ctor" {
+                opts.no_ctor = true;
+                if !input.is_empty() {
+                    let _: Token![,] = input.parse()?;
+                }
+                continue;
+            }
+            if key == "hidden" {
+                opts.hidden = true;
                 opts.no_ctor = true;
                 if !input.is_empty() {
                     let _: Token![,] = input.parse()?;
@@ -131,6 +142,7 @@ fn parse_marker_opts(attr: &syn::Attribute, allowed: &[&str]) -> syn::Result<Att
     reject(opts.js_proto.is_some(), "js_proto")?;
     reject(opts.to_string_tag.is_some(), "to_string_tag")?;
     reject(opts.no_ctor, "no_ctor")?;
+    reject(opts.hidden, "hidden")?;
     reject(opts.unforgeable, "unforgeable")?;
     Ok(opts)
 }
@@ -358,6 +370,15 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         quote! {}
     };
 
+    // Generate HIDDEN override when `hidden` is set.
+    let hidden_const = if opts.hidden {
+        quote! {
+            const HIDDEN: bool = true;
+        }
+    } else {
+        quote! {}
+    };
+
     // Generate the `install_unforgeable` ClassDef method. It chains to the
     // parent interface (for inherited unforgeable accessors) and delegates own
     // accessors to the `__UnforgeableRegistrar` provided by `#[jsmethods]`.
@@ -546,6 +567,7 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             #has_error_data_const
             #constants_on_prototype_const
             #constructible_const
+            #hidden_const
             #install_unforgeable_method
             #debug_assert_method
         }
@@ -1425,6 +1447,20 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         quote! {}
     };
 
+    let add_to_global_fn = quote! {
+        /// Register this class on a global object, making it available
+        /// as a constructor in JavaScript.
+        ///
+        /// If the class is marked as hidden `#[{jsclass,webidl_interface}(hidden)]`, the
+        /// constructor isn't installed on the global object, so it is not visible to content.
+        pub fn add_to_global<'scope>(scope: &'scope ::js::gc::scope::Scope<'_>, global: ::js::Object<'scope>) {
+            unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
+            if <#inner_name as ::js::class::ClassDef>::HIDDEN {
+                global.delete_property(scope, <#inner_name as ::js::class::ClassDef>::NAME_CSTR).expect("delete_property failed");
+            }
+        }
+    };
+
     // Generate `impl<'s> Foo<'s>` containing new(), add_to_global(), and
     // setup-style constructor / post_init methods.
     let ctor_new_impl = if let Some(idx) = setup_ctor_info {
@@ -1535,14 +1571,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     }
                 }
 
-                /// Register this class on a global object, making it available
-                /// as a constructor in JavaScript.
-                pub fn add_to_global<'scope>(
-                    scope: &'scope ::js::gc::scope::Scope<'_>,
-                    global: ::js::Object<'scope>,
-                ) {
-                    unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
-                }
+                #add_to_global_fn
 
                 #setup_fn
                 #post_init_fn_tokens
@@ -1573,11 +1602,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                 quote! {
                     #[cfg_attr(crown, allow(crown::unrooted_must_root))]
                     impl<'s> #type_name<'s> {
-                        /// Register this class on a global object, making it available
-                        /// as a constructor in JavaScript.
-                        pub fn add_to_global<'scope>(scope: &'scope ::js::gc::scope::Scope<'_>, global: ::js::Object<'scope>) {
-                            unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
-                        }
+                        #add_to_global_fn
                         #pi_fn_tokens
                     }
                 }
@@ -1658,12 +1683,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                         }
 
                         #init_fn
-
-                        /// Register this class on a global object, making it available
-                        /// as a constructor in JavaScript.
-                        pub fn add_to_global<'scope>(scope: &'scope ::js::gc::scope::Scope<'_>, global: ::js::Object<'scope>) {
-                            unsafe { ::js::class::register_class::<#inner_name>(scope, global); }
-                        }
+                        #add_to_global_fn
                         #pi_fn_tokens
                     }
                 }
