@@ -196,7 +196,7 @@ impl AbortSignal {
 
     /// <https://dom.spec.whatwg.org/#dom-abortsignal-abort>
     #[static_method]
-    fn abort<'r>(
+    pub fn abort<'r>(
         scope: &'r Scope<'_>,
         reason: Option<HandleValue<'_>>,
     ) -> Result<AbortSignal<'r>, ExnThrown> {
@@ -219,7 +219,10 @@ impl AbortSignal {
 
     /// <https://dom.spec.whatwg.org/#dom-abortsignal-timeout>
     #[static_method]
-    fn timeout<'r>(scope: &'r Scope<'_>, milliseconds: f64) -> Result<AbortSignal<'r>, ExnThrown> {
+    pub fn timeout<'r>(
+        scope: &'r Scope<'_>,
+        milliseconds: f64,
+    ) -> Result<AbortSignal<'r>, ExnThrown> {
         // Step 1: Let _signal_ be a new ``AbortSignal`` object.
         let signal = AbortSignal::new(scope)?;
 
@@ -238,7 +241,7 @@ impl AbortSignal {
 
     /// <https://dom.spec.whatwg.org/#dom-abortsignal-any>
     #[static_method]
-    fn any<'r>(
+    pub fn any<'r>(
         scope: &'r Scope<'_>,
         // TODO: use a WebIDL sequence for this, after making that usable outside of unions.
         signals: HandleValue<'_>,

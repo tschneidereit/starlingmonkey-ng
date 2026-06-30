@@ -18,11 +18,12 @@ use js::Object;
 use super::algorithms;
 use super::event::Event;
 use crate::dom_exception::DOMExceptionError;
+use crate::events::event::EventFlags;
 
 /// An event listener stored in an EventTarget's event listener list.
 ///
 /// <https://dom.spec.whatwg.org/#concept-event-listener>
-#[js::allow_unrooted_interior]
+#[js::must_root]
 pub(crate) struct EventListener {
     /// Identity used to re-locate this listener in the live list during
     /// dispatch (the snapshot stores ids, not pointers — see `algorithms.rs`).
@@ -140,19 +141,15 @@ impl EventTarget {
     ) -> Result<bool, DOMExceptionError> {
         // Step 1: If _event_'s `dispatch flag` is set, or if its `initialized flag` is not set,
         //         then `throw` an "``InvalidStateError``" ``DOMException``.
-        // Scope the borrow so its guard drops before the `data_mut()` below.
-        {
-            let event_data = event.data();
-            if event_data.dispatch_flag || !event_data.initialized_flag {
-                return Err(DOMExceptionError::new(
-                    "InvalidStateError",
-                    "The event is already being dispatched or has not been initialized",
-                ));
-            }
+        if event.is_dispatching() || !event.is_initialized() {
+            return Err(DOMExceptionError::new(
+                "InvalidStateError",
+                "The event is already being dispatched or has not been initialized",
+            ));
         }
 
         // Step 2: Initialize _event_'s ``isTrusted`` attribute to false.
-        event.data_mut().is_trusted = false;
+        event.data_mut().flags.remove(EventFlags::TRUSTED);
 
         // Step 3: Return the result of `dispatching` _event_ to `this`.
         Ok(algorithms::dispatch(scope, &event, self))

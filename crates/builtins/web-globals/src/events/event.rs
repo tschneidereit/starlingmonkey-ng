@@ -4,16 +4,31 @@
 //!
 //! Implements the core DOM Event type following the WHATWG DOM Living Standard.
 
-use std::time::Instant;
-
+use bitflags::bitflags;
 use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods};
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 
+use crate::performance;
+
 use super::event_target::EventTargetImpl;
 
-/// <https://dom.spec.whatwg.org/#interface-event>
-// TODO: convert all these bools into bitflags.
+bitflags! {
+    #[derive(Debug, Default)]
+    pub struct EventFlags: u16 {
+        const STOP_PROPAGATION = 1 << 0;
+        const STOP_IMMEDIATE_PROPAGATION = 1 << 1;
+        const CANCELED = 1 << 2;
+        const IN_PASSIVE_LISTENER = 1 << 3;
+        const DISPATCH = 1 << 4;
+        const INITIALIZED = 1 << 5;
+        const BUBBLES = 1 << 6;
+        const CANCELABLE = 1 << 7;
+        const COMPOSED = 1 << 8;
+        const TRUSTED = 1 << 9;
+    }
+}
+
 #[webidl_interface]
 pub struct Event {
     /// The event type (e.g. "click", "abort").
@@ -21,57 +36,13 @@ pub struct Event {
     pub(crate) event_type: String,
     /// <https://dom.spec.whatwg.org/#dom-event-target>
     pub(crate) target: Option<Heap<EventTargetImpl>>,
-    /// <https://dom.spec.whatwg.org/#dom-event-currenttarget>
-    pub(crate) current_target: Option<Heap<EventTargetImpl>>,
-    /// <https://dom.spec.whatwg.org/#dom-event-eventphase>
-    #[no_trace]
-    pub(crate) event_phase: u16,
-    /// <https://dom.spec.whatwg.org/#dom-event-bubbles>
-    #[no_trace]
-    pub(crate) bubbles: bool,
-    /// <https://dom.spec.whatwg.org/#dom-event-cancelable>
-    #[no_trace]
-    pub(crate) cancelable: bool,
-    /// <https://dom.spec.whatwg.org/#dom-event-composed>
-    #[no_trace]
-    pub(crate) composed: bool,
-    /// <https://dom.spec.whatwg.org/#dom-event-istrusted>
-    #[no_trace]
-    pub(crate) is_trusted: bool,
     /// <https://dom.spec.whatwg.org/#dom-event-timestamp>
     #[no_trace]
     pub(crate) time_stamp: f64,
 
     // Internal flags per spec.
     #[no_trace]
-    pub(crate) stop_propagation_flag: bool,
-    #[no_trace]
-    pub(crate) stop_immediate_propagation_flag: bool,
-    #[no_trace]
-    pub(crate) canceled_flag: bool,
-    #[no_trace]
-    pub(crate) in_passive_listener_flag: bool,
-    #[no_trace]
-    pub(crate) dispatch_flag: bool,
-    #[no_trace]
-    pub(crate) initialized_flag: bool,
-}
-
-/// Monotonic reference point for `timeStamp` computation.
-///
-/// Per the spec, `timeStamp` returns the number of milliseconds since
-/// "time origin" — we approximate with process-relative monotonic time.
-fn time_origin() -> &'static Instant {
-    use std::sync::OnceLock;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    ORIGIN.get_or_init(Instant::now)
-}
-
-/// Returns the current high-resolution timestamp in milliseconds relative to
-/// the time origin.
-pub(crate) fn current_high_res_time() -> f64 {
-    let elapsed = time_origin().elapsed();
-    elapsed.as_secs_f64() * 1000.0
+    pub(crate) flags: EventFlags,
 }
 
 #[webidl_methods]
@@ -85,42 +56,36 @@ impl Event {
     /// <https://dom.spec.whatwg.org/#concept-event-constructor>
     #[constructor]
     pub fn new(event_type: String, event_init_dict: Option<EventInit>) -> Self {
-        let opts = event_init_dict.unwrap_or_default();
+        let mut flags = EventFlags::INITIALIZED;
+        if let Some(init) = event_init_dict {
+            flags.set(EventFlags::BUBBLES, init.bubbles);
+            flags.set(EventFlags::CANCELABLE, init.cancelable);
+            flags.set(EventFlags::COMPOSED, init.composed);
+        }
         Self {
             event_type,
             target: None,
-            current_target: None,
-            event_phase: Self::NONE,
-            bubbles: opts.bubbles,
-            cancelable: opts.cancelable,
-            composed: opts.composed,
-            is_trusted: false,
-            time_stamp: current_high_res_time(),
-            stop_propagation_flag: false,
-            stop_immediate_propagation_flag: false,
-            canceled_flag: false,
-            in_passive_listener_flag: false,
-            dispatch_flag: false,
-            initialized_flag: true,
+            time_stamp: performance::now(),
+            flags,
         }
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-type>
     #[getter(name = "type")]
-    fn get_type(&self) -> String {
+    pub fn get_type(&self) -> String {
         self.data().event_type.clone()
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-target>
     #[getter]
-    fn target<'r>(&self, scope: &'r Scope<'_>) -> Option<super::event_target::EventTarget<'r>> {
+    pub fn target<'r>(&self, scope: &'r Scope<'_>) -> Option<super::event_target::EventTarget<'r>> {
         // Step 1: Return this's target.
         self.data().target.as_ref().map(|h| h.get(scope))
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-srcelement>
     #[getter]
-    fn src_element<'r>(
+    pub fn src_element<'r>(
         &self,
         scope: &'r Scope<'_>,
     ) -> Option<super::event_target::EventTarget<'r>> {
@@ -130,31 +95,47 @@ impl Event {
 
     /// <https://dom.spec.whatwg.org/#dom-event-currenttarget>
     #[getter]
-    fn current_target<'r>(
+    pub fn current_target<'r>(
         &self,
         scope: &'r Scope<'_>,
     ) -> Option<super::event_target::EventTarget<'r>> {
-        self.data().current_target.as_ref().map(|h| h.get(scope))
+        // Since we don't implement event propagation, `currentTarget` is `target` during dispatch,
+        // and `null` otherwise.
+        if self.is_dispatching() {
+            self.data().target.as_ref().map(|h| h.get(scope))
+        } else {
+            None
+        }
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-eventphase>
     #[getter]
-    fn event_phase(&self) -> u16 {
-        self.data().event_phase
+    pub fn event_phase(&self) -> u16 {
+        // We only implement the NONE phase and AT_TARGET phase, so if we're dispatching, we're
+        // AT_TARGET.
+        if self.is_dispatching() {
+            EventImpl::AT_TARGET
+        } else {
+            EventImpl::NONE
+        }
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-stoppropagation>
     #[method]
-    fn stop_propagation(&self) {
+    pub fn stop_propagation(&self) {
         // Step 1: Set this's stop propagation flag.
-        self.data_mut().stop_propagation_flag = true;
+        self.data_mut().flags.insert(EventFlags::STOP_PROPAGATION);
+    }
+
+    pub fn is_propagation_stopped(&self) -> bool {
+        self.data().flags.contains(EventFlags::STOP_PROPAGATION)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-cancelbubble>
     #[getter]
     fn cancel_bubble(&self) -> bool {
         // Step 1: Return true if this's stop propagation flag is set; otherwise false.
-        self.data().stop_propagation_flag
+        self.is_propagation_stopped()
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-cancelbubble>
@@ -163,36 +144,42 @@ impl Event {
         // Step 1: Set this's stop propagation flag if the given value is true; otherwise do
         //         nothing.
         if value {
-            self.data_mut().stop_propagation_flag = true;
+            self.stop_propagation();
         }
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-stopimmediatepropagation>
     #[method]
-    fn stop_immediate_propagation(&self) {
+    pub fn stop_immediate_propagation(&self) {
         // Step 1: Set this's stop propagation flag and this's stop immediate propagation flag.
-        let mut data = self.data_mut();
-        data.stop_propagation_flag = true;
-        data.stop_immediate_propagation_flag = true;
+        self.data_mut()
+            .flags
+            .insert(EventFlags::STOP_PROPAGATION | EventFlags::STOP_IMMEDIATE_PROPAGATION);
+    }
+
+    pub fn is_immediate_propagation_stopped(&self) -> bool {
+        self.data()
+            .flags
+            .contains(EventFlags::STOP_IMMEDIATE_PROPAGATION)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-bubbles>
     #[getter]
-    fn bubbles(&self) -> bool {
-        self.data().bubbles
+    pub fn bubbles(&self) -> bool {
+        self.data().flags.contains(EventFlags::BUBBLES)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-cancelable>
     #[getter]
-    fn cancelable(&self) -> bool {
-        self.data().cancelable
+    pub fn cancelable(&self) -> bool {
+        self.data().flags.contains(EventFlags::CANCELABLE)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-returnvalue>
     #[getter]
     fn return_value(&self) -> bool {
         // Step 1: Return false if this's canceled flag is set; otherwise true.
-        !self.data().canceled_flag
+        !self.is_canceled()
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-returnvalue>
@@ -201,29 +188,37 @@ impl Event {
         // Step 1: Set the canceled flag with this if the given value is false; otherwise do
         //         nothing.
         if !value {
-            set_the_canceled_flag(&mut self.data_mut());
+            self.cancel();
         }
+    }
+
+    pub fn cancel(&self) {
+        set_the_canceled_flag(&mut self.data_mut());
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.data().flags.contains(EventFlags::CANCELED)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-preventdefault>
     #[method]
-    fn prevent_default(&self) {
+    pub fn prevent_default(&self) {
         // Step 1: Set the canceled flag with this.
-        set_the_canceled_flag(&mut self.data_mut());
+        self.cancel();
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-defaultprevented>
     #[getter]
-    fn default_prevented(&self) -> bool {
+    pub fn default_prevented(&self) -> bool {
         // Step 1: Return true if this's canceled flag is set; otherwise false.
-        self.data().canceled_flag
+        self.is_canceled()
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-composed>
     #[getter]
     fn composed(&self) -> bool {
         // Step 1: Return true if this's composed flag is set; otherwise false.
-        self.data().composed
+        self.data().flags.contains(EventFlags::COMPOSED)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-istrusted>
@@ -231,13 +226,13 @@ impl Event {
     /// `[LegacyUnforgeable]`: installed as an own, non-configurable accessor on
     /// each instance rather than on the prototype.
     #[getter(unforgeable)]
-    fn is_trusted(&self) -> bool {
-        self.data().is_trusted
+    pub fn is_trusted(&self) -> bool {
+        self.data().flags.contains(EventFlags::TRUSTED)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-timestamp>
     #[getter]
-    fn time_stamp(&self) -> f64 {
+    pub fn time_stamp(&self) -> f64 {
         self.data().time_stamp
     }
 
@@ -259,7 +254,7 @@ impl Event {
     #[method]
     fn init_event(&self, event_type: String, bubbles: Option<bool>, cancelable: Option<bool>) {
         // Step 1: If `this`'s `dispatch flag` is set, then return.
-        if self.data().dispatch_flag {
+        if self.data().flags.contains(EventFlags::DISPATCH) {
             return;
         }
         // Step 2: `Initialize` `this` with _type_, _bubbles_, and _cancelable_.
@@ -270,6 +265,55 @@ impl Event {
             cancelable.unwrap_or(false),
         );
     }
+
+    /// Whether the event's dispatch flag is set (it is currently being
+    /// dispatched). Read by guards like `FetchEvent.respondWith` step 2.
+    pub fn is_dispatching(&self) -> bool {
+        self.data().flags.contains(EventFlags::DISPATCH)
+    }
+
+    /// Start dispatching the event by setting its dispatch flag.
+    ///
+    /// Used in some tests, but not part of the stable public API.
+    #[doc(hidden)]
+    pub fn start_dispatching(&self) {
+        debug_assert!(!self.data().flags.intersects(
+            EventFlags::DISPATCH
+                | EventFlags::STOP_PROPAGATION
+                | EventFlags::STOP_IMMEDIATE_PROPAGATION,
+        ));
+        self.data_mut().flags.set(EventFlags::DISPATCH, true);
+    }
+
+    /// Stop dispatching the event by resetting its dispatch flag and propagation flags.
+    ///
+    /// Used in some tests, but not part of the stable public API.
+    #[doc(hidden)]
+    pub fn stop_dispatching(&self) {
+        self.data_mut().flags.remove(
+            EventFlags::DISPATCH
+                | EventFlags::STOP_PROPAGATION
+                | EventFlags::STOP_IMMEDIATE_PROPAGATION,
+        );
+    }
+
+    /// Whether the event has been initialized.
+    pub fn is_initialized(&self) -> bool {
+        self.data().flags.contains(EventFlags::INITIALIZED)
+    }
+
+    /// Whether the event is currently dispatching to a passive listener.
+    pub fn in_passive_listener(&self) -> bool {
+        self.data().flags.contains(EventFlags::IN_PASSIVE_LISTENER)
+    }
+
+    /// Set whether the event is currently dispatching to a passive listener.
+    pub(crate) fn set_in_passive_listener(&self, value: bool) {
+        debug_assert!(self.is_dispatching());
+        self.data_mut()
+            .flags
+            .set(EventFlags::IN_PASSIVE_LISTENER, value);
+    }
 }
 
 /// <https://dom.spec.whatwg.org/#set-the-canceled-flag>
@@ -278,8 +322,10 @@ impl Event {
 /// and event's in passive listener flag is unset, then set event's canceled
 /// flag.
 fn set_the_canceled_flag(data: &mut EventImpl) {
-    if data.cancelable && !data.in_passive_listener_flag {
-        data.canceled_flag = true;
+    if data.flags.contains(EventFlags::CANCELABLE)
+        && !data.flags.contains(EventFlags::IN_PASSIVE_LISTENER)
+    {
+        data.flags.insert(EventFlags::CANCELED);
     }
 }
 
@@ -293,22 +339,24 @@ pub(crate) fn initialize_event(
     cancelable: bool,
 ) {
     // Step 1: Set _event_'s `initialized flag`.
-    data.initialized_flag = true;
+    data.flags.insert(EventFlags::INITIALIZED);
     // Step 2: Unset _event_'s `stop propagation flag`, `stop immediate propagation flag`, and
     //         `canceled flag`.
-    data.stop_propagation_flag = false;
-    data.stop_immediate_propagation_flag = false;
-    data.canceled_flag = false;
+    data.flags.remove(
+        EventFlags::STOP_PROPAGATION
+            | EventFlags::STOP_IMMEDIATE_PROPAGATION
+            | EventFlags::CANCELED,
+    );
     // Step 3: Set _event_'s ``isTrusted`` attribute to false.
-    data.is_trusted = false;
+    // (Implicit)
     // Step 4: Set _event_'s `target` to null.
     data.target = None;
     // Step 5: Set _event_'s ``type`` attribute to _type_.
     data.event_type = event_type;
     // Step 6: Set _event_'s ``bubbles`` attribute to _bubbles_.
-    data.bubbles = bubbles;
+    data.flags.set(EventFlags::BUBBLES, bubbles);
     // Step 7: Set _event_'s ``cancelable`` attribute to _cancelable_.
-    data.cancelable = cancelable;
+    data.flags.set(EventFlags::CANCELABLE, cancelable);
 }
 
 /// <https://dom.spec.whatwg.org/#dictdef-eventinit>

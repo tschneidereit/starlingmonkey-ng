@@ -16,7 +16,7 @@ use js::{Function, Object};
 
 use super::event::Event;
 use super::event_target::{EventListener, EventTarget, EventTargetImpl};
-use crate::events::event::EventImpl;
+use crate::events::event::EventFlags;
 use crate::signals::abort_signal::AbortSignal;
 use crate::signals::algorithms as signal_algorithms;
 
@@ -283,38 +283,33 @@ pub(crate) fn remove_an_event_listener_by_id(target: &EventTarget<'_>, id: u64) 
 /// (no shadow DOM, no capturing/bubbling phase, no activation behavior).
 pub(crate) fn dispatch(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'_>) -> bool {
     // Step 1: Set _event_'s `dispatch flag`.
-    event.data_mut().dispatch_flag = true;
+    event.start_dispatching();
 
     // Step 2-5: (Legacy target override, activation target, retargeting — not applicable.)
 
     // Step 6: Simplified — set target and invoke at AT_TARGET only.
     event.data_mut().target = Some(Heap::from(*target));
-    event.data_mut().event_phase = EventImpl::AT_TARGET;
-    event.data_mut().current_target = Some(Heap::from(*target));
 
     invoke_listeners(scope, event, target);
 
     // Step 7: Set _event_'s ``eventPhase`` attribute to ``NONE``.
-    event.data_mut().event_phase = EventImpl::NONE;
+    // (Omitted)
 
     // Step 8: Set _event_'s ``currentTarget`` attribute to null.
-    event.data_mut().current_target = None;
+    // (Omitted)
 
     // Step 9: Set _event_'s `path` to the empty list.
     // (Not applicable without shadow DOM.)
 
     // Step 10: Unset _event_'s `dispatch flag`, `stop propagation flag`, and `stop immediate
     //          propagation flag`.
-    let mut data = event.data_mut();
-    data.dispatch_flag = false;
-    data.stop_propagation_flag = false;
-    data.stop_immediate_propagation_flag = false;
+    event.stop_dispatching();
 
     // Step 11: (clearTargets — not applicable without shadow DOM.)
     // Step 12: (activation behavior — not applicable.)
 
     // Step 13: Return false if _event_'s `canceled flag` is set; otherwise true.
-    !data.canceled_flag
+    !event.is_canceled()
 }
 
 /// Invoke event listeners on a single target.
@@ -322,7 +317,7 @@ pub(crate) fn dispatch(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarge
 /// Based on the "inner invoke" algorithm:
 /// <https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke>
 fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'_>) {
-    if event.data().stop_propagation_flag {
+    if event.is_propagation_stopped() {
         return;
     }
 
@@ -332,7 +327,6 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
     // fetched fresh and rooted (no stored GC pointers, no rooting gap).
     struct ListenerSnapshot {
         id: u64,
-        capture: bool,
         passive: Option<bool>,
         once: bool,
         event_type: String,
@@ -345,7 +339,6 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
         .filter(|l| !l.removed)
         .map(|l| ListenerSnapshot {
             id: l.id,
-            capture: l.capture,
             passive: l.passive,
             once: l.once,
             event_type: l.event_type.clone(),
@@ -353,18 +346,9 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
         .collect();
 
     let event_type = event.data().event_type.clone();
-    let event_phase = event.data().event_phase;
 
     for snap in &snapshots {
         if snap.event_type != event_type {
-            continue;
-        }
-
-        // At AT_TARGET, fire both capturing and bubbling listeners.
-        if event_phase == EventImpl::CAPTURING_PHASE && !snap.capture {
-            continue;
-        }
-        if event_phase == EventImpl::BUBBLING_PHASE && snap.capture {
             continue;
         }
 
@@ -386,7 +370,7 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
 
         // Set in-passive-listener flag if passive.
         if snap.passive == Some(true) {
-            event.data_mut().in_passive_listener_flag = true;
+            event.set_in_passive_listener(true);
         }
 
         // Call the listener. We root the callback from the Heap at call time.
@@ -409,9 +393,9 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
             }
         }
 
-        event.data_mut().in_passive_listener_flag = false;
+        event.set_in_passive_listener(false);
 
-        if event.data().stop_immediate_propagation_flag {
+        if event.is_immediate_propagation_stopped() {
             break;
         }
     }
@@ -437,7 +421,7 @@ pub(crate) fn fire_an_event(
 
     // Step 4: Initialize any other IDL attributes of _event_ as described in the invocation of
     //         this algorithm. This also allows for the ``isTrusted`` attribute to be set to false.
-    event.data_mut().is_trusted = true;
+    event.data_mut().flags.insert(EventFlags::TRUSTED);
 
     // Step 5: Return the result of `dispatching` _event_ at _target_, with _legacy target override
     //         flag_ set if set.
