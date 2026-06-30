@@ -39,14 +39,6 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
     readable::algorithms::ByteTeeState::add_to_global(scope, global);
     readable::algorithms::PipeState::add_to_global(scope, global);
     readable::algorithms::FromIterableState::add_to_global(scope, global);
-    for name in [
-        c"TeeState",
-        c"ByteTeeState",
-        c"PipeState",
-        c"FromIterableState",
-    ] {
-        let _ = global.delete_property(scope, name);
-    }
 
     // Chain the async iterator's prototype under `%AsyncIteratorPrototype%` so it
     // inherits `[Symbol.asyncIterator]` (returning `this`).

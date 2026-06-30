@@ -954,9 +954,9 @@ pub(crate) fn readable_stream_from_iterable<'r>(
 // ---------------------------------------------------------------------------
 
 /// The iterator-record state backing `ReadableStreamFromIterable`'s pull and
-/// cancel algorithms. Not exposed to JS (`no_ctor`); minted internally and
+/// cancel algorithms. Not exposed to JS (`hidden`); minted internally and
 /// reached through each callback's payload value.
-#[jsclass(no_ctor)]
+#[jsclass(hidden)]
 pub(crate) struct FromIterableState {
     /// The `[[Iterator]]` — the async (or wrapped sync) iterator object.
     iterator: Heap<Value>,
@@ -1924,7 +1924,7 @@ pub(crate) fn readable_stream_tee<'r>(
     readable_stream_default_tee(scope, stream, clone_for_branch2)
 }
 
-#[jsclass(no_ctor)]
+#[jsclass(hidden)]
 pub(crate) struct TeeState {
     stream: Heap<ReadableStreamImpl>,
     reader: Heap<DefaultReaderImpl>,
@@ -2013,7 +2013,7 @@ impl TeeState<'_> {
     }
 }
 
-#[jsclass]
+#[jsclass(hidden)]
 pub(crate) struct PipeState {
     source: Heap<ReadableStreamImpl>,
     dest: Heap<WritableStreamImpl>,
@@ -2278,10 +2278,10 @@ pub(crate) fn readable_byte_stream_tee<'r>(
 }
 
 /// The shared state backing `ReadableByteStreamTee`. Not exposed to JS
-/// (`no_ctor`); minted internally and reached through each callback's payload.
+/// (`hidden`); minted internally and reached through each callback's payload.
 /// The `reader` holds whichever reader type (default or BYOB) is currently in
 /// use; it is swapped by `pullWithDefaultReader` / `pullWithBYOBReader`.
-#[jsclass(no_ctor)]
+#[jsclass(hidden)]
 pub(crate) struct ByteTeeState {
     stream: Heap<ReadableStreamImpl>,
     reader: Heap<js::object::Object>,

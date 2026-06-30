@@ -144,6 +144,16 @@ pub fn get_async_iterator_prototype<'s>(
         .ok_or(ExnThrown)
 }
 
+/// Get the realm's `%IteratorPrototype%` — the object at the top of the
+/// prototype chain of all built-in iterators, supplying `[Symbol.iterator]`
+/// (returning `this`). WebIDL pair iterators chain their prototype under this.
+pub fn get_iterator_prototype<'s>(scope: &'s Scope<'_>) -> Result<Object<'s>, ExnThrown> {
+    let cx = unsafe { scope.raw_cx_no_gc() };
+    let obj = unsafe { mozjs::jsapi::GetRealmIteratorPrototype(cx) };
+    // SAFETY: GetRealmIteratorPrototype returns an object or null.
+    unsafe { Object::from_mozjs_rval(scope, obj) }
+}
+
 /// Get the prototype for a standard class by `JSProtoKey`.
 pub fn get_class_prototype<'s>(
     scope: &'s Scope<'_>,
@@ -1351,6 +1361,13 @@ pub trait ClassDef: Sized + Trace + 'static {
     ///
     /// Set by the `no_ctor` macro option.
     const CONSTRUCTIBLE: bool = true;
+
+    /// Whether `Foo` is installed as a property on the global object.
+    /// When `true`, the class is hidden and accessible from JavaScript only
+    /// via the `constructor` property on instances' prototype.
+    ///
+    /// Set by the `hidden` macro option.
+    const HIDDEN: bool = false;
 
     /// Post-construction hook called after the private data has been stored
     /// on the JS object.
