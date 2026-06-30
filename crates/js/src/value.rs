@@ -34,6 +34,11 @@ use mozjs::jsval::{
     ObjectValue, PrivateValue, StringValue, UInt32Value, UndefinedValue,
 };
 
+pub use mozjs::jsval::JSVal as Value;
+
+use crate::conversion::ToJSVal;
+use crate::error::ExnThrown;
+
 /// Create an `undefined` value.
 #[inline]
 pub fn undefined() -> JSVal {
@@ -165,11 +170,16 @@ pub unsafe fn from_string_raw(s: *mut JSString) -> JSVal {
 /// ```
 pub(crate) struct ValueArrayRooter(mozjs::gc::CustomAutoRooter<Vec<JSVal>>);
 
-impl ValueArrayRooter {
-    pub(crate) fn new(values: &[mozjs::gc::HandleValue]) -> Self {
-        ValueArrayRooter(mozjs::gc::CustomAutoRooter::new(
-            values.iter().map(|h| h.get()).collect(),
-        ))
+impl<'s> ValueArrayRooter {
+    pub(crate) fn new(
+        scope: &'s crate::gc::scope::Scope<'_>,
+        values: &[impl ToJSVal<'s>],
+    ) -> Result<Self, ExnThrown> {
+        let mut raw_values: Vec<Value> = Vec::with_capacity(values.len());
+        for v in values {
+            raw_values.push(v.to_jsval_raw_trowing(scope)?);
+        }
+        Ok(Self(mozjs::gc::CustomAutoRooter::new(raw_values)))
     }
 
     pub(crate) fn root<'a>(

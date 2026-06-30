@@ -10,6 +10,7 @@ use js::error::ExnThrown;
 use js::function::Callback;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
+use js::prelude::ToJSVal;
 use js::value;
 use js::Function;
 use js::{Object, Promise};
@@ -67,9 +68,9 @@ pub(crate) fn invoke_promise_algorithm<'r>(
 /// algorithm (`undefined`) yields `undefined`.
 pub(crate) fn invoke_algorithm<'r>(
     scope: &'r Scope<'_>,
-    algorithm: HandleValue<'_>,
-    receiver: HandleValue<'_>,
-    args: &[HandleValue],
+    algorithm: HandleValue<'r>,
+    receiver: HandleValue<'r>,
+    args: &[impl ToJSVal<'r>],
 ) -> Result<HandleValue<'r>, ExnThrown> {
     if algorithm.is_undefined() {
         return Ok(scope.root_value(value::undefined()));

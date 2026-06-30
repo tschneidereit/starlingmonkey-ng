@@ -68,6 +68,10 @@ use mozjs::rust::wrappers2;
 /// access methods are available directly.
 pub struct Function;
 
+/// Empty argument list for zero-arg calls, avoiding failed type inference for `&[]`.
+#[allow(non_upper_case_globals)]
+pub const EmptyArgs: &[()] = &[];
+
 impl JSType for Function {
     type Rooted<'s> = Stack<'s, Self>;
     const JS_NAME: &'static str = "Function";
@@ -182,9 +186,9 @@ impl<'s> Stack<'s, Function> {
         scope: &'a Scope<'_>,
         this: HandleObject,
         fval: HandleValue,
-        args: &[HandleValue],
+        args: &[impl ToJSVal<'a>],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(args);
+        let mut args_root = ValueArrayRooter::new(scope, args)?;
         let args = args_root.root(scope);
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
@@ -205,9 +209,9 @@ impl<'s> Stack<'s, Function> {
         scope: &'a Scope<'_>,
         obj: HandleObject,
         name: &CStr,
-        args: &[HandleValue],
+        args: &[impl ToJSVal<'a>],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(args);
+        let mut args_root = ValueArrayRooter::new(scope, args)?;
         let args = args_root.root(scope);
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
@@ -226,15 +230,21 @@ impl<'s> Stack<'s, Function> {
     /// Call a function object with a given `this` value.
     pub fn call<'a>(
         scope: &'a Scope<'_>,
-        thisv: HandleValue,
-        fun: HandleValue,
-        args: &[HandleValue],
+        this: impl ToJSVal<'a>,
+        fun: impl ToJSVal<'a>,
+        args: &[impl ToJSVal<'a>],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(args);
+        let mut args_root = ValueArrayRooter::new(scope, args)?;
         let args = args_root.root(scope);
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
-            wrappers2::Call(scope.cx_mut(), thisv, fun, &args.handles(), rval.reborrow())
+            wrappers2::Call(
+                scope.cx_mut(),
+                this.to_jsval_trowing(scope)?,
+                fun.to_jsval_trowing(scope)?,
+                &args.handles(),
+                rval.reborrow(),
+            )
         };
         ExnThrown::check(ok)?;
         Ok(rval.handle())
@@ -243,14 +253,19 @@ impl<'s> Stack<'s, Function> {
     /// Invoke the `new` operator on a constructor function.
     pub fn construct(
         scope: &'s Scope<'_>,
-        fun: HandleValue,
-        args: &[HandleValue],
+        fun: impl ToJSVal<'s>,
+        args: &[impl ToJSVal<'s>],
     ) -> Result<Object<'s>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(args);
+        let mut args_root = ValueArrayRooter::new(scope, args)?;
         let args = args_root.root(scope);
         let mut result = scope.root_object_mut(std::ptr::null_mut());
         let ok = unsafe {
-            wrappers2::Construct1(scope.cx_mut(), fun, &args.handles(), result.reborrow())
+            wrappers2::Construct1(
+                scope.cx_mut(),
+                fun.to_jsval_trowing(scope)?,
+                &args.handles(),
+                result.reborrow(),
+            )
         };
         ExnThrown::check(ok)?;
         Object::from_handle(result.handle()).ok_or(ExnThrown)
@@ -259,17 +274,17 @@ impl<'s> Stack<'s, Function> {
     /// Invoke the `new` operator on a constructor with an explicit `new.target`.
     pub fn construct_with_new_target(
         scope: &'s Scope<'_>,
-        fun: HandleValue,
+        fun: impl ToJSVal<'s>,
         new_target: HandleObject,
-        args: &[HandleValue],
+        args: &[impl ToJSVal<'s>],
     ) -> Result<Object<'s>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(args);
+        let mut args_root = ValueArrayRooter::new(scope, args)?;
         let args = args_root.root(scope);
         let mut result = scope.root_object_mut(std::ptr::null_mut());
         let ok = unsafe {
             wrappers2::Construct(
                 scope.cx_mut(),
-                fun,
+                fun.to_jsval_trowing(scope)?,
                 new_target,
                 &args.handles(),
                 result.reborrow(),
@@ -375,7 +390,7 @@ impl<'s> Stack<'s, Function> {
                 ReservedSlot::Slot0,
                 mozjs::jsval::PrivateValue(cb as *const std::ffi::c_void),
             );
-            fun.set_reserved(ReservedSlot::Slot1, payload.to_jsval(scope).unwrap().get());
+            fun.set_reserved(ReservedSlot::Slot1, payload.to_jsval_trowing(scope)?.get());
         }
 
         Ok(fun)

@@ -6,6 +6,7 @@ use core_runtime::{jsclass, jsmethods};
 use js::conversion::{FromJSVal, ToJSVal};
 use js::error::ExnThrown;
 use js::exception::take_pending_or_undefined;
+use js::function::EmptyArgs;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
@@ -991,7 +992,7 @@ impl FromIterableState<'_> {
 
         match async_method {
             Some(method) => {
-                let iter = js::Function::call(scope, async_iterable, method, &[])?;
+                let iter = js::Function::call(scope, async_iterable, method, EmptyArgs)?;
                 if !iter.is_object() {
                     return Err(js::error::throw_type_error(
                         scope,
@@ -1013,7 +1014,7 @@ impl FromIterableState<'_> {
                         .ok_or_else(|| {
                             js::error::throw_type_error(scope, c"value is not async iterable")
                         })?;
-                let sync_iter = js::Function::call(scope, async_iterable, sync_method, &[])?;
+                let sync_iter = js::Function::call(scope, async_iterable, sync_method, EmptyArgs)?;
                 if !sync_iter.is_object() {
                     return Err(js::error::throw_type_error(
                         scope,
@@ -1076,7 +1077,7 @@ fn afs_next(
     let state = FromIterableState::from_jsval(scope, payload, ()).unwrap();
     let sync_iter = state.data().iterator.get(scope);
     let sync_next = state.data().sync_next.get(scope);
-    let result = match js::Function::call(scope, sync_iter, sync_next, &[]) {
+    let result = match js::Function::call(scope, sync_iter, sync_next, EmptyArgs) {
         Ok(r) => r,
         Err(_) => return Ok(rejected_pending_value(scope)),
     };
@@ -1129,7 +1130,7 @@ fn from_pull_native(
     let next_method = state.data().next_method.get(scope);
     // Let _nextResult_ be `IteratorNext`(_iteratorRecord_). If abrupt, return a
     // promise rejected with its value.
-    let next_result = match js::Function::call(scope, iterator, next_method, &[]) {
+    let next_result = match js::Function::call(scope, iterator, next_method, EmptyArgs) {
         Ok(r) => r,
         Err(_) => return Ok(rejected_pending_value(scope)),
     };

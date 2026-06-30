@@ -51,7 +51,7 @@ impl<'s> Stack<'s, Array> {
         scope: &'s Scope<'s>,
         contents: &[HandleValue],
     ) -> Result<Self, ExnThrown> {
-        let mut contents_root = ValueArrayRooter::new(contents);
+        let mut contents_root = ValueArrayRooter::new(scope, contents)?;
         let contents = contents_root.root(scope);
         let obj = unsafe { wrappers2::NewArrayObject(scope.cx_mut(), &contents.handles()) };
         unsafe { Self::from_mozjs_rval(scope, obj) }

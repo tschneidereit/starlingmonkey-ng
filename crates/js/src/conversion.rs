@@ -35,12 +35,14 @@ use mozjs::jsapi::JS;
 use mozjs::jsapi::{ForOfIterator, ForOfIterator_NonIterableBehavior};
 use mozjs::jsapi::{JSContext, JSObject, JSString, PropertyDescriptor, RootedObject, RootedValue};
 use mozjs::jsapi::{JS_NewStringCopyUTF8N, JSPROP_ENUMERATE};
-use mozjs::jsval::{BooleanValue, DoubleValue, Int32Value, UInt32Value, UndefinedValue};
-use mozjs::jsval::{JSVal, ObjectOrNullValue, ObjectValue, StringValue, SymbolValue};
+use mozjs::jsval::{
+    BooleanValue, DoubleValue, Int32Value, JSVal, ObjectOrNullValue, StringValue, SymbolValue,
+    UInt32Value, UndefinedValue,
+};
 use mozjs::rooted;
-use mozjs::rust::HandleValue;
-use mozjs::rust::{maybe_wrap_object_or_null_value, maybe_wrap_object_value, ToString};
-use mozjs::rust::{ToBoolean, ToInt32, ToInt64, ToNumber, ToUint16, ToUint32, ToUint64};
+use mozjs::rust::{
+    HandleValue, ToBoolean, ToInt32, ToInt64, ToNumber, ToString, ToUint16, ToUint32, ToUint64,
+};
 use mozjs_sys::jsgc::Rooted;
 use num_traits::PrimInt;
 use std::borrow::Cow;
@@ -53,6 +55,7 @@ use crate::error::{throw_type_error, ExnThrown, ThrowException};
 use crate::gc::handle::Heap;
 use crate::heap::{MozHeap, Trace};
 use crate::prelude::Scope;
+use crate::value;
 
 pub use indexmap::IndexMap;
 
@@ -133,8 +136,35 @@ impl_num!(f64, 0.0, f64::MIN, f64::MAX);
 
 /// A trait to convert Rust types to `JSVal`s.
 pub trait ToJSVal<'s> {
-    /// Convert `self` to a `JSVal`. JSAPI failure results in `Err(ConversionError)`.
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError>;
+    /// Convert `self` to a rooted `HandleValue`.
+    ///
+    /// Conversion failure results in `Err(ConversionError)`: either a pending JS exception, or a
+    /// type error without a pending exception.
+    #[inline]
+    fn to_jsval(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
+        Ok(scope.root_value(self.to_jsval_raw(scope)?))
+    }
+
+    /// Convert `self` to a rooted `HandleValue`.
+    ///
+    /// Conversion failure results in a pending exception.
+    #[inline]
+    fn to_jsval_trowing(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
+        self.to_jsval(scope).map_err(|e| e.throw(scope))
+    }
+
+    /// Convert `self` to a rooted `HandleValue`.
+    ///
+    /// Conversion failure results in `Err(ConversionError)`: either a pending JS exception, or a
+    /// type error without a pending exception.
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError>;
+
+    /// Convert `self` to a rooted `HandleValue`.
+    ///
+    /// Conversion failure results in a pending exception.
+    fn to_jsval_raw_trowing(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ExnThrown> {
+        self.to_jsval_raw(scope).map_err(|e| e.throw(scope))
+    }
 }
 
 /// Error type for conversions of Rust types to `JSVal`s.
@@ -275,6 +305,10 @@ impl<'s> ToJSVal<'s> for () {
     fn to_jsval(&self, _scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
         Ok(HandleValue::undefined())
     }
+    #[inline]
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(value::undefined())
+    }
 }
 
 impl FromJSVal<'_> for JSVal {
@@ -290,8 +324,8 @@ impl FromJSVal<'_> for JSVal {
 
 impl<'s> ToJSVal<'s> for JSVal {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(*self))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(*self)
     }
 }
 
@@ -311,14 +345,22 @@ impl<'s> ToJSVal<'s> for HandleValue<'s> {
     fn to_jsval(&self, _scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
         Ok(*self)
     }
+
+    #[inline]
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(self.get())
+    }
 }
 
 impl<'s> ToJSVal<'s> for MozHeap<JSVal> {
     #[inline]
     fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        // Root a copy: a handle into the MozHeap's own storage would dangle
-        // if the heap moves, and would outlive the borrow of `self`.
         Ok(scope.root_value(self.get()))
+    }
+
+    #[inline]
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(self.get())
     }
 }
 
@@ -355,8 +397,8 @@ where
 // https://heycam.github.io/webidl/#es-boolean
 impl<'s> ToJSVal<'s> for bool {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(BooleanValue(*self)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(BooleanValue(*self))
     }
 }
 
@@ -375,8 +417,8 @@ impl FromJSVal<'_> for bool {
 // https://heycam.github.io/webidl/#es-byte
 impl<'s> ToJSVal<'s> for i8 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(Int32Value(*self as i32)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(Int32Value(*self as i32))
     }
 }
 
@@ -395,8 +437,8 @@ impl FromJSVal<'_> for i8 {
 // https://heycam.github.io/webidl/#es-octet
 impl<'s> ToJSVal<'s> for u8 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(Int32Value(*self as i32)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(Int32Value(*self as i32))
     }
 }
 
@@ -415,8 +457,8 @@ impl FromJSVal<'_> for u8 {
 // https://heycam.github.io/webidl/#es-short
 impl<'s> ToJSVal<'s> for i16 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(Int32Value(*self as i32)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(Int32Value(*self as i32))
     }
 }
 
@@ -435,8 +477,8 @@ impl FromJSVal<'_> for i16 {
 // https://heycam.github.io/webidl/#es-unsigned-short
 impl<'s> ToJSVal<'s> for u16 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(Int32Value(*self as i32)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(Int32Value(*self as i32))
     }
 }
 
@@ -455,8 +497,8 @@ impl FromJSVal<'_> for u16 {
 // https://heycam.github.io/webidl/#es-long
 impl<'s> ToJSVal<'s> for i32 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(Int32Value(*self)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(Int32Value(*self))
     }
 }
 
@@ -475,8 +517,8 @@ impl FromJSVal<'_> for i32 {
 // https://heycam.github.io/webidl/#es-unsigned-long
 impl<'s> ToJSVal<'s> for u32 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(UInt32Value(*self)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(UInt32Value(*self))
     }
 }
 
@@ -495,8 +537,8 @@ impl FromJSVal<'_> for u32 {
 // https://heycam.github.io/webidl/#es-long-long
 impl<'s> ToJSVal<'s> for i64 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(DoubleValue(*self as f64)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(DoubleValue(*self as f64))
     }
 }
 
@@ -515,8 +557,8 @@ impl FromJSVal<'_> for i64 {
 // https://heycam.github.io/webidl/#es-unsigned-long-long
 impl<'s> ToJSVal<'s> for u64 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(DoubleValue(*self as f64)))
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(DoubleValue(*self as f64))
     }
 }
 
@@ -535,10 +577,10 @@ impl FromJSVal<'_> for u64 {
 // https://heycam.github.io/webidl/#es-float
 impl<'s> ToJSVal<'s> for f32 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
         // from_f64 canonicalizes NaNs; a payload-carrying NaN would trip
         // DoubleValue's bit-pattern assertion and abort.
-        Ok(scope.root_value(crate::value::from_f64(*self as f64)))
+        Ok(crate::value::from_f64(*self as f64))
     }
 }
 
@@ -560,10 +602,10 @@ impl FromJSVal<'_> for f32 {
 // https://heycam.github.io/webidl/#es-double
 impl<'s> ToJSVal<'s> for f64 {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval_raw(&self, _scope: &'_ Scope<'_>) -> Result<JS::Value, ConversionError> {
         // from_f64 canonicalizes NaNs; a payload-carrying NaN would trip
         // DoubleValue's bit-pattern assertion and abort.
-        Ok(scope.root_value(crate::value::from_f64(*self)))
+        Ok(crate::value::from_f64(*self))
     }
 }
 
@@ -647,16 +689,16 @@ impl FromJSVal<'_> for Finite<f64> {
 // https://webidl.spec.whatwg.org/#es-float
 impl<'s> ToJSVal<'s> for Finite<f32> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        self.0.to_jsval(scope)
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        self.0.to_jsval_raw(scope)
     }
 }
 
 // https://webidl.spec.whatwg.org/#es-double
 impl<'s> ToJSVal<'s> for Finite<f64> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        self.0.to_jsval(scope)
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        self.0.to_jsval_raw(scope)
     }
 }
 
@@ -670,7 +712,7 @@ pub fn jsstr_to_string(scope: &Scope<'_>, jsstr: NonNull<JSString>) -> String {
 impl<'s> ToJSVal<'s> for str {
     #[inline]
     #[deny(unsafe_op_in_unsafe_fn)]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
         // Spidermonkey will automatically only copy latin1
         // or similar if the given encoding can be small enough.
         // So there is no need to distinguish between ascii only or similar.
@@ -679,15 +721,15 @@ impl<'s> ToJSVal<'s> for str {
         if jsstr.is_null() {
             return Err(ConversionError::ExnPending);
         }
-        Ok(scope.root_value(StringValue(unsafe { &*jsstr })))
+        Ok(StringValue(unsafe { &*jsstr }))
     }
 }
 
 // https://heycam.github.io/webidl/#es-USVString
 impl<'s> ToJSVal<'s> for String {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        ToJSVal::to_jsval(&(**self), scope)
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        self.as_str().to_jsval_raw(scope)
     }
 }
 
@@ -709,6 +751,14 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Option<T> {
         match self {
             Some(value) => value.to_jsval(scope),
             None => Ok(HandleValue::null()),
+        }
+    }
+
+    #[inline]
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        match self {
+            Some(value) => value.to_jsval_raw(scope),
+            None => Ok(value::null()),
         }
     }
 }
@@ -733,12 +783,22 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for &'_ T {
     fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
         (**self).to_jsval(scope)
     }
+
+    #[inline]
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        (**self).to_jsval_raw(scope)
+    }
 }
 
 impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Box<T> {
     #[inline]
     fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
         (**self).to_jsval(scope)
+    }
+
+    #[inline]
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        (**self).to_jsval_raw(scope)
     }
 }
 
@@ -747,12 +807,17 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Rc<T> {
     fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
         (**self).to_jsval(scope)
     }
+
+    #[inline]
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        (**self).to_jsval_raw(scope)
+    }
 }
 
 // https://heycam.github.io/webidl/#es-sequence
 impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for [T] {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
         let array =
             crate::Array::new(scope, self.len()).map_err(|_| ConversionError::ExnPending)?;
 
@@ -774,7 +839,12 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for [T] {
             }
         }
 
-        array.to_jsval(scope)
+        Ok(array.as_value())
+    }
+
+    #[inline]
+    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+        Ok(scope.root_value(self.to_jsval_raw(scope)?))
     }
 }
 
@@ -782,7 +852,11 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for [T] {
 impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Vec<T> {
     #[inline]
     fn to_jsval(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
-        ToJSVal::to_jsval(self.as_slice(), scope)
+        self.as_slice().to_jsval(scope)
+    }
+    #[inline]
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        self.as_slice().to_jsval_raw(scope)
     }
 }
 
@@ -1117,7 +1191,7 @@ where
 
 // https://webidl.spec.whatwg.org/#es-record
 impl<'s, K: AsRef<str>, V: ToJSVal<'s>> ToJSVal<'s> for Record<K, V> {
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
         let obj = crate::Object::new(scope, None).map_err(|_| ConversionError::ExnPending)?;
 
         for (key, value) in &self.0 {
@@ -1140,7 +1214,7 @@ impl<'s, K: AsRef<str>, V: ToJSVal<'s>> ToJSVal<'s> for Record<K, V> {
             }
         }
 
-        obj.to_jsval(scope)
+        Ok(obj.as_value())
     }
 }
 
@@ -1245,33 +1319,24 @@ impl FromJSVal<'_> for AsyncSequence {
 // https://heycam.github.io/webidl/#es-object
 impl<'s> ToJSVal<'s> for *mut JSObject {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        let mut rval = scope.root_value_mut(UndefinedValue());
-        rval.set(ObjectOrNullValue(*self));
-        unsafe { maybe_wrap_object_or_null_value(scope.cx_mut().raw_cx(), rval.reborrow()) };
-        Ok(rval.handle())
+    fn to_jsval_raw(&self, _scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(ObjectOrNullValue(*self))
     }
 }
 
 // https://heycam.github.io/webidl/#es-object
 impl<'s> ToJSVal<'s> for ptr::NonNull<JSObject> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        let mut rval = scope.root_value_mut(UndefinedValue());
-        rval.set(ObjectValue(self.as_ptr()));
-        unsafe { maybe_wrap_object_value(scope.cx_mut().raw_cx(), rval.reborrow()) };
-        Ok(rval.handle())
+    fn to_jsval_raw(&self, _scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(ObjectOrNullValue(self.as_ptr()))
     }
 }
 
 // https://heycam.github.io/webidl/#es-object
 impl<'s> ToJSVal<'s> for MozHeap<*mut JSObject> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        let mut rval = scope.root_value_mut(UndefinedValue());
-        rval.set(ObjectOrNullValue(self.get()));
-        unsafe { maybe_wrap_object_or_null_value(scope.cx_mut().raw_cx(), rval.reborrow()) };
-        Ok(rval.handle())
+    fn to_jsval_raw(&self, _scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(ObjectOrNullValue(self.get()))
     }
 }
 
@@ -1297,8 +1362,8 @@ impl FromJSVal<'_> for *mut JSObject {
 
 impl<'s> ToJSVal<'s> for *mut JS::Symbol {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(SymbolValue(unsafe { &**self })))
+    fn to_jsval_raw(&self, _scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
+        Ok(SymbolValue(unsafe { &**self }))
     }
 }
 

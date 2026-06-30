@@ -93,12 +93,12 @@ macro_rules! webidl_enum {
         }
 
         impl<'s> $crate::conversion::ToJSVal<'s> for $Name {
-            fn to_jsval(
+            fn to_jsval_raw(
                 &self,
                 scope: &'s $crate::gc::scope::Scope<'s>,
-            ) -> Result<$crate::prelude::HandleValue<'s>, $crate::conversion::ConversionError>
+            ) -> Result<$crate::value::Value, $crate::conversion::ConversionError>
             {
-                $crate::conversion::ToJSVal::to_jsval(self.as_str(), scope)
+                $crate::conversion::ToJSVal::to_jsval_raw(self.as_str(), scope)
             }
         }
     };

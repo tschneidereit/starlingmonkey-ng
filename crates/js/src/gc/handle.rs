@@ -18,7 +18,7 @@ use crate::conversion::{ConversionError, ToJSVal};
 use crate::gc::scope::Scope;
 use crate::heap::{MozHeap, Trace};
 use crate::native::{JSObject, JSTracer, RawHandle};
-use mozjs::gc::{GCMethods, Handle, HandleValue};
+use mozjs::gc::{GCMethods, Handle};
 
 /// A scope-rooted handle to a JavaScript object of type `T`.
 ///
@@ -210,8 +210,8 @@ impl<'s, T: JSType> std::fmt::Debug for Stack<'s, T> {
 // ToJSValConvertible: allows returning Stack newtypes from methods/getters.
 impl<'s, T: JSType> ToJSVal<'s> for Stack<'s, T> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
-        Ok(scope.root_value(unsafe { crate::value::from_object(self.as_raw()) }))
+    fn to_jsval_raw(&self, _scope: &'s Scope<'s>) -> Result<crate::value::Value, ConversionError> {
+        Ok(self.as_value())
     }
 }
 
