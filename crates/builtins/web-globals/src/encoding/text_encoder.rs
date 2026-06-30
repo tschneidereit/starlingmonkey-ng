@@ -6,7 +6,6 @@ use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods};
 use js::conversion::{ConversionError, ToJSVal};
 use js::error::ExnThrown;
 use js::gc::scope::Scope;
-use js::prelude::HandleValue;
 use js::Uint8Array;
 
 /// <https://encoding.spec.whatwg.org/#textencoder>
@@ -90,10 +89,10 @@ pub struct TextEncoderEncodeIntoResult {
 
 impl<'s> ToJSVal<'s> for TextEncoderEncodeIntoResult {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval_raw(&self, scope: &'s Scope<'s>) -> Result<js::value::Value, ConversionError> {
         let obj = js::Object::new_plain(scope)?;
         obj.set_property(scope, c"read", self.read)?;
         obj.set_property(scope, c"written", self.written)?;
-        obj.to_jsval(scope)
+        Ok(obj.as_value())
     }
 }

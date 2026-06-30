@@ -35,7 +35,6 @@
 //! `TypedArray<T, S>` wrapper are an internal implementation detail of this
 //! module and are not part of the public surface.
 
-use std::borrow::Cow;
 use std::ptr::NonNull;
 
 use mozjs::gc::{HandleObject, HandleValue};

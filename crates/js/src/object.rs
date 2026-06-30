@@ -119,9 +119,9 @@ impl<'s> Stack<'s, Object> {
     /// Create from a JS value. Returns an error if the value is not an object.
     pub fn from_value(
         scope: &'s Scope<'_>,
-        val: impl Into<Value>,
+        val: impl ToJSVal<'s>,
     ) -> Result<Self, ConversionError> {
-        let val = val.into();
+        let val = val.to_jsval_raw(scope)?;
         if val.is_object() {
             // SAFETY: the value holds an object, so the pointer is a non-null JSObject.
             Ok(unsafe { Self::from_raw(scope, val.to_object()) }.unwrap())

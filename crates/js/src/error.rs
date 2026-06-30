@@ -23,6 +23,7 @@ use std::fmt;
 use std::ptr;
 
 use crate::exception::is_pending;
+use crate::function::EmptyArgs;
 use crate::gc::scope::Scope;
 use crate::Object;
 use mozjs::jsapi::{
@@ -486,7 +487,7 @@ pub fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
 
     let ctor_val = scope.root_value(unsafe { crate::value::from_object(error_ctor.get()) });
 
-    let error_obj = match crate::Function::construct(scope, ctor_val, &[]) {
+    let error_obj = match crate::Function::construct(scope, ctor_val, EmptyArgs) {
         Ok(obj) => obj,
         Err(_) => return,
     };

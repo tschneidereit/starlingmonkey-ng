@@ -9,6 +9,7 @@ use core_runtime::{webidl_interface, webidl_methods, webidl_union};
 use js::class::get_prototype_for;
 use js::conversion::{Record, ToJSVal};
 use js::error::{throw_type_error, ExnThrown, TypeError};
+use js::function::EmptyArgs;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
@@ -303,7 +304,7 @@ pub fn install_symbol_iterator(scope: &Scope<'_>) {
         |scope, args, _payload| {
             let this_obj = js::Object::from_value(scope, args.this())
                 .map_err(|_| throw_type_error(scope, c"Invalid URLSearchParams receiver"))?;
-            js::Function::call_by_name(scope, this_obj.handle(), c"entries", &[])
+            js::Function::call_by_name(scope, this_obj.handle(), c"entries", EmptyArgs)
                 .map(|value| *value)
         },
         js::value::undefined(),

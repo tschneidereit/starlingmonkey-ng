@@ -118,11 +118,11 @@ impl<'s> FromJSVal<'s> for ReadableStreamState {
 }
 
 impl<'s> ToJSVal<'s> for ReadableStreamState {
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval_raw(&self, scope: &'s Scope<'s>) -> Result<Value, ConversionError> {
         match self {
-            Self::Readable => "readable".to_jsval(scope),
-            Self::Closed => "closed".to_jsval(scope),
-            Self::Errored => "errored".to_jsval(scope),
+            Self::Readable => "readable".to_jsval_raw(scope),
+            Self::Closed => "closed".to_jsval_raw(scope),
+            Self::Errored => "errored".to_jsval_raw(scope),
         }
     }
 }

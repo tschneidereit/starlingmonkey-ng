@@ -257,7 +257,7 @@ dependencies = [
  "shlex 2.0.1",
  "tempfile",
  "tokio",
- "wasip3 0.6.0+wasi-0.3.0-rc-2026-03-15",
+ "wasip3 0.7.0+wasi-0.3.0",
 ]
 
 [[package]]
@@ -1285,7 +1285,7 @@ dependencies = [
  "simple-http",
  "tokio",
  "url",
- "wasip3 0.6.0+wasi-0.3.0-rc-2026-03-15",
+ "wasip3 0.7.0+wasi-0.3.0",
  "web-globals",
  "web-streams",
  "web-url",
@@ -1757,7 +1757,7 @@ version = "0.3.0"
 dependencies = [
  "core-runtime",
  "js",
- "wasip3 0.6.0+wasi-0.3.0-rc-2026-03-15",
+ "wasip3 0.7.0+wasi-0.3.0",
 ]
 
 [[package]]
@@ -1796,7 +1796,8 @@ dependencies = [
  "core-runtime",
  "js",
  "libstarling",
- "wasip3 0.6.0+wasi-0.3.0-rc-2026-03-15",
+ "tempfile",
+ "wasip3 0.7.0+wasi-0.3.0",
  "wpt-support",
 ]
 
@@ -2050,9 +2051,9 @@ dependencies = [
 
 [[package]]
 name = "wasip3"
-version = "0.6.0+wasi-0.3.0-rc-2026-03-15"
+version = "0.7.0+wasi-0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed83456dd6a0b8581998c0365e4651fa2997e5093b49243b7f35391afaa7a3d9"
+checksum = "07aa681120704bf09828d1f7cf7e763666c1dc6a36e5096efd0ad9aadfb302d3"
 dependencies = [
  "bytes",
  "http",

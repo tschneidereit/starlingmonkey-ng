@@ -179,12 +179,12 @@ impl<'s> FromJSVal<'s> for WritableStreamState {
 }
 
 impl<'s> ToJSVal<'s> for WritableStreamState {
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval_raw(&self, scope: &'s Scope<'s>) -> Result<Value, ConversionError> {
         match self {
-            Self::Writable => "writable".to_jsval(scope),
-            Self::Closed => "closed".to_jsval(scope),
-            Self::Erroring => "erroring".to_jsval(scope),
-            Self::Errored => "errored".to_jsval(scope),
+            Self::Writable => "writable".to_jsval_raw(scope),
+            Self::Closed => "closed".to_jsval_raw(scope),
+            Self::Erroring => "erroring".to_jsval_raw(scope),
+            Self::Errored => "errored".to_jsval_raw(scope),
         }
     }
 }

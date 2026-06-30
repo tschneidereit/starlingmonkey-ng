@@ -633,8 +633,8 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
 
         impl<'s> ::js::conversion::ToJSVal<'s> for #struct_name<'s> {
             #[inline]
-            fn to_jsval(&self, scope: &'s ::js::prelude::Scope<'s>) -> ::std::result::Result<::js::prelude::HandleValue<'s>, ::js::conversion::ConversionError> {
-                self.0.to_jsval(scope)
+            fn to_jsval_raw(&self, scope: &'s ::js::prelude::Scope<'_>) -> ::std::result::Result<::js::value::Value, ::js::conversion::ConversionError> {
+                self.0.to_jsval_raw(scope)
             }
         }
 
@@ -745,7 +745,7 @@ enum MethodKind {
 enum ReturnStyle {
     /// No return value (or returns `()`)
     Void,
-    /// Returns a value that implements `ToJSValConvertible`
+    /// Returns a value that implements `ToJSVal`
     Value,
     /// Returns `Result<(), impl Display>` — error becomes JS exception
     ResultVoid,
@@ -4955,7 +4955,7 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
         .iter()
         .map(|(ident, _inner_ty, _cat)| {
             quote! {
-                #enum_name::#ident(inner) => inner.to_jsval(scope),
+                #enum_name::#ident(inner) => inner.to_jsval_raw(scope),
             }
         })
         .collect();
@@ -5003,10 +5003,10 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
         }
 
         impl<#scope_lt> ::js::conversion::ToJSVal<#scope_lt> for #enum_ty {
-            fn to_jsval(
+            fn to_jsval_raw(
                 &self,
                 scope: &#scope_lt ::js::prelude::Scope<#scope_lt>,
-            ) -> ::std::result::Result<::js::prelude::HandleValue<#scope_lt>, ::js::conversion::ConversionError> {
+            ) -> ::std::result::Result<::js::value::Value, ::js::conversion::ConversionError> {
                 match self {
                     #(#to_arms)*
                 }
