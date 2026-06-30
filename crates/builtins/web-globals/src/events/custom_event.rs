@@ -5,10 +5,9 @@
 //! Extends Event with a `detail` property for application-specific data.
 
 use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods};
-use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
-use js::native::{CallArgs, Value};
+use js::native::Value;
 use js::prelude::HandleValue;
 use js::value;
 
@@ -21,7 +20,7 @@ use super::event::{Event, EventImpl};
 pub struct CustomEvent {
     parent: Event,
     /// <https://dom.spec.whatwg.org/#dom-customevent-detail>
-    pub(crate) detail: Heap<Value>,
+    detail: Heap<Value>,
 }
 
 #[webidl_methods]
@@ -31,9 +30,9 @@ impl CustomEvent {
     fn new(event_type: String, event_init_dict: Option<CustomEventInit<'_>>) -> Self {
         let opts = event_init_dict.unwrap_or_default();
         let parent_init = EventInit {
-            bubbles: opts.bubbles.unwrap_or(false),
-            cancelable: opts.cancelable.unwrap_or(false),
-            composed: opts.composed.unwrap_or(false),
+            bubbles: opts.bubbles,
+            cancelable: opts.cancelable,
+            composed: opts.composed,
         };
         CustomEventImpl {
             parent: Event::init(event_type, Some(parent_init)),
@@ -43,10 +42,8 @@ impl CustomEvent {
 
     /// <https://dom.spec.whatwg.org/#dom-customevent-detail>
     #[getter]
-    fn detail(&self, _scope: &Scope<'_>, args: &CallArgs) -> Result<(), ExnThrown> {
-        // SAFETY: the value is consumed immediately into rval; no allocation occurs in between.
-        args.rval().set(unsafe { self.data().detail.as_raw() });
-        Ok(())
+    fn detail<'r>(&self, scope: &'r Scope<'_>) -> HandleValue<'r> {
+        self.data().detail.get(scope)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-customevent-initcustomevent>
@@ -59,7 +56,7 @@ impl CustomEvent {
         detail: Option<HandleValue<'_>>,
     ) {
         // Step 1: If `this`'s `dispatch flag` is set, then return.
-        if self.data().parent.dispatch_flag {
+        if self.is_dispatching() {
             return;
         }
         // Step 2: `Initialize` `this` with _type_, _bubbles_, and _cancelable_.
@@ -84,8 +81,11 @@ impl CustomEvent {
 #[derive(Default)]
 #[webidl_dictionary]
 pub struct CustomEventInit<'a> {
-    pub bubbles: Option<bool>,
-    pub cancelable: Option<bool>,
-    pub composed: Option<bool>,
+    #[webidl(default = false)]
+    pub bubbles: bool,
+    #[webidl(default = false)]
+    pub cancelable: bool,
+    #[webidl(default = false)]
+    pub composed: bool,
     pub detail: Option<HandleValue<'a>>,
 }

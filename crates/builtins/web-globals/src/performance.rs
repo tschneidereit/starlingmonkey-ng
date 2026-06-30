@@ -49,6 +49,10 @@ pub struct Performance {
     parent: EventTarget,
 }
 
+pub fn now() -> f64 {
+    time_origin().instant.elapsed().as_secs_f64() * 1_000.
+}
+
 #[webidl_methods]
 impl Performance {
     /// Performance has no public constructor; it's exposed only as a
@@ -65,8 +69,8 @@ impl Performance {
     /// The IDL defines the return as `DOMHighResTimeStamp` which is a
     /// `double` in JS (64-bit float).
     #[method]
-    fn now(&self) -> f64 {
-        time_origin().instant.elapsed().as_secs_f64() * 1_000.
+    pub fn now(&self) -> f64 {
+        now()
     }
 
     /// <https://www.w3.org/TR/hr-time-3/#timeorigin-attribute>
