@@ -1,0 +1,38 @@
+{
+  "appCodeName": {
+    "status": "FAIL"
+  },
+  "appName": {
+    "status": "FAIL"
+  },
+  "appVersion": {
+    "status": "FAIL"
+  },
+  "platform": {
+    "status": "FAIL"
+  },
+  "product": {
+    "status": "FAIL"
+  },
+  "productSub": {
+    "status": "FAIL"
+  },
+  "userAgent type": {
+    "status": "PASS"
+  },
+  "userAgent value": {
+    "status": "FAIL"
+  },
+  "vendor": {
+    "status": "FAIL"
+  },
+  "vendorSub": {
+    "status": "FAIL"
+  },
+  "taintEnabled": {
+    "status": "FAIL"
+  },
+  "oscpu": {
+    "status": "FAIL"
+  }
+}
