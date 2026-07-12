@@ -276,7 +276,7 @@ fn read_signal_sequence<'r>(
         0
     };
 
-    let mut signals = Vec::with_capacity(length as usize);
+    let mut signals = Vec::new();
     for i in 0..length {
         let elem = obj.get_element(scope, i)?;
         let elem_obj = Object::from_value(scope, *elem).map_err(|_| {

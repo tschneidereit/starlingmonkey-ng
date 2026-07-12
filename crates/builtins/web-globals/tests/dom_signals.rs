@@ -169,3 +169,19 @@ fn throwing_abort_algorithm_still_aborts_dependents() {
         "dep-event,dep-aborted=true"
     );
 }
+
+#[test]
+fn any_with_huge_array_like_length_throws_not_crashes() {
+    // Regression: a hostile `length` must not be used to pre-size an allocation.
+    // `AbortSignal.any({length: 1e20})` previously fed `u32::MAX` into
+    // `Vec::with_capacity`, attempting a ~34 GB allocation that aborted the
+    // process. Per spec it must throw a `TypeError` (the first element is not an
+    // `AbortSignal`), like every other browser/runtime.
+    assert_eq!(
+        eval(
+            "try { AbortSignal.any({ length: 1e20 }); 'no-throw' } \
+             catch (e) { e instanceof TypeError }"
+        ),
+        "true"
+    );
+}
