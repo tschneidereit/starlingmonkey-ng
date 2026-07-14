@@ -1,5 +1,5 @@
 [package]
-name = "web-globals"
+name = "encoding"
 version.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -7,14 +7,16 @@ authors.workspace = true
 edition.workspace = true
 
 [dependencies]
-bitflags.workspace = true
 core-runtime.workspace = true
-data-url.workspace = true
+encoding_rs.workspace = true
 js.workspace = true
-url.workspace = true
+web-streams.workspace = true
 
 [dev-dependencies]
+js.workspace = true
 libstarling.workspace = true
+web-globals.workspace = true
+web-streams.workspace = true
 
 [lints]
 workspace = true
