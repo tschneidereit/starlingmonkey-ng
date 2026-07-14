@@ -463,6 +463,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
+name = "encoding"
+version = "0.3.0"
+dependencies = [
+ "core-runtime",
+ "encoding_rs",
+ "js",
+ "libstarling",
+ "web-globals",
+ "web-streams",
+]
+
+[[package]]
 name = "encoding_c"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1581,6 +1593,7 @@ dependencies = [
  "bytes",
  "core-runtime",
  "cpp-builtins",
+ "encoding",
  "event-listener",
  "fetch-event",
  "futures-channel",
@@ -2987,7 +3000,6 @@ dependencies = [
  "bitflags",
  "core-runtime",
  "data-url",
- "encoding_rs",
  "js",
  "libstarling",
  "url",
