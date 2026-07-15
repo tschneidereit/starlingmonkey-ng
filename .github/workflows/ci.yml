@@ -37,6 +37,9 @@ jobs:
         target: [native, wasm32-wasip2]
         profile: [debug, release]
     runs-on: ubuntu-latest
+    env:
+      WASMTIME_BACKTRACE_DETAILS: '1'
+      RUST_BACKTRACE: 'full'
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +75,9 @@ jobs:
       matrix:
         target: [native, wasm32-wasip2]
     runs-on: ubuntu-latest
+    env:
+      WASMTIME_BACKTRACE_DETAILS: '1'
+      RUST_BACKTRACE: 'full'
     steps:
       - uses: actions/checkout@v4
 
@@ -107,6 +113,8 @@ jobs:
     strategy:
       fail-fast: false
     runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: full
     steps:
       - uses: actions/checkout@v4
 
