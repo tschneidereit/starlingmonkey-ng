@@ -16,10 +16,10 @@ pub mod base64;
 pub mod dom_exception;
 pub mod encoding;
 pub mod events;
+pub mod navigator;
 pub mod performance;
 pub mod signals;
 mod structured_clone;
-pub mod navigator;
 pub mod worker_location;
 
 pub fn add_to_global(scope: &js::prelude::Scope<'_>, global: js::Object<'_>) {
