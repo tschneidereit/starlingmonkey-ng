@@ -23,6 +23,13 @@ fn structured_clone_exists() {
     assert_eq!(eval("typeof structuredClone"), "function");
 }
 
+#[test]
+fn structured_clone_length_excludes_optional() {
+    // WebIDL `.length` counts required arguments only: the optional `options`
+    // dictionary must not be counted.
+    assert_eq!(eval("structuredClone.length"), "1");
+}
+
 // ── Primitives ──
 
 #[test]

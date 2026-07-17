@@ -11,8 +11,7 @@
 
 use std::cell::RefCell;
 
-use core_runtime::jsmethods;
-use core_runtime::webidl_interface;
+use core_runtime::{webidl_interface, webidl_methods};
 use js::error::TypeError;
 use js::gc::scope::Scope;
 use js::Object;
@@ -58,7 +57,7 @@ fn with_url<T>(field: &str, f: impl FnOnce(&url::Url) -> T) -> Result<T, TypeErr
 #[webidl_interface(to_string_tag = "Location")]
 pub struct WorkerLocation {}
 
-#[jsmethods]
+#[webidl_methods]
 impl WorkerLocation {
     /// <https://html.spec.whatwg.org/multipage/workers.html#workerlocation>
     ///

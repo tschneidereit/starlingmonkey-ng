@@ -2100,6 +2100,7 @@ dependencies = [
 name = "web-globals"
 version = "0.3.0"
 dependencies = [
+ "bitflags",
  "core-runtime",
  "encoding_rs",
  "js",

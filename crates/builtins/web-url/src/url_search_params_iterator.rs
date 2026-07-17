@@ -8,8 +8,7 @@
 
 use crate::url_search_params::{URLSearchParams, URLSearchParamsImpl};
 
-use core_runtime::jsmethods;
-use core_runtime::webidl_interface;
+use core_runtime::{webidl_interface, webidl_methods};
 use js::class::get_prototype_for;
 use js::conversion::ToJSVal;
 use js::error::ExnThrown;
@@ -40,7 +39,7 @@ pub struct URLSearchParamsIterator {
     pub(crate) kind: IteratorKind,
 }
 
-#[jsmethods]
+#[webidl_methods]
 impl URLSearchParamsIterator {
     #[constructor]
     fn new(&self, _scope: &Scope<'_>) -> Result<(), js::error::TypeError> {
