@@ -55,7 +55,7 @@ const config = {
   // Default automatically adjusted to "target/wasm32-wasip2/debug/starling.wasm" for wasm target.
   runtime: "target/debug/starling",
   target: "native", // "native" or "wasm"
-  wptRoot: relativePath("../../deps/wpt"),
+  wptRoot: process.env.WPT_ROOT || relativePath("../../deps/wpt"),
   tmpDir: relativePath("../../deps/.wpt-tmp"),
   tests: {
     list: relativePath("tests.json"),
@@ -92,7 +92,7 @@ const ArgParsers = {
     },
   },
   "--wpt-root": {
-    help: `Path to WPT checkout (default: ${config.wptRoot})`,
+    help: `Path to WPT checkout (default: env var 'WPT_ROOT' or ${config.wptRoot})`,
     cmd: (val) => {
       config.wptRoot = val;
     },
@@ -673,4 +673,3 @@ function printSTR(testPath, tmpFile, args, command) {
   args[args.length - 1] = tmpPath;
   console.error(`  To reproduce, run $ ${command} ${args.join(" ")}`);
 }
-
