@@ -343,3 +343,128 @@ fn listener_identity_survives_compacting_gc() {
 
     assert_eq!(String::from_jsval(&scope, val, ()).unwrap(), "1");
 }
+
+// ── The global is an EventTarget ──
+//
+// Per HTML, WorkerGlobalScope (and thus the ServiceWorkerGlobalScope this
+// runtime models) inherits from EventTarget, so `globalThis` *is* an event
+// target. Only `.html` harness files assert this, so it is covered here.
+
+#[test]
+fn global_is_event_target() {
+    assert_eq!(eval("globalThis instanceof EventTarget"), "true");
+}
+
+#[test]
+fn global_event_target_methods_dispatch() {
+    // addEventListener/dispatchEvent called with the global as the receiver must
+    // brand-check against the inheritance entry registered for the global class
+    // (`register_global_parent`) and resolve to the global's primordial
+    // EventTarget data, rather than throwing "incompatible receiver".
+    assert_eq!(
+        eval(
+            r#"
+            let fired = 0;
+            globalThis.addEventListener('e', () => { fired++; });
+            globalThis.dispatchEvent(new Event('e'));
+            String(fired)
+            "#
+        ),
+        "1"
+    );
+}
+
+#[test]
+fn global_bare_add_event_listener_resolves_this_to_global() {
+    // An unqualified `addEventListener('e', …)` passes `this = undefined` (a
+    // global reference's ImplicitThisValue), and SpiderMonkey performs no global
+    // substitution for native callees. WebIDL [Global] semantics resolve the
+    // undefined receiver to the global — which is an EventTarget — so the bare
+    // call (the ServiceWorker `addEventListener('fetch', …)` registration
+    // pattern) works without an explicit `globalThis.` receiver.
+    assert_eq!(
+        eval(
+            r#"
+            let fired = 0;
+            addEventListener('e', () => { fired++; });
+            dispatchEvent(new Event('e'));
+            String(fired)
+            "#
+        ),
+        "1"
+    );
+}
+
+#[test]
+fn undefined_this_on_non_global_interface_still_throws() {
+    // The [Global] substitution is gated on the global actually implementing the
+    // interface. The global is an EventTarget, not an Event, so an Event method
+    // invoked with an undefined receiver is rejected exactly as without the
+    // substitution — the error is unchanged for every non-global interface.
+    assert_eq!(
+        eval(
+            r#"
+            let r = 'no throw';
+            try { Event.prototype.stopPropagation.call(undefined); }
+            catch (e) { r = (e instanceof TypeError) + ':' + e.message; }
+            r
+            "#
+        ),
+        "true:'this' is not an object"
+    );
+}
+
+/// A listener registered directly on the global must survive a compacting GC.
+///
+/// The global's listener list lives in its primordial private data (slot 0).
+/// Unlike a normal instance, that data is traced through the realm's custom
+/// `setTrace` op (installed by `install_global_private_trace`), since the global
+/// class trace hook is SpiderMonkey's own `JS_GlobalObjectTraceHook`. The
+/// closure here is referenced *only* by the global's listener list, so a missing
+/// trace would let a full collection reclaim or dangle it. Dropping `rt` at the
+/// end also runs `finalize_starling_global`, exercising the finalize glue that
+/// frees the listener list.
+///
+/// WPT cannot express this: it has no control over garbage collection.
+#[test]
+fn global_listener_survives_compacting_gc() {
+    use core_runtime::config::RuntimeConfig;
+    use core_runtime::runtime::Runtime;
+    use js::compile::evaluate_with_filename;
+    use js::conversion::FromJSVal;
+    use js::gc::{self, GCOptions, GCReason};
+
+    setup();
+    let rt = Runtime::init(&RuntimeConfig::default());
+    let scope = rt.default_global();
+
+    // The closure's only strong reference is the global's listener list.
+    evaluate_with_filename(
+        &scope,
+        r#"
+        globalThis.count = 0;
+        globalThis.addEventListener('e', function() { globalThis.count++; });
+        "#,
+        "test.js",
+        1,
+    )
+    .expect("listener setup should evaluate");
+
+    // Force a full, compacting GC. If the global's listener list is not traced,
+    // the sole-referenced closure is reclaimed or relocated out from under it.
+    gc::prepare_for_full_gc(&scope);
+    gc::non_incremental_gc(&scope, GCOptions::Shrink, GCReason::API);
+
+    let val = evaluate_with_filename(
+        &scope,
+        r#"
+        globalThis.dispatchEvent(new Event('e'));
+        String(globalThis.count)
+        "#,
+        "test.js",
+        1,
+    )
+    .expect("dispatch should evaluate");
+
+    assert_eq!(String::from_jsval(&scope, val, ()).unwrap(), "1");
+}

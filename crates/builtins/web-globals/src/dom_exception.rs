@@ -11,7 +11,7 @@
 //!
 //! [`DOMException`]: https://webidl.spec.whatwg.org/#idl-DOMException
 
-use core_runtime::{jsmethods, webidl_interface};
+use core_runtime::{webidl_interface, webidl_methods};
 use js::error::{ExnThrown, ThrowException};
 use js::gc::scope::Scope;
 use js::native::ExceptionStackBehavior;
@@ -78,7 +78,7 @@ pub struct DOMException {
     message: String,
 }
 
-#[jsmethods]
+#[webidl_methods]
 impl DOMException {
     // -----------------------------------------------------------------------
     // Legacy error code constants (WebIDL §2.8.1)

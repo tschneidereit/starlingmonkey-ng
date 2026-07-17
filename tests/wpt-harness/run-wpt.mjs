@@ -373,7 +373,6 @@ function extractPrefixes(path) {
     if (!match) break;
     const prefix = match[1];
     const comment = match[3];
-    console.log(`Found prefix: ${prefix} (comment: ${comment || "none"}) in path: ${path}`);
     prefixes.set(prefix, comment);
     remaining = remaining.slice(match[0].length);
   }
