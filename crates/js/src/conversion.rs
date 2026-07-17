@@ -149,7 +149,7 @@ pub trait ToJSVal<'s> {
     ///
     /// Conversion failure results in a pending exception.
     #[inline]
-    fn to_jsval_trowing(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
+    fn to_jsval_throwing(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
         self.to_jsval(scope).map_err(|e| e.throw(scope))
     }
 
@@ -162,7 +162,7 @@ pub trait ToJSVal<'s> {
     /// Convert `self` to a rooted `HandleValue`.
     ///
     /// Conversion failure results in a pending exception.
-    fn to_jsval_raw_trowing(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ExnThrown> {
+    fn to_jsval_raw_throwing(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ExnThrown> {
         self.to_jsval_raw(scope).map_err(|e| e.throw(scope))
     }
 }
@@ -201,10 +201,19 @@ impl ThrowException for ConversionError {
 /// A trait to convert `JSVal`s to Rust types.
 ///
 /// The lifetime `'s` ties the scope to the returned value, allowing
-/// implementations for scope-rooted types like `Stack<'s, Object>`.
+/// implementations for scope-rooted types like `Stack<'s, Object>`. The
+/// lifetime `'v` is the incoming value handle's lifetime; most implementations
+/// root into the scope and are blanket over it (`impl<'s, 'v> FromJSVal<'s,
+/// 'v>`). `HandleValue` is the exception: it returns the handle unchanged, so
+/// it only implements `FromJSVal<'s, 's>` and callers holding a shorter-lived
+/// handle must re-root into the scope first. The `Vec` and `Record` impls do
+/// exactly that — they root each element into the scope and convert it at
+/// `'v = 's`, so scope-tied element types (`HandleValue`, stack newtypes)
+/// work as element types.
+///
 /// For types that don't borrow from the scope (primitives, `String`, etc.),
-/// implement as `impl FromJSVal<'_> for T`.
-pub trait FromJSVal<'s>: Sized {
+/// implement as `impl FromJSVal<'_, '_> for T`.
+pub trait FromJSVal<'s, 'v>: Sized {
     /// Optional configurable behaviour switch; use () for no configuration.
     type Config;
     /// Convert `val` to type `Self`.
@@ -212,9 +221,21 @@ pub trait FromJSVal<'s>: Sized {
     /// argument.
     fn from_jsval(
         scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
+        val: HandleValue<'v>,
         option: Self::Config,
     ) -> Result<Self, ConversionError>;
+
+    /// Convert `val` to type `Self`.
+    /// Optional configuration of type `T` can be passed as the `option`
+    /// argument.
+    /// Always throws a JS exception on failure.
+    fn from_jsval_throwing(
+        scope: &'s Scope<'_>,
+        val: HandleValue<'v>,
+        option: Self::Config,
+    ) -> Result<Self, ExnThrown> {
+        Self::from_jsval(scope, val, option).map_err(|e| e.throw(scope))
+    }
 }
 
 /// Behavior for converting out-of-range integers.
@@ -311,7 +332,7 @@ impl<'s> ToJSVal<'s> for () {
     }
 }
 
-impl FromJSVal<'_> for JSVal {
+impl FromJSVal<'_, '_> for JSVal {
     type Config = ();
     fn from_jsval(
         _scope: &Scope<'_>,
@@ -329,10 +350,10 @@ impl<'s> ToJSVal<'s> for JSVal {
     }
 }
 
-impl<'s> FromJSVal<'s> for HandleValue<'s> {
+impl<'s> FromJSVal<'s, 's> for HandleValue<'s> {
     type Config = ();
     fn from_jsval(
-        _scope: &Scope<'_>,
+        _scope: &'s Scope<'_>,
         value: HandleValue<'s>,
         _option: (),
     ) -> Result<HandleValue<'s>, ConversionError> {
@@ -342,7 +363,7 @@ impl<'s> FromJSVal<'s> for HandleValue<'s> {
 
 impl<'s> ToJSVal<'s> for HandleValue<'s> {
     #[inline]
-    fn to_jsval(&self, _scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval(&self, _scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
         Ok(*self)
     }
 
@@ -354,7 +375,7 @@ impl<'s> ToJSVal<'s> for HandleValue<'s> {
 
 impl<'s> ToJSVal<'s> for MozHeap<JSVal> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
         Ok(scope.root_value(self.get()))
     }
 
@@ -403,7 +424,7 @@ impl<'s> ToJSVal<'s> for bool {
 }
 
 // https://heycam.github.io/webidl/#es-boolean
-impl FromJSVal<'_> for bool {
+impl FromJSVal<'_, '_> for bool {
     type Config = ();
     fn from_jsval(
         _scope: &Scope<'_>,
@@ -423,7 +444,7 @@ impl<'s> ToJSVal<'s> for i8 {
 }
 
 // https://heycam.github.io/webidl/#es-byte
-impl FromJSVal<'_> for i8 {
+impl FromJSVal<'_, '_> for i8 {
     type Config = ConversionBehavior;
     fn from_jsval(
         scope: &Scope<'_>,
@@ -443,7 +464,7 @@ impl<'s> ToJSVal<'s> for u8 {
 }
 
 // https://heycam.github.io/webidl/#es-octet
-impl FromJSVal<'_> for u8 {
+impl FromJSVal<'_, '_> for u8 {
     type Config = ConversionBehavior;
     fn from_jsval(
         scope: &Scope<'_>,
@@ -463,7 +484,7 @@ impl<'s> ToJSVal<'s> for i16 {
 }
 
 // https://heycam.github.io/webidl/#es-short
-impl FromJSVal<'_> for i16 {
+impl FromJSVal<'_, '_> for i16 {
     type Config = ConversionBehavior;
     fn from_jsval(
         scope: &Scope<'_>,
@@ -483,7 +504,7 @@ impl<'s> ToJSVal<'s> for u16 {
 }
 
 // https://heycam.github.io/webidl/#es-unsigned-short
-impl FromJSVal<'_> for u16 {
+impl FromJSVal<'_, '_> for u16 {
     type Config = ConversionBehavior;
     fn from_jsval(
         scope: &Scope<'_>,
@@ -503,7 +524,7 @@ impl<'s> ToJSVal<'s> for i32 {
 }
 
 // https://heycam.github.io/webidl/#es-long
-impl FromJSVal<'_> for i32 {
+impl FromJSVal<'_, '_> for i32 {
     type Config = ConversionBehavior;
     fn from_jsval(
         scope: &Scope<'_>,
@@ -523,7 +544,7 @@ impl<'s> ToJSVal<'s> for u32 {
 }
 
 // https://heycam.github.io/webidl/#es-unsigned-long
-impl FromJSVal<'_> for u32 {
+impl FromJSVal<'_, '_> for u32 {
     type Config = ConversionBehavior;
     fn from_jsval(
         scope: &Scope<'_>,
@@ -543,7 +564,7 @@ impl<'s> ToJSVal<'s> for i64 {
 }
 
 // https://heycam.github.io/webidl/#es-long-long
-impl FromJSVal<'_> for i64 {
+impl FromJSVal<'_, '_> for i64 {
     type Config = ConversionBehavior;
     fn from_jsval(
         scope: &Scope<'_>,
@@ -563,7 +584,7 @@ impl<'s> ToJSVal<'s> for u64 {
 }
 
 // https://heycam.github.io/webidl/#es-unsigned-long-long
-impl FromJSVal<'_> for u64 {
+impl FromJSVal<'_, '_> for u64 {
     type Config = ConversionBehavior;
     fn from_jsval(
         scope: &Scope<'_>,
@@ -585,7 +606,7 @@ impl<'s> ToJSVal<'s> for f32 {
 }
 
 // https://heycam.github.io/webidl/#es-float
-impl FromJSVal<'_> for f32 {
+impl FromJSVal<'_, '_> for f32 {
     type Config = ();
     fn from_jsval(
         scope: &Scope<'_>,
@@ -610,7 +631,7 @@ impl<'s> ToJSVal<'s> for f64 {
 }
 
 // https://heycam.github.io/webidl/#es-double
-impl FromJSVal<'_> for f64 {
+impl FromJSVal<'_, '_> for f64 {
     type Config = ();
     fn from_jsval(
         scope: &Scope<'_>,
@@ -654,7 +675,7 @@ impl<T> std::ops::Deref for Finite<T> {
 }
 
 // https://webidl.spec.whatwg.org/#es-float
-impl FromJSVal<'_> for Finite<f32> {
+impl FromJSVal<'_, '_> for Finite<f32> {
     type Config = ();
     fn from_jsval(scope: &Scope<'_>, val: HandleValue, _: ()) -> Result<Self, ConversionError> {
         // Step 1-2: Let x be ? ToNumber(V); reject non-finite x.
@@ -674,7 +695,7 @@ impl FromJSVal<'_> for Finite<f32> {
 }
 
 // https://webidl.spec.whatwg.org/#es-double
-impl FromJSVal<'_> for Finite<f64> {
+impl FromJSVal<'_, '_> for Finite<f64> {
     type Config = ();
     fn from_jsval(scope: &Scope<'_>, val: HandleValue, _: ()) -> Result<Self, ConversionError> {
         // Step 1-2: Let x be ? ToNumber(V); reject non-finite x.
@@ -734,7 +755,7 @@ impl<'s> ToJSVal<'s> for String {
 }
 
 // https://heycam.github.io/webidl/#es-USVString
-impl FromJSVal<'_> for String {
+impl FromJSVal<'_, '_> for String {
     type Config = ();
     fn from_jsval(scope: &Scope<'_>, val: HandleValue, _: ()) -> Result<String, ConversionError> {
         let jsstr = unsafe { ToString(scope.cx_mut().raw_cx(), val) };
@@ -747,7 +768,7 @@ impl FromJSVal<'_> for String {
 
 impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Option<T> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
         match self {
             Some(value) => value.to_jsval(scope),
             None => Ok(HandleValue::null()),
@@ -763,11 +784,11 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Option<T> {
     }
 }
 
-impl<'s, T: FromJSVal<'s>> FromJSVal<'s> for Option<T> {
+impl<'s, 'v, T: FromJSVal<'s, 'v>> FromJSVal<'s, 'v> for Option<T> {
     type Config = T::Config;
     fn from_jsval(
-        scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
+        scope: &'s Scope<'_>,
+        val: HandleValue<'v>,
         option: T::Config,
     ) -> Result<Option<T>, ConversionError> {
         if val.get().is_null_or_undefined() {
@@ -778,9 +799,9 @@ impl<'s, T: FromJSVal<'s>> FromJSVal<'s> for Option<T> {
     }
 }
 
-impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for &'_ T {
+impl<'s, T: ToJSVal<'s> + ?Sized> ToJSVal<'s> for &'_ T {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
         (**self).to_jsval(scope)
     }
 
@@ -792,7 +813,7 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for &'_ T {
 
 impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Box<T> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
         (**self).to_jsval(scope)
     }
 
@@ -804,7 +825,7 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Box<T> {
 
 impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Rc<T> {
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
         (**self).to_jsval(scope)
     }
 
@@ -843,7 +864,7 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for [T] {
     }
 
     #[inline]
-    fn to_jsval(&self, scope: &'s Scope<'s>) -> Result<HandleValue<'s>, ConversionError> {
+    fn to_jsval(&self, scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ConversionError> {
         Ok(scope.root_value(self.to_jsval_raw(scope)?))
     }
 }
@@ -947,11 +968,27 @@ fn for_of_iterator_slot(scope: &Scope<'_>) -> ForOfIterator {
 ///
 /// Returns `Ok(true)` once iteration completes, or `Ok(false)` if `value` is
 /// not iterable. `f` receives a handle to a value slot that is reused across
-/// iterations, so it must consume each element before returning.
-pub fn for_of<'s, E: From<ConversionError>>(
-    scope: &'s Scope<'s>,
-    value: HandleValue<'s>,
-    mut f: impl FnMut(HandleValue<'s>) -> Result<(), E>,
+/// iterations, so it must consume each element before returning. The handle is
+/// passed at a fresh lifetime, so the compiler rejects any attempt to retain
+/// it past the callback; to collect elements, re-root each one via
+/// [`Scope::root_value`] first, as [`Vec`]'s `FromJSVal` impl does:
+///
+/// ```compile_fail
+/// use js::conversion::{for_of, ConversionError};
+/// use js::prelude::{HandleValue, Scope};
+///
+/// fn collect<'s>(scope: &'s Scope<'s>, val: HandleValue<'s>) {
+///     let mut kept: Vec<HandleValue<'s>> = vec![];
+///     let _ = for_of(scope, val, |elem| {
+///         kept.push(elem); // ERROR: `elem` escapes the callback
+///         Ok::<_, ConversionError>(())
+///     });
+/// }
+/// ```
+pub fn for_of<E: From<ConversionError>>(
+    scope: &Scope<'_>,
+    value: HandleValue<'_>,
+    mut f: impl FnMut(HandleValue<'_>) -> Result<(), E>,
 ) -> Result<bool, E> {
     let mut slot = for_of_iterator_slot(scope);
     let guard = ForOfIteratorGuard::new(scope, &mut slot);
@@ -982,12 +1019,12 @@ pub fn for_of<'s, E: From<ConversionError>>(
     }
 }
 
-impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Vec<T> {
+impl<'s, 'v, C: Clone, T: FromJSVal<'s, 's, Config = C>> FromJSVal<'s, 'v> for Vec<T> {
     type Config = C;
 
     fn from_jsval(
         scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
+        val: HandleValue<'v>,
         option: C,
     ) -> Result<Vec<T>, ConversionError> {
         if !val.is_object() {
@@ -996,6 +1033,10 @@ impl<'s, C: Clone, T: for<'a> FromJSVal<'a, Config = C>> FromJSVal<'s> for Vec<T
 
         let mut ret = vec![];
         let iterable = for_of(scope, val, |elem| {
+            // `elem` aliases `for_of`'s reused slot. Root each element into
+            // its own scope slot so scope-tied element types (`HandleValue`,
+            // stack newtypes) stay valid after the iteration moves on.
+            let elem = scope.root_value(elem.get());
             ret.push(T::from_jsval(scope, elem, option.clone())?);
             Ok::<_, ConversionError>(())
         })?;
@@ -1075,17 +1116,17 @@ impl<'a, K, V> IntoIterator for &'a Record<K, V> {
 }
 
 // https://webidl.spec.whatwg.org/#es-record
-impl<'s, C, K, V> FromJSVal<'s> for Record<K, V>
+impl<'s, 'v, C, K, V> FromJSVal<'s, 'v> for Record<K, V>
 where
     C: Clone,
-    K: for<'a> FromJSVal<'a, Config = ()> + std::hash::Hash + Eq,
-    V: for<'a> FromJSVal<'a, Config = C>,
+    K: FromJSVal<'s, 's, Config = ()> + std::hash::Hash + Eq,
+    V: FromJSVal<'s, 's, Config = C>,
 {
     type Config = C;
 
     fn from_jsval(
         scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
+        val: HandleValue<'v>,
         option: C,
     ) -> Result<Record<K, V>, ConversionError> {
         // Step 1: If Type(V) is not Object, throw a TypeError.
@@ -1260,7 +1301,7 @@ impl AsyncSequence {
 }
 
 // https://webidl.spec.whatwg.org/#es-async-iterable
-impl FromJSVal<'_> for AsyncSequence {
+impl FromJSVal<'_, '_> for AsyncSequence {
     type Config = ();
     #[crate::allow_unrooted]
     fn from_jsval(scope: &Scope<'_>, val: HandleValue, _: ()) -> Result<Self, ConversionError> {
@@ -1341,7 +1382,7 @@ impl<'s> ToJSVal<'s> for MozHeap<*mut JSObject> {
 }
 
 // https://heycam.github.io/webidl/#es-object
-impl FromJSVal<'_> for *mut JSObject {
+impl FromJSVal<'_, '_> for *mut JSObject {
     type Config = ();
     #[inline]
     fn from_jsval(
@@ -1367,7 +1408,7 @@ impl<'s> ToJSVal<'s> for *mut JS::Symbol {
     }
 }
 
-impl FromJSVal<'_> for *mut JS::Symbol {
+impl FromJSVal<'_, '_> for *mut JS::Symbol {
     type Config = ();
     #[inline]
     fn from_jsval(

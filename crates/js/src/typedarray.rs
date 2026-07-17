@@ -686,12 +686,12 @@ macro_rules! typed_array_marker {
             }
         }
 
-        impl<'s> FromJSVal<'s> for Stack<'s, $Marker> {
+        impl<'s, 'v> FromJSVal<'s, 'v> for Stack<'s, $Marker> {
             type Config = ();
 
             fn from_jsval(
-                scope: &'s Scope<'s>,
-                val: HandleValue<'s>,
+                scope: &'s Scope<'_>,
+                val: HandleValue<'v>,
                 _option: Self::Config,
             ) -> Result<Self, ConversionError> {
                 Object::from_value(scope, *val)?

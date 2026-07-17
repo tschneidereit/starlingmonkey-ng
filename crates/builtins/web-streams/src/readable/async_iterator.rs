@@ -80,7 +80,7 @@ impl ReadableStreamAsyncIterator {
     fn iterator_return<'r>(
         &self,
         scope: &'r Scope<'_>,
-        value: Option<HandleValue<'_>>,
+        value: Option<HandleValue<'r>>,
     ) -> Result<Promise<'r>, ExnThrown> {
         // `return` must tolerate being called with no argument (the iteration
         // protocol does so), but reports `length` 1 (fixed up at registration).
@@ -189,7 +189,7 @@ fn next_rejected(
 fn run_return_steps<'r>(
     scope: &'r Scope<'_>,
     iter: &ReadableStreamAsyncIterator<'_>,
-    value: HandleValue<'_>,
+    value: HandleValue<'r>,
 ) -> Result<Promise<'r>, ExnThrown> {
     if iter.data().is_finished {
         let result = support::create_iter_result(scope, value, true)?;
@@ -221,7 +221,7 @@ fn return_fulfilled(
 fn asynchronous_iterator_return<'r>(
     scope: &'r Scope<'_>,
     iter: &ReadableStreamAsyncIterator<'_>,
-    arg: HandleValue<'_>,
+    arg: HandleValue<'r>,
 ) -> Result<Promise<'r>, ExnThrown> {
     let reader = iter_reader(scope, iter)?;
     if !iter.data().prevent_cancel {

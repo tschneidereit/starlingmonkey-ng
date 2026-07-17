@@ -240,8 +240,8 @@ impl<'s> Stack<'s, Function> {
         let ok = unsafe {
             wrappers2::Call(
                 scope.cx_mut(),
-                this.to_jsval_trowing(scope)?,
-                fun.to_jsval_trowing(scope)?,
+                this.to_jsval_throwing(scope)?,
+                fun.to_jsval_throwing(scope)?,
                 &args.handles(),
                 rval.reborrow(),
             )
@@ -262,7 +262,7 @@ impl<'s> Stack<'s, Function> {
         let ok = unsafe {
             wrappers2::Construct1(
                 scope.cx_mut(),
-                fun.to_jsval_trowing(scope)?,
+                fun.to_jsval_throwing(scope)?,
                 &args.handles(),
                 result.reborrow(),
             )
@@ -284,7 +284,7 @@ impl<'s> Stack<'s, Function> {
         let ok = unsafe {
             wrappers2::Construct(
                 scope.cx_mut(),
-                fun.to_jsval_trowing(scope)?,
+                fun.to_jsval_throwing(scope)?,
                 new_target,
                 &args.handles(),
                 result.reborrow(),
@@ -390,7 +390,7 @@ impl<'s> Stack<'s, Function> {
                 ReservedSlot::Slot0,
                 mozjs::jsval::PrivateValue(cb as *const std::ffi::c_void),
             );
-            fun.set_reserved(ReservedSlot::Slot1, payload.to_jsval_trowing(scope)?.get());
+            fun.set_reserved(ReservedSlot::Slot1, payload.to_jsval_throwing(scope)?.get());
         }
 
         Ok(fun)

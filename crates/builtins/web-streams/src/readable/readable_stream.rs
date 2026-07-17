@@ -97,14 +97,10 @@ impl fmt::Display for ReadableStreamState {
     }
 }
 
-impl<'s> FromJSVal<'s> for ReadableStreamState {
+impl FromJSVal<'_, '_> for ReadableStreamState {
     type Config = ();
 
-    fn from_jsval(
-        scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
-        _: (),
-    ) -> Result<Self, ConversionError> {
+    fn from_jsval(scope: &Scope<'_>, val: HandleValue<'_>, _: ()) -> Result<Self, ConversionError> {
         let s = String::from_jsval(scope, val, ())?;
         match s.as_str() {
             "readable" => Ok(Self::Readable),
@@ -233,7 +229,7 @@ impl ReadableStream {
     fn cancel<'r>(
         &self,
         scope: &'r Scope<'_>,
-        reason: Option<HandleValue<'_>>,
+        reason: Option<HandleValue<'r>>,
     ) -> Result<Promise<'r>, ExnThrown> {
         // Step 1: If ! `IsReadableStreamLocked`(`this`) is true, return `a promise rejected with` a
         //         ``TypeError`` exception.

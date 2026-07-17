@@ -661,12 +661,12 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         }
 
         // #[cfg_attr(crown, allow(crown::unrooted_must_root))]
-        impl<'s> ::js::conversion::FromJSVal<'s> for #struct_name<'s> {
+        impl<'s, 'v> ::js::conversion::FromJSVal<'s, 'v> for #struct_name<'s> {
             type Config = ();
 
             fn from_jsval(
                 scope: &'s ::js::prelude::Scope<'s>,
-                val: ::js::prelude::HandleValue<'s>,
+                val: ::js::prelude::HandleValue<'v>,
                 _option: (),
             ) -> ::std::result::Result<Self, ::js::conversion::ConversionError> {
                 let obj = ::js::Object::from_jsval(scope, val, ())?;
@@ -2789,7 +2789,7 @@ fn gen_method_native(
                     let __handle = unsafe {
                         ::js::native::Handle::from_raw(__args.get(__i))
                     };
-                    match <#inner_ty as ::js::conversion::FromJSVal<'_>>::from_jsval(
+                    match <#inner_ty as ::js::conversion::FromJSVal<'_, '_>>::from_jsval(
                         &scope,
                         __handle,
                         #rest_config
@@ -4392,12 +4392,12 @@ pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // we use a fresh 's.
     let from_jsval_impl = if lifetime.is_some() {
         quote! {
-            impl<#scope_lifetime> ::js::conversion::FromJSVal<#scope_lifetime> for #struct_name<#scope_lifetime> {
+            impl<#scope_lifetime, 'v> ::js::conversion::FromJSVal<#scope_lifetime, 'v> for #struct_name<#scope_lifetime> {
                 type Config = ();
 
                 fn from_jsval(
                     scope: &#scope_lifetime ::js::prelude::Scope<#scope_lifetime>,
-                    val: ::js::prelude::HandleValue<#scope_lifetime>,
+                    val: ::js::prelude::HandleValue<'v>,
                     _option: (),
                 ) -> ::std::result::Result<Self, ::js::conversion::ConversionError> {
                     // WebIDL §3.2.17: If V is undefined or null, treat as empty dict.
@@ -4427,7 +4427,7 @@ pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            impl ::js::conversion::FromJSVal<'_> for #struct_name {
+            impl ::js::conversion::FromJSVal<'_, '_> for #struct_name {
                 type Config = ();
 
                 fn from_jsval(
@@ -4554,7 +4554,7 @@ fn gen_dict_member_extraction(member: &DictMember) -> proc_macro2::TokenStream {
     // Optional members wrap the converted value in `Some`.
     let core = if is_integer_type(conv_ty) {
         quote! {
-            <#conv_ty as ::js::conversion::FromJSVal<'_>>::from_jsval(
+            <#conv_ty as ::js::conversion::FromJSVal<'_, '_>>::from_jsval(
                 scope, __prop, ::js::conversion::ConversionBehavior::Default,
             )?
         }
@@ -5009,11 +5009,11 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
             #(#variant_defs,)*
         }
 
-        impl<#scope_lt> ::js::conversion::FromJSVal<#scope_lt> for #enum_ty {
+        impl<#scope_lt, 'v> ::js::conversion::FromJSVal<#scope_lt, 'v> for #enum_ty {
             type Config = ();
             fn from_jsval(
                 scope: &#scope_lt ::js::prelude::Scope<#scope_lt>,
-                val: ::js::prelude::HandleValue<#scope_lt>,
+                val: ::js::prelude::HandleValue<'v>,
                 _: (),
             ) -> ::std::result::Result<Self, ::js::conversion::ConversionError> {
                 #(#from_body)*

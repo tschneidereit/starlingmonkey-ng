@@ -177,12 +177,14 @@ pub(crate) use deref_to_object;
 /// wrong-type message.
 macro_rules! from_jsval_via_cast {
     ($marker:ty, $err:literal) => {
-        impl<'s> $crate::conversion::FromJSVal<'s> for $crate::gc::handle::Stack<'s, $marker> {
+        impl<'s, 'v> $crate::conversion::FromJSVal<'s, 'v>
+            for $crate::gc::handle::Stack<'s, $marker>
+        {
             type Config = ();
 
             fn from_jsval(
-                scope: &'s $crate::gc::scope::Scope<'s>,
-                val: mozjs::gc::HandleValue<'s>,
+                scope: &'s $crate::gc::scope::Scope<'_>,
+                val: mozjs::gc::HandleValue<'v>,
                 _option: Self::Config,
             ) -> Result<Self, $crate::conversion::ConversionError> {
                 $crate::Object::from_value(scope, *val)?

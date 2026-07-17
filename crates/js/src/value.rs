@@ -177,7 +177,7 @@ impl<'s> ValueArrayRooter {
     ) -> Result<Self, ExnThrown> {
         let mut raw_values: Vec<Value> = Vec::with_capacity(values.len());
         for v in values {
-            raw_values.push(v.to_jsval_raw_trowing(scope)?);
+            raw_values.push(v.to_jsval_raw_throwing(scope)?);
         }
         Ok(Self(mozjs::gc::CustomAutoRooter::new(raw_values)))
     }

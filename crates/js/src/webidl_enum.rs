@@ -69,12 +69,12 @@ macro_rules! webidl_enum {
             }
         }
 
-        impl<'s> $crate::conversion::FromJSVal<'s> for $Name {
+        impl<'s, 'v> $crate::conversion::FromJSVal<'s, 'v> for $Name {
             type Config = ();
 
             fn from_jsval(
                 scope: &'s $crate::gc::scope::Scope<'s>,
-                val: $crate::prelude::HandleValue<'s>,
+                val: $crate::prelude::HandleValue<'v>,
                 _: (),
             ) -> Result<Self, $crate::conversion::ConversionError> {
                 let s =
