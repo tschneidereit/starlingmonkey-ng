@@ -928,7 +928,7 @@ pub unsafe fn set_global_private_and_proto<T: ClassDef>(
     set_private(global.as_raw(), data);
     global.set_prototype(scope, proto.handle()).unwrap();
     let success = global
-        .make_proto_immutable(&scope)
+        .make_proto_immutable(scope)
         .expect("Making the global's proto immutable mustn't error");
 
     assert!(success, "Making the global's proto immutable must succeed");

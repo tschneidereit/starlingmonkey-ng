@@ -636,14 +636,14 @@ pub unsafe fn settle_completed_futures(scope: &Scope<'_>, completed: Vec<Complet
     }
     // Each `boxed` keeps its promise rooted until settled.
     for (boxed, outcome) in completed {
-        settle_promise(&scope, boxed.get(), outcome);
+        settle_promise(scope, boxed.get(), outcome);
     }
     // Settling queues the promises' reactions as microtasks; drain them here so the event loop's
     // next `step` sees an empty job queue (mirroring how `step` drains after each task). An
     // exception left pending (a failed resolve/reject above, or job-level fallout) is reported —
     // not silently dropped — matching the event loop's uncaught-exception handling.
-    crate::jobs::run_jobs(&scope);
-    crate::exception::report_and_clear(&scope, "async promise settle");
+    crate::jobs::run_jobs(scope);
+    crate::exception::report_and_clear(scope, "async promise settle");
 }
 
 /// Settle one completed promise future: resolve with the produced value, or
