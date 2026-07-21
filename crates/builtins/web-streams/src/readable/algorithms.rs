@@ -580,7 +580,7 @@ pub(crate) fn tee_read_request_error_steps(
 pub(crate) fn cancel_steps<'r>(
     scope: &'r Scope<'_>,
     controller: &ReadableStreamDefaultController<'_>,
-    reason: HandleValue<'_>,
+    reason: HandleValue<'r>,
 ) -> Promise<'r> {
     // Step 1: Perform ! `ResetQueue`(`this`).
     reset_queue(&mut *controller.data_mut());
@@ -643,7 +643,7 @@ pub(crate) fn release_steps() {
 pub(crate) fn byte_cancel_steps<'r>(
     scope: &'r Scope<'_>,
     controller: &ReadableByteStreamController<'_>,
-    reason: HandleValue<'_>,
+    reason: HandleValue<'r>,
 ) -> Promise<'r> {
     // Step 1: Perform ! `ByteStreamControllerClearPendingPullIntos`(`this`).
     readable_byte_stream_controller_clear_pending_pull_intos(scope, controller);
@@ -2963,7 +2963,7 @@ pub(crate) fn readable_stream_add_read_request(
 pub(crate) fn readable_stream_cancel<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
-    reason: HandleValue<'_>,
+    reason: HandleValue<'r>,
 ) -> Promise<'r> {
     // Step 1: Set _stream_.`[[disturbed]]` to true.
     stream.data_mut().disturbed = true;
@@ -3264,7 +3264,7 @@ pub(crate) fn readable_stream_has_default_reader(
 pub(crate) fn readable_stream_reader_generic_cancel<'r>(
     scope: &'r Scope<'_>,
     reader: &impl GenericReader,
-    reason: HandleValue<'_>,
+    reason: HandleValue<'r>,
 ) -> Promise<'r> {
     // Step 1: Let _stream_ be _reader_.`[[stream]]`.
     // Step 2: Assert: _stream_ is not undefined.

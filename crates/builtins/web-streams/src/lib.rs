@@ -59,7 +59,7 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
                 let _ = return_obj.define_property(
                     scope,
                     c"length",
-                    &1i32,
+                    1i32,
                     js::class_spec::JSPROP_READONLY as u32,
                 );
             }

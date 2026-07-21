@@ -157,14 +157,10 @@ impl fmt::Display for WritableStreamState {
     }
 }
 
-impl<'s> FromJSVal<'s> for WritableStreamState {
+impl FromJSVal<'_, '_> for WritableStreamState {
     type Config = ();
 
-    fn from_jsval(
-        scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
-        _: (),
-    ) -> Result<Self, ConversionError> {
+    fn from_jsval(scope: &Scope<'_>, val: HandleValue<'_>, _: ()) -> Result<Self, ConversionError> {
         let s = String::from_jsval(scope, val, ())?;
         match s.as_str() {
             "writable" => Ok(Self::Writable),

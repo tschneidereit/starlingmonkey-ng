@@ -12,6 +12,7 @@ use std::ptr::NonNull;
 use crate::builtins::JSType;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
+use crate::prelude::ToJSVal;
 use mozjs::jsapi::{JSObject, PromiseState};
 use mozjs::rust::wrappers2;
 use mozjs::rust::{HandleObject, HandleValue};
@@ -66,8 +67,9 @@ impl<'s> Stack<'s, Promise> {
     /// `Promise`, it's returned unchanged.
     pub fn new_resolved_with_value(
         scope: &'s Scope<'_>,
-        value: HandleValue,
+        value: impl ToJSVal<'s>,
     ) -> Result<Self, ExnThrown> {
+        let value = value.to_jsval_throwing(scope)?;
         let promise = Self::new_pending(scope)?;
         promise.resolve(scope, value)?;
         Ok(promise)
@@ -76,8 +78,9 @@ impl<'s> Stack<'s, Promise> {
     /// Create a new `Promise` that is immediately rejected with the given `error`.
     pub fn new_rejected_with_error(
         scope: &'s Scope<'_>,
-        error: HandleValue,
+        error: impl ToJSVal<'s>,
     ) -> Result<Self, ExnThrown> {
+        let error = error.to_jsval_throwing(scope)?;
         let obj = unsafe { wrappers2::CallOriginalPromiseReject(scope.cx_mut(), error) };
         // SAFETY: CallOriginalPromiseReject returns a Promise object or null.
         unsafe { Self::from_mozjs_rval(scope, obj) }
@@ -162,13 +165,23 @@ impl<'s> Stack<'s, Promise> {
     }
 
     /// Resolve this promise with the given value.
-    pub fn resolve(&self, scope: &Scope<'_>, value: HandleValue) -> Result<(), ExnThrown> {
+    pub fn resolve<'a>(
+        &self,
+        scope: &'a Scope<'_>,
+        resolution: impl ToJSVal<'a>,
+    ) -> Result<(), ExnThrown> {
+        let value = resolution.to_jsval_throwing(scope)?;
         let ok = unsafe { wrappers2::ResolvePromise(scope.cx_mut(), self.handle(), value) };
         ExnThrown::check(ok)
     }
 
     /// Reject this promise with the given value.
-    pub fn reject(&self, scope: &Scope<'_>, value: HandleValue) -> Result<(), ExnThrown> {
+    pub fn reject<'a>(
+        &self,
+        scope: &'a Scope<'_>,
+        error: impl ToJSVal<'a>,
+    ) -> Result<(), ExnThrown> {
+        let value = error.to_jsval_throwing(scope)?;
         let ok = unsafe { wrappers2::RejectPromise(scope.cx_mut(), self.handle(), value) };
         ExnThrown::check(ok)
     }
@@ -216,8 +229,9 @@ impl<'s> Stack<'s, Promise> {
     /// need to ensure a fresh promise.
     pub fn call_original_resolve(
         scope: &'s Scope<'_>,
-        resolution_value: HandleValue,
+        resolution_value: impl ToJSVal<'s>,
     ) -> Result<Self, ExnThrown> {
+        let resolution_value = resolution_value.to_jsval_throwing(scope)?;
         let obj =
             unsafe { wrappers2::CallOriginalPromiseResolve(scope.cx_mut(), resolution_value) };
         unsafe { Self::from_mozjs_rval(scope, obj) }
@@ -226,8 +240,9 @@ impl<'s> Stack<'s, Promise> {
     /// Call `Promise.reject(value)` using the original `Promise` constructor.
     pub fn call_original_reject(
         scope: &'s Scope<'_>,
-        rejection_value: HandleValue,
+        rejection_value: impl ToJSVal<'s>,
     ) -> Result<Self, ExnThrown> {
+        let rejection_value = rejection_value.to_jsval_throwing(scope)?;
         let obj = unsafe { wrappers2::CallOriginalPromiseReject(scope.cx_mut(), rejection_value) };
         unsafe { Self::from_mozjs_rval(scope, obj) }
     }

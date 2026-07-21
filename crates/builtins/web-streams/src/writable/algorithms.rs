@@ -203,7 +203,7 @@ fn ws_abort_promise_rejected(
 pub(crate) fn abort_steps<'r>(
     scope: &'r Scope<'_>,
     controller: &WritableStreamDefaultController<'_>,
-    reason: HandleValue<'_>,
+    reason: HandleValue<'r>,
 ) -> Promise<'r> {
     // Step 1: Let _result_ be the result of performing `this`.`[[abortAlgorithm]]`, passing
     //         _reason_.

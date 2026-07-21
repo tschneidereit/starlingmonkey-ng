@@ -724,7 +724,7 @@ pub(crate) fn transform_stream_default_controller_error(
 pub(crate) fn transform_stream_default_controller_perform_transform<'r>(
     scope: &'r Scope<'_>,
     controller: &TransformStreamDefaultController<'_>,
-    chunk: HandleValue<'_>,
+    chunk: HandleValue<'r>,
 ) -> Promise<'r> {
     // Step 1: Let _transformPromise_ be the result of performing
     //         _controller_.`[[transformAlgorithm]]`, passing _chunk_.
@@ -773,7 +773,7 @@ pub(crate) fn transform_stream_default_controller_terminate(
 pub(crate) fn transform_stream_default_sink_write_algorithm<'r>(
     scope: &'r Scope<'_>,
     stream: &TransformStream<'_>,
-    chunk: HandleValue<'_>,
+    chunk: HandleValue<'r>,
 ) -> Promise<'r> {
     // Step 1: Assert: _stream_.`[[writable]]`.`[[state]]` is "`writable`".
     debug_assert_eq!(

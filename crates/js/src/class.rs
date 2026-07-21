@@ -1660,7 +1660,7 @@ pub unsafe fn register_class<'s, T: ClassDef>(
             | crate::class_spec::JSPROP_ENUMERATE
             | crate::class_spec::JSPROP_PERMANENT) as std::ffi::c_uint;
         for &(const_name, value) in &constants {
-            ctor.define_property(scope, const_name, &value, attrs)
+            ctor.define_property(scope, const_name, value, attrs)
                 .expect("failed to define constant on constructor");
         }
 
@@ -1668,7 +1668,7 @@ pub unsafe fn register_class<'s, T: ClassDef>(
         if T::CONSTANTS_ON_PROTOTYPE {
             for &(const_name, value) in &constants {
                 proto
-                    .define_property(scope, const_name, &value, attrs)
+                    .define_property(scope, const_name, value, attrs)
                     .expect("failed to define constant on prototype");
             }
         }
@@ -1795,7 +1795,7 @@ pub unsafe extern "C" fn generic_class_trace<T: ClassDef>(trc: *mut JSTracer, ob
 ///
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
-unsafe fn extract_arg<'s, T: FromJSVal<'s>>(
+unsafe fn extract_arg<'s, 'v, T: FromJSVal<'s, 'v>>(
     scope: &'s Scope<'s>,
     args: &CallArgs,
     index: u32,
@@ -1824,7 +1824,7 @@ unsafe fn extract_arg<'s, T: FromJSVal<'s>>(
 ///
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
-pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
+pub unsafe fn get_arg<'s, 'v, T: FromJSVal<'s, 'v, Config = ()>>(
     scope: &'s Scope<'s>,
     args: &CallArgs,
     index: u32,
@@ -1843,7 +1843,7 @@ pub unsafe fn get_arg<'s, T: FromJSVal<'s, Config = ()>>(
 ///
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
-pub unsafe fn get_arg_or_undefined<'s, T: FromJSVal<'s, Config = ()>>(
+pub unsafe fn get_arg_or_undefined<'s, 'v, T: FromJSVal<'s, 'v, Config = ()>>(
     scope: &'s Scope<'s>,
     args: &CallArgs,
     index: u32,
@@ -1857,7 +1857,7 @@ pub unsafe fn get_arg_or_undefined<'s, T: FromJSVal<'s, Config = ()>>(
 ///
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
-pub unsafe fn get_int_arg<'s, T: FromJSVal<'s, Config = ConversionBehavior>>(
+pub unsafe fn get_int_arg<'s, 'v, T: FromJSVal<'s, 'v, Config = ConversionBehavior>>(
     scope: &'s Scope<'s>,
     args: &CallArgs,
     index: u32,
@@ -1878,7 +1878,7 @@ pub unsafe fn get_int_arg<'s, T: FromJSVal<'s, Config = ConversionBehavior>>(
 /// - `scope` must be in a valid realm.
 /// - `args` must be from a valid JSNative call.
 #[doc(hidden)]
-pub unsafe fn get_arg_with_config<'s, T: FromJSVal<'s>>(
+pub unsafe fn get_arg_with_config<'s, 'v, T: FromJSVal<'s, 'v>>(
     scope: &'s Scope<'s>,
     args: &CallArgs,
     index: u32,

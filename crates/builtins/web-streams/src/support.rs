@@ -27,9 +27,9 @@ use js::{Object, Promise};
 /// from-underlying-source path, or `undefined` for native algorithms).
 pub(crate) fn invoke_promise_algorithm<'r>(
     scope: &'r Scope<'_>,
-    algorithm: HandleValue<'_>,
-    receiver: HandleValue<'_>,
-    args: &[HandleValue],
+    algorithm: HandleValue<'r>,
+    receiver: HandleValue<'r>,
+    args: &[HandleValue<'r>],
 ) -> Promise<'r> {
     if algorithm.is_undefined() {
         let undef = scope.root_value(value::undefined());

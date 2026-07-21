@@ -209,7 +209,7 @@ impl<'s> Stack<'s, Object> {
                 scope.cx_mut(),
                 self.handle(),
                 name.as_ptr(),
-                value.to_jsval(scope).map_err(|e| e.throw(scope))?,
+                value.to_jsval_throwing(scope)?,
             )
         };
         ExnThrown::check(ok)
@@ -217,25 +217,39 @@ impl<'s> Stack<'s, Object> {
 
     /// Set a property by property key (jsid).
     #[inline]
-    pub fn set_property_by_id(
+    pub fn set_property_by_id<'v>(
         &self,
-        scope: &Scope<'_>,
+        scope: &'v Scope<'_>,
         id: HandleId,
-        value: HandleValue,
+        value: impl ToJSVal<'v>,
     ) -> Result<(), ExnThrown> {
-        let ok = unsafe { wrappers2::JS_SetPropertyById(scope.cx_mut(), self.handle(), id, value) };
+        let ok = unsafe {
+            wrappers2::JS_SetPropertyById(
+                scope.cx_mut(),
+                self.handle(),
+                id,
+                value.to_jsval_throwing(scope)?,
+            )
+        };
         ExnThrown::check(ok)
     }
 
     /// Set an array element by index.
     #[inline]
-    pub fn set_element(
+    pub fn set_element<'v>(
         &self,
-        scope: &Scope<'_>,
+        scope: &'v Scope<'_>,
         index: u32,
-        value: HandleValue,
+        value: impl ToJSVal<'v>,
     ) -> Result<(), ExnThrown> {
-        let ok = unsafe { wrappers2::JS_SetElement(scope.cx_mut(), self.handle(), index, value) };
+        let ok = unsafe {
+            wrappers2::JS_SetElement(
+                scope.cx_mut(),
+                self.handle(),
+                index,
+                value.to_jsval_throwing(scope)?,
+            )
+        };
         ExnThrown::check(ok)
     }
 
@@ -331,16 +345,21 @@ impl<'s> Stack<'s, Object> {
 
     /// Define a property with a JS value and attribute flags.
     #[inline]
-    pub fn define_property<'v, V: ToJSVal<'v> + ?Sized>(
+    pub fn define_property<'v>(
         &self,
         scope: &'v Scope<'_>,
         name: &CStr,
-        value: &V,
+        value: impl ToJSVal<'v>,
         attrs: c_uint,
     ) -> Result<(), ExnThrown> {
-        let val = value.to_jsval(scope).map_err(|e| e.throw(scope))?;
         let ok = unsafe {
-            wrappers2::JS_DefineProperty(scope.cx_mut(), self.handle(), name.as_ptr(), val, attrs)
+            wrappers2::JS_DefineProperty(
+                scope.cx_mut(),
+                self.handle(),
+                name.as_ptr(),
+                value.to_jsval_throwing(scope)?,
+                attrs,
+            )
         };
         ExnThrown::check(ok)
     }
@@ -353,15 +372,21 @@ impl<'s> Stack<'s, Object> {
     /// Use [`set_element`](Self::set_element) for normal element assignment, which would invoke
     /// (inherited) setters for the index.
     #[inline]
-    pub fn define_element(
+    pub fn define_element<'v>(
         &self,
-        scope: &Scope<'_>,
+        scope: &'v Scope<'_>,
         index: u32,
-        value: HandleValue,
+        value: impl ToJSVal<'v>,
         attrs: c_uint,
     ) -> Result<(), ExnThrown> {
         let ok = unsafe {
-            wrappers2::JS_DefineElement(scope.cx_mut(), self.handle(), index, value, attrs)
+            wrappers2::JS_DefineElement(
+                scope.cx_mut(),
+                self.handle(),
+                index,
+                value.to_jsval_throwing(scope)?,
+                attrs,
+            )
         };
         ExnThrown::check(ok)
     }
@@ -667,12 +692,12 @@ impl<'s> Stack<'s, Object> {
     }
 }
 
-impl<'s> FromJSVal<'s> for Stack<'s, Object> {
+impl<'s, 'v> FromJSVal<'s, 'v> for Stack<'s, Object> {
     type Config = ();
 
     fn from_jsval(
-        scope: &'s Scope<'s>,
-        val: HandleValue<'s>,
+        scope: &'s Scope<'_>,
+        val: HandleValue<'v>,
         _option: Self::Config,
     ) -> Result<Self, ConversionError> {
         Self::from_value(scope, *val)

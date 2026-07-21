@@ -99,7 +99,7 @@ impl DefaultReader {
     fn cancel<'r>(
         &self,
         scope: &'r Scope<'_>,
-        reason: Option<HandleValue<'_>>,
+        reason: Option<HandleValue<'r>>,
     ) -> Result<Promise<'r>, ExnThrown> {
         // Step 1: If `this`.`[[stream]]` is undefined, return `a promise rejected with` a
         //         ``TypeError`` exception.
