@@ -41,6 +41,7 @@
 //! | [`collections`] | Map, Set, and WeakMap operations |
 //! | [`comparison`] | Value comparison (===, ==, Object.is) |
 //! | [`conversion`] | ECMAScript abstract type coercion and introspection |
+//! | [`iteration`] | Iteration protocol: async iterator records, iterator results |
 //! | [`json`] | JSON parse and stringify |
 //! | [`regexp`] | RegExp creation and execution |
 //! | [`date`] | Date object creation and queries |
@@ -88,6 +89,10 @@
 //! Non-trivial unsafe blocks (pointer arithmetic, transmutes, raw pointer
 //! dereferences) are documented with per-block `// SAFETY:` comments.
 
+// The proc macros in `starling_macro` emit `::js::` paths; this alias lets
+// this crate use those macros on its own types (see `iteration`).
+extern crate self as js;
+
 pub mod array;
 pub mod bigint;
 pub mod builtins;
@@ -106,6 +111,7 @@ pub mod function;
 pub mod gc;
 pub mod id;
 pub mod ionmonkey;
+pub mod iteration;
 pub mod jobs;
 pub mod json;
 pub mod macros {

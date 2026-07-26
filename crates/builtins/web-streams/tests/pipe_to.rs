@@ -147,3 +147,25 @@ fn abort_signal_rejects_and_cancels_both_sides() {
     ));
     assert_eq!(out, "rejected:stop|cancelled:true|aborted:true");
 }
+
+/// pipeTo's abort handling is a DOM abort algorithm, not an `abort` event
+/// listener: an author `abort` listener registered earlier that calls
+/// `stopImmediatePropagation()` must not suppress the pipe's shutdown. The pipe
+/// still rejects with the abort reason.
+#[test]
+fn abort_signal_not_suppressed_by_stop_immediate_propagation() {
+    let out = run(&format!(
+        r#"{RECORDING}
+        globalThis.__out = "pending";
+        const {{ ws, state }} = recordingWritable();
+        const ac = new AbortController();
+        ac.signal.addEventListener("abort", (e) => {{ e.stopImmediatePropagation(); }});
+        const rs = new ReadableStream({{ start(c) {{ c.enqueue("a"); }} }});
+        const p = rs.pipeTo(ws, {{ signal: ac.signal }});
+        ac.abort(new Error("stop"));
+        p.then(() => {{ globalThis.__out = "fulfilled"; }},
+               e => {{ globalThis.__out = "rejected:" + e.message + "|aborted:" + state.aborted; }});
+        "#
+    ));
+    assert_eq!(out, "rejected:stop|aborted:true");
+}

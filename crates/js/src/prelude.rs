@@ -12,6 +12,7 @@ pub use super::error::{CapturedError, ExnThrown};
 pub use super::conversion::{ConversionError, FromJSVal, ToJSVal};
 
 // Re-export the scope-based rooting types.
+pub use crate::gc::handle::OptionHeapExt;
 pub use crate::gc::scope::{InnerScope, RootScope, Scope};
 
 // Re-export builtin type-checking and conversion traits.

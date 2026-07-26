@@ -10,7 +10,6 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
-use js::value;
 use js::Promise;
 
 /// <https://streams.spec.whatwg.org/#default-writer-class>
@@ -77,7 +76,7 @@ impl WritableStreamDefaultWriter {
         //         ``TypeError`` exception.
         if self.data().stream.is_none() {
             js::error::throw_type_error(scope, c"Cannot abort a stream using a released writer");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Return ! `DefaultWriterAbort`(`this`, _reason_).
         Ok(algorithms::writable_stream_default_writer_abort(
@@ -98,14 +97,14 @@ impl WritableStreamDefaultWriter {
                     scope,
                     c"Cannot close a stream using a released writer",
                 );
-                return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+                return Promise::new_rejected_with_pending_error(scope);
             }
         };
         // Step 3: If ! `WritableStreamCloseQueuedOrInFlight`(_stream_) is true, return `a promise
         //         rejected with` a ``TypeError`` exception.
         if algorithms::writable_stream_close_queued_or_in_flight(&stream) {
             js::error::throw_type_error(scope, c"Cannot close an already-closing stream");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 4: Return ! `DefaultWriterClose`(`this`).
         Ok(algorithms::writable_stream_default_writer_close(
@@ -138,10 +137,10 @@ impl WritableStreamDefaultWriter {
         //         ``TypeError`` exception.
         if self.data().stream.is_none() {
             js::error::throw_type_error(scope, c"Cannot write to a stream using a released writer");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Return ! `DefaultWriterWrite`(`this`, _chunk_).
-        let chunk = chunk.unwrap_or_else(|| scope.root_value(value::undefined()));
+        let chunk = chunk.unwrap_or(HandleValue::undefined());
         Ok(algorithms::writable_stream_default_writer_write(
             scope, self, chunk,
         ))

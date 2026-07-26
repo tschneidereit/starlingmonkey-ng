@@ -42,6 +42,41 @@ fn for_await_drains_stream() {
     assert_eq!(out, "abc");
 }
 
+/// A promise chunk is adopted, not yielded as-is: the spec's "get the next
+/// iteration result" resolves its promise with the raw chunk, so a thenable chunk
+/// is unwrapped before the `{ value, done }` result is built. `for await` of a
+/// stream that enqueues `Promise.resolve(5)` yields `5`, not the promise object.
+#[test]
+fn for_await_adopts_thenable_chunk() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        const rs = new ReadableStream({ start(c) { c.enqueue(Promise.resolve(5)); c.close(); } });
+        (async () => {
+            const vals = [];
+            for await (const x of rs) vals.push(x);
+            globalThis.__out = vals.join(",") + "|" + typeof vals[0];
+        })();
+        "#);
+    assert_eq!(out, "5|number");
+}
+
+/// A rejected-thenable chunk rejects `next()` and finishes the iterator (the
+/// adopted rejection propagates), rather than yielding the rejected promise.
+#[test]
+fn for_await_rejected_thenable_chunk_throws() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        const rs = new ReadableStream({ start(c) { c.enqueue(Promise.reject(new TypeError("boom"))); c.close(); } });
+        (async () => {
+            try {
+                for await (const x of rs) { globalThis.__out = "yielded:" + x; return; }
+                globalThis.__out = "done-no-throw";
+            } catch (e) { globalThis.__out = "threw:" + e.constructor.name + ":" + e.message; }
+        })();
+        "#);
+    assert_eq!(out, "threw:TypeError:boom");
+}
+
 /// Breaking out of `for await` cancels the source (the stream becomes unlocked).
 #[test]
 fn break_cancels_source() {
@@ -76,6 +111,23 @@ fn prevent_cancel_leaves_source_open() {
         })();
         "#);
     assert_eq!(out, "cancelled:false");
+}
+
+/// The default async iterator is not a WebIDL interface, so it has no interface
+/// object: `ReadableStreamAsyncIterator` must not leak onto the global, and the
+/// prototype's class string is `"ReadableStream AsyncIterator"` (with a space),
+/// per WebIDL §3.7.10.
+#[test]
+fn async_iterator_has_no_global_and_spaced_string_tag() {
+    let out = run(r#"
+        const leaked = "ReadableStreamAsyncIterator" in globalThis;
+        const tag = Object.prototype.toString.call(new ReadableStream().values());
+        globalThis.__out = `leaked=${leaked},tag=${tag}`;
+        "#);
+    assert_eq!(
+        out,
+        "leaked=false,tag=[object ReadableStream AsyncIterator]"
+    );
 }
 
 /// The iterator's prototype chains to `%AsyncIteratorPrototype%` and exposes only

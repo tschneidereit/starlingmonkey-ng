@@ -87,10 +87,38 @@ impl<'s> Stack<'s, Promise> {
     }
 
     /// Create a new `Promise` that is immediately rejected with the pending exception.
-    pub fn new_rejected_with_pending_error(scope: &'s Scope<'_>) -> Result<Self, &'static str> {
-        let error = crate::exception::take_pending(scope)?;
+    /// If no exception is pending (for example because of an uncatchable exception),
+    /// the promise is resolved with `undefined`.
+    pub fn new_rejected_with_pending_error(scope: &'s Scope<'_>) -> Result<Self, ExnThrown> {
+        let error = crate::exception::take_pending_or_undefined(scope);
         Self::new_rejected_with_error(scope, error)
-            .map_err(|_| "Failed to reject promise with pending exception")
+    }
+
+    /// The per-global reused resolved-undefined promise for internal plumbing.
+    ///
+    /// Reactions on a settled promise enqueue their job immediately and leave
+    /// nothing behind on the promise, so one instance serves every internal
+    /// "already resolved" site — an absent algorithm's result, a `then` source
+    /// for a derived promise — indefinitely, without allocating a fresh
+    /// promise per use. (To merely defer a callback by one tick, use
+    /// [`crate::jobs::queue_microtask`] instead — no promise involved at all.)
+    /// The promise must never be handed to author code: an author-visible
+    /// "a promise resolved with undefined" needs a fresh promise per call, or
+    /// the shared identity becomes observable. Derived promises (`then`
+    /// results) are fine to expose.
+    pub fn shared_resolved_undefined(scope: &'s Scope<'_>) -> Result<Self, ExnThrown> {
+        // Keyed by a static's address: stable and unique for the process,
+        // unlike a generic function's address, which codegen may duplicate.
+        static KEY: u8 = 0;
+        let obj = crate::class::get_or_init_shared_object(
+            scope,
+            std::ptr::from_ref(&KEY) as usize,
+            |scope| {
+                let p = Self::new_resolved_with_value(scope, crate::value::undefined())?;
+                Object::from_value(scope, p.as_value()).map_err(|_| ExnThrown)
+            },
+        )?;
+        obj.cast::<crate::Promise>().map_err(|_| ExnThrown)
     }
 
     /// Check whether an object is a `Promise`.
@@ -250,7 +278,7 @@ impl<'s> Stack<'s, Promise> {
     /// Call the original `Promise.prototype.then` with the given handlers.
     ///
     /// Returns a new promise for the result.
-    pub fn call_original_then(
+    pub fn then(
         &self,
         scope: &'s Scope<'_>,
         on_fulfilled: Option<Object<'_>>,

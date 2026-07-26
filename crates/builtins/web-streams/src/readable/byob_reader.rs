@@ -12,7 +12,7 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
-use js::Promise;
+use js::{ArrayBufferView, Promise};
 
 /// <https://streams.spec.whatwg.org/#byob-reader-class>
 #[webidl_interface(name = "ReadableStreamBYOBReader")]
@@ -57,23 +57,11 @@ impl BYOBReader {
     fn read<'r>(
         &self,
         scope: &'r Scope<'_>,
-        view: HandleValue<'_>, /* WebIDL: ArrayBufferView */
+        view: ArrayBufferView<'_>,
         options: Option<BYOBReaderReadOptions>,
     ) -> Result<Promise<'r>, ExnThrown> {
-        // The WebIDL signature coerces the argument to an `ArrayBufferView`; a
-        // non-view value rejects with a ``TypeError`` before the steps below.
-        let view = match js::Object::from_value(scope, *view)
-            .ok()
-            .and_then(js::ArrayBufferView::from_object)
-        {
-            Some(v) => v,
-            None => {
-                js::error::throw_type_error(scope, c"read() argument is not an ArrayBufferView");
-                return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
-            }
-        };
         // WebIDL: `min` is `[EnforceRange] unsigned long long`, defaulting to 1 when
-        // the options dictionary or member is absent. Apply `[EnforceRange]` here:
+        // the `options` dictionary or member is absent. Apply `[EnforceRange]` here:
         // a non-finite value, or one that is negative after truncating toward zero,
         // rejects with a `TypeError`. (The upper bound 2^64-1 is not enforced — it is
         // beyond `f64` precision and a value that large fails the length checks below
@@ -83,33 +71,33 @@ impl BYOBReader {
         let min_f64 = options.map(|o| o.min).unwrap_or(1.0);
         if !min_f64.is_finite() || min_f64.trunc() < 0.0 {
             js::error::throw_type_error(scope, c"read() option min is out of range");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         let min = min_f64.trunc() as usize;
         // Step 1: If _view_.[[ByteLength]] is 0, return `a promise rejected with` a ``TypeError``
         //         exception.
         if view.byte_length() == 0 {
             js::error::throw_type_error(scope, c"read() view has a byte length of 0");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: If _view_.[[ViewedArrayBuffer]].[[ByteLength]] is 0, return `a promise rejected
         //         with` a ``TypeError`` exception.
         let buffer = view.viewed_buffer(scope)?;
         if buffer.byte_length() == 0 {
             js::error::throw_type_error(scope, c"read() view's buffer has a byte length of 0");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 3: If ! `IsDetachedBuffer`(_view_.[[ViewedArrayBuffer]]) is true, return `a promise
         //         rejected with` a ``TypeError`` exception.
         if buffer.is_detached() {
             js::error::throw_type_error(scope, c"read() view's buffer is detached");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 4: If _options_["``min``"] is 0, return `a promise rejected with` a ``TypeError``
         //         exception.
         if min == 0 {
             js::error::throw_type_error(scope, c"read() option min cannot be 0");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         if view.view_kind().is_typed_array() {
             // Step 5: If _view_ has a [[TypedArrayName]] internal slot, If _options_["``min``"] >
@@ -117,7 +105,7 @@ impl BYOBReader {
             //         exception.
             if min > view.array_length() {
                 js::error::throw_range_error(scope, c"read() option min exceeds the view's length");
-                return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+                return Promise::new_rejected_with_pending_error(scope);
             }
         } else {
             // Step 6: Otherwise (i.e., it is a ``DataView``), If _options_["``min``"] >
@@ -128,7 +116,7 @@ impl BYOBReader {
                     scope,
                     c"read() option min exceeds the view's byte length",
                 );
-                return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+                return Promise::new_rejected_with_pending_error(scope);
             }
         }
         // Step 7: If `this`.`[[stream]]` is undefined, return `a promise rejected with` a
@@ -138,7 +126,7 @@ impl BYOBReader {
                 scope,
                 c"Cannot read from a reader that is not attached to a stream",
             );
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 8: Let _promise_ be `a new promise`.
         let promise = Promise::new_pending(scope)?;
@@ -180,7 +168,7 @@ impl BYOBReader {
         //         ``TypeError`` exception.
         if self.data().stream.is_none() {
             js::error::throw_type_error(scope, c"Cannot cancel a reader that has no stream");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Return ! `ReadableStreamReaderGenericCancel`(`this`, _reason_).
         let reason = reason.unwrap_or_else(|| scope.root_value(js::value::undefined()));

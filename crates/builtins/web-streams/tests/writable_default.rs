@@ -106,3 +106,18 @@ fn write_rejection_errors_stream() {
         "#);
     assert_eq!(out, "rejected:nope");
 }
+
+/// A non-callable callback dictionary member throws a `TypeError` at dictionary
+/// conversion, before the step-3 `type` `RangeError` — WebIDL converts the
+/// `UnderlyingSink` dictionary (validating `write` is callable) before the
+/// constructor checks `type`.
+#[test]
+fn non_callable_callback_throws_type_error_before_type_check() {
+    let out = run(r#"
+        let err = "none";
+        try { new WritableStream({ write: {}, type: "bytes" }); err = "no-throw"; }
+        catch (e) { err = e.constructor.name; }
+        globalThis.__out = err;
+        "#);
+    assert_eq!(out, "TypeError");
+}

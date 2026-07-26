@@ -57,7 +57,7 @@ impl CountQueuingStrategy {
             scope,
             count_queuing_strategy_size as *const () as usize,
             |scope| {
-                let undef = scope.root_value(value::undefined());
+                let undef = HandleValue::undefined();
                 Function::new_callback(scope, c"size", 0, count_queuing_strategy_size, undef)
             },
         )

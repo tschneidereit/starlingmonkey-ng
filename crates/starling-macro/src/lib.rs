@@ -449,7 +449,7 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
 
     let output = quote! {
         #[doc(hidden)]
-        #[derive(Default, ::core_runtime::Traceable)]
+        #[derive(Default, ::js::macros::Traceable)]
         #input
 
         // Static JSClassOps for this type — unique per ClassDef.

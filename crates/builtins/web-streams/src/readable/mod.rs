@@ -11,9 +11,10 @@ pub mod byte_stream_controller;
 pub mod default_controller;
 pub mod default_reader;
 pub mod enums;
+pub mod native_read;
 pub mod options;
+pub mod read_all_bytes;
 pub mod read_request;
-mod read_result;
 pub mod readable_stream;
 pub mod underlying_source;
 
@@ -23,6 +24,5 @@ pub use byob_request::ReadableStreamBYOBRequest;
 pub use byte_stream_controller::ReadableByteStreamController;
 pub use default_controller::ReadableStreamDefaultController;
 pub use default_reader::DefaultReader;
-pub use read_result::ReadResult;
 pub use readable_stream::ReadableStream;
 pub use underlying_source::UnderlyingSource;

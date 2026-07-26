@@ -13,7 +13,7 @@
 //!
 //! WPT `streams/readable-byte-streams/*` covers this far more thoroughly; this is
 //! the fast, design-validating smoke test (and the GC-rooting keystone under
-//! zeal, since pull-into transfers buffers and mints views).
+//! zeal, since pull-into transfers buffers and creates views).
 
 use core_runtime::config::RuntimeConfig;
 use core_runtime::event_loop::run_microtasks;
@@ -231,6 +231,56 @@ fn byob_read_float16_view_kind() {
     assert_eq!(out, "rejected:RangeError");
 }
 
+/// Teeing a byte stream and doing a multi-byte-element BYOB read on a branch can
+/// leave that branch's pending pull-into partially filled (e.g. 3 of 4 bytes for
+/// an `Int32Array`). If the source then closes, the branch's
+/// `ReadableByteStreamControllerClose` hits its "insufficient bytes" `TypeError`.
+/// The spec marks that close `!` (infallible), but the partial fill makes it
+/// reachable, so the branch read must reject with a `TypeError` rather than
+/// aborting the runtime.
+#[test]
+fn byte_tee_branch_partial_fill_close_rejects_not_aborts() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        let step = 0;
+        const rs = new ReadableStream({
+            type: "bytes",
+            pull(c) {
+                if (step === 0) {
+                    step = 1;
+                    const v = c.byobRequest.view;
+                    v[0] = 1; v[1] = 2; v[2] = 3;
+                    c.byobRequest.respond(3); // 3 of 4 bytes -> branch partial fill
+                } else {
+                    c.close();
+                    c.byobRequest.respond(0);
+                }
+            },
+        });
+        const [b1, b2] = rs.tee();
+        // Draining branch2 to completion discriminates the clean error path from
+        // the (dev-mode-masked) abort: branch2 receives the 3-byte clone, then its
+        // next read must reject (the source closed and the misaligned branch1 close
+        // errored the tee). Aborting at branch1's close instead leaves branch2
+        // unclosed, so that second read would hang forever.
+        async function drainB2() {
+            const r = b2.getReader();
+            let n = 0;
+            try {
+                for (;;) {
+                    const { done } = await r.read();
+                    if (done) return "b2:done@" + n;
+                    n++;
+                }
+            } catch (e) { return "b2:" + e.constructor.name + "@" + n; }
+        }
+        const r1 = b1.getReader({ mode: "byob" }).read(new Int32Array(1)).then(
+            () => "b1:resolved", e => "b1:" + e.constructor.name);
+        Promise.all([r1, drainB2()]).then(([a, b]) => { globalThis.__out = a + "," + b; });
+        "#);
+    assert_eq!(out, "b1:TypeError,b2:TypeError@1");
+}
+
 /// Reading a byte stream's BYOB reader after `close()` resolves with an empty
 /// view and `done: true`.
 #[test]
@@ -246,4 +296,55 @@ fn byob_read_after_close_is_done() {
         });
         "#);
     assert_eq!(out, "Uint8Array,len=0,true");
+}
+
+/// `respond(bytesWritten)` is `[EnforceRange] unsigned long long`: a negative
+/// argument throws a `TypeError` at argument conversion, not a `RangeError` from
+/// the length checks (which is what a wrapping conversion produces).
+#[test]
+fn respond_enforce_range_rejects_negative() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        const rs = new ReadableStream({
+            type: "bytes",
+            pull(c) {
+                try { c.byobRequest.respond(-1); globalThis.__out = "no-throw"; }
+                catch (e) { globalThis.__out = "respond:" + e.constructor.name; }
+            },
+        });
+        rs.getReader({ mode: "byob" }).read(new Uint8Array(4));
+        "#);
+    assert_eq!(out, "respond:TypeError");
+}
+
+/// WebIDL converts arguments left to right: `read(view, options)` must coerce
+/// `view` to an `ArrayBufferView` (rejecting a non-view with a `TypeError`) before
+/// the `options` dictionary is converted, so an author getter on `options.min` is
+/// never invoked when the view is invalid.
+#[test]
+fn byob_read_validates_view_before_options() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        let getterRan = false;
+        const reader = new ReadableStream({ type: "bytes" }).getReader({ mode: "byob" });
+        reader.read(42, { get min() { getterRan = true; throw new Error("boom"); } }).then(
+            () => { globalThis.__out = "resolved"; },
+            e => { globalThis.__out = `rejected:${e.constructor.name}|getterRan:${getterRan}`; },
+        );
+        "#);
+    assert_eq!(out, "rejected:TypeError|getterRan:false");
+}
+
+/// `autoAllocateChunkSize` is `[EnforceRange] unsigned long long`: a negative
+/// value throws a `TypeError` at construction, rather than wrapping to a huge
+/// positive value and constructing successfully.
+#[test]
+fn auto_allocate_chunk_size_enforce_range() {
+    let out = run(r#"
+        let r;
+        try { new ReadableStream({ type: "bytes", autoAllocateChunkSize: -1 }); r = "no-throw"; }
+        catch (e) { r = e.constructor.name; }
+        globalThis.__out = r;
+        "#);
+    assert_eq!(out, "TypeError");
 }

@@ -16,7 +16,7 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
-use js::prelude::HandleValue;
+use js::prelude::{HandleValue, OptionHeapExt};
 use js::Object;
 
 /// A readable byte stream queue entry: a contiguous region of an
@@ -135,7 +135,7 @@ pub struct ReadableByteStreamController {
     /// A promise-returning algorithm that pulls data from the underlying byte source
     pub(crate) pull_algorithm: Heap<Value>,
     /// The `this` value with which the pull and cancel algorithms are invoked
-    /// (the underlying byte source object, or undefined for a controller minted
+    /// (the underlying byte source object, or undefined for a controller created
     /// internally). Mirrors the default controller's `algorithm_receiver` slot.
     pub(crate) algorithm_receiver: Heap<Value>,
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-pulling>
@@ -160,9 +160,14 @@ pub struct ReadableByteStreamController {
     /// the point at which the stream will apply backpressure to its underlying byte source
     pub(crate) strategy_hwm: f64,
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-stream>
-    /// The ReadableStream instance controlled. `None` only between minting the
+    /// The ReadableStream instance controlled. `None` only between creating the
     /// bare controller and `SetUpByteStreamController` wiring it up.
     pub(crate) stream: Option<Heap<ReadableStreamImpl>>,
+    /// The pull-reaction callbacks (`ByteStreamControllerCallPullIfNeeded`
+    /// steps 7-8; payload = this controller), created on the first pull and
+    /// reused for every subsequent pull.
+    pub(crate) pull_fulfilled_fn: Option<Heap<js::function::Function>>,
+    pub(crate) pull_rejected_fn: Option<Heap<js::function::Function>>,
 }
 
 #[webidl_methods]
@@ -202,9 +207,8 @@ impl ReadableByteStreamController {
         let stream = self
             .data()
             .stream
-            .as_ref()
-            .expect("controller has a stream")
-            .get(scope);
+            .get(scope)
+            .expect("controller has a stream");
         if stream.data().state != ReadableStreamState::Readable {
             return Err(js::error::throw_type_error(
                 scope,
@@ -257,9 +261,8 @@ impl ReadableByteStreamController {
         let stream = self
             .data()
             .stream
-            .as_ref()
-            .expect("controller has a stream")
-            .get(scope);
+            .get(scope)
+            .expect("controller has a stream");
         if stream.data().state != ReadableStreamState::Readable {
             return Err(js::error::throw_type_error(
                 scope,
@@ -282,8 +285,7 @@ impl ReadableByteStreamController {
     pub(crate) fn stream<'r>(&'r self, scope: &'r Scope<'_>) -> ReadableStream<'r> {
         self.data()
             .stream
-            .as_ref()
-            .expect("controller has a stream")
             .get(scope)
+            .expect("controller has a stream")
     }
 }

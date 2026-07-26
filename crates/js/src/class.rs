@@ -413,6 +413,12 @@ pub trait DerivedFrom<T: ClassDef>: ClassDef {}
 /// rooted.
 pub trait StackType<'s>: Sized + Copy {
     /// The inner `ClassDef` data type (e.g. `DogImpl`).
+    ///
+    /// Implementations always bind an `#[allow_unrooted_interior]` type (the
+    /// class macros mark every generated `FooImpl`); crown requires the
+    /// declaration to carry the same marker once an implementation lives in
+    /// this crate, as `iteration::AsyncIteratorRecordImpl` does.
+    #[cfg_attr(crown, crown::unrooted_must_root_lint::allow_unrooted_interior)]
     type Inner: ClassDef;
 
     /// Construct from a handle without checking the type tag.
@@ -711,12 +717,14 @@ const CLASS_REGISTRY_SLOT: u32 = MIN_CLASS_RESERVED_SLOTS + 1;
 #[crate::allow_unrooted_interior]
 struct ClassRegistry {
     map: HashMap<TypeId, Box<MozHeap<*mut JSObject>>>,
-    /// Per-global shared functions keyed by the function's native pointer, so the
-    /// same `JSFunction` is reused for every caller on a given global. Used for
-    /// `[LegacyUnforgeable]` accessor getters (WebIDL requires the getter to be
-    /// identical across instances) and for functions for which the relevant spec
-    /// requires per-global identity. Traced like prototypes.
-    shared_functions: HashMap<usize, Box<MozHeap<*mut JSObject>>>,
+    /// Per-global shared objects keyed by an arbitrary `usize` (by convention a
+    /// native function pointer unique to the call site), so the same object is
+    /// reused for every caller on a given global. Used for functions whose spec
+    /// requires per-global identity (e.g. `[LegacyUnforgeable]` accessor getters,
+    /// the streams queuing-strategy `size` functions) and for internal
+    /// plumbing objects reused across calls (e.g. a resolved promise serving
+    /// as a microtask trigger). Traced like prototypes.
+    shared_objects: HashMap<usize, Box<MozHeap<*mut JSObject>>>,
     /// Per-global monotonic `u64` counters keyed by an arbitrary `usize`. Used
     /// where a spec requires ids unique across a whole global rather than per
     /// call site — e.g. HTML's setTimeout/setInterval ids, which must not
@@ -741,7 +749,7 @@ impl ClassRegistry {
     fn new() -> Self {
         Self {
             map: HashMap::new(),
-            shared_functions: HashMap::new(),
+            shared_objects: HashMap::new(),
             counters: HashMap::new(),
             global_private: None,
         }
@@ -768,25 +776,25 @@ impl ClassRegistry {
         self.map.get(&type_id).map(|h| h.get())
     }
 
-    fn get_shared_function(&self, key: usize) -> Option<*mut JSObject> {
-        self.shared_functions.get(&key).map(|h| h.get())
+    fn get_shared_object(&self, key: usize) -> Option<*mut JSObject> {
+        self.shared_objects.get(&key).map(|h| h.get())
     }
 
-    fn set_shared_function(&mut self, key: usize, func: *mut JSObject) {
+    fn set_shared_object(&mut self, key: usize, obj: *mut JSObject) {
         let entry = self
-            .shared_functions
+            .shared_objects
             .entry(key)
             .or_insert_with(|| MozHeap::boxed(ptr::null_mut()));
-        entry.set(func);
+        entry.set(obj);
     }
 
-    /// Trace all prototype and shared-function heap values so moving GC can update them.
+    /// Trace all prototype and shared-object heap values so moving GC can update them.
     #[crate::allow_unrooted]
     unsafe fn trace(&self, trc: *mut JSTracer) {
         for heap in self.map.values() {
             heap.trace(trc);
         }
-        for heap in self.shared_functions.values() {
+        for heap in self.shared_objects.values() {
             heap.trace(trc);
         }
     }
@@ -2294,8 +2302,39 @@ pub unsafe fn create_instance_with<'s, T: ClassDef>(
 }
 
 // ---------------------------------------------------------------------------
-// Per-global shared functions
+// Per-global shared objects and functions
 // ---------------------------------------------------------------------------
+
+/// Get a per-global shared object, keyed by `key` (by convention a native
+/// function pointer unique to the call site, cast to `usize`), creating it via
+/// `init` and caching it on first use.
+///
+/// The cached object is traced and finalized with the global, so every call on
+/// a given global returns the same object. Use this for internal objects whose
+/// per-call identity does not matter and that are reused indefinitely, such as
+/// a resolved promise serving as a microtask trigger. The key namespace is
+/// shared with [`get_or_init_shared_function`].
+pub fn get_or_init_shared_object<'s>(
+    scope: &'s Scope<'_>,
+    key: usize,
+    init: impl FnOnce(&'s Scope<'_>) -> Result<Object<'s>, ExnThrown>,
+) -> Result<Object<'s>, ExnThrown> {
+    // Scope the registry borrow to the lookup so nothing under `init` can cause a second borrow.
+    let cached = unsafe {
+        get_class_registry(scope.global().as_raw()).and_then(|r| r.get_shared_object(key))
+    };
+    if let Some(o) = cached {
+        // SAFETY: `o` is a live object cached for this global and kept alive by
+        // the registry's tracer.
+        if let Some(obj) = unsafe { Object::from_raw(scope, o) } {
+            return Ok(obj);
+        }
+    }
+    let obj = init(scope)?;
+    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
+    registry.set_shared_object(key, obj.as_raw());
+    Ok(obj)
+}
 
 /// Get a per-global shared function, keyed by `key` (typically the native
 /// callback's function pointer cast to `usize`), creating it via `init` and
@@ -2311,21 +2350,9 @@ pub fn get_or_init_shared_function<'s>(
     key: usize,
     init: impl FnOnce(&'s Scope<'_>) -> Result<crate::Function<'s>, ExnThrown>,
 ) -> Result<crate::Function<'s>, ExnThrown> {
-    // Scope the registry borrow to the lookup so nothing under `init` can cause a second borrow.
-    let cached = unsafe {
-        get_class_registry(scope.global().as_raw()).and_then(|r| r.get_shared_function(key))
-    };
-    if let Some(f) = cached {
-        // SAFETY: `f` is a live JSFunction cached for this global and kept alive
-        // by the registry's tracer.
-        if let Some(func) = unsafe { crate::Function::from_raw(scope, f) } {
-            return Ok(func);
-        }
-    }
-    let func = init(scope)?;
-    let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
-    registry.set_shared_function(key, func.as_raw());
-    Ok(func)
+    let obj = get_or_init_shared_object(scope, key, |scope| init(scope).map(|f| *f))?;
+    // SAFETY: the cached object was created by `init`, so it is a JSFunction.
+    unsafe { crate::Function::from_raw(scope, obj.as_raw()) }.ok_or(ExnThrown)
 }
 
 /// Read-and-increment a per-global monotonic `u64` counter keyed by `key`.

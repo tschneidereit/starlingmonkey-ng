@@ -7,7 +7,7 @@
 
 use core_runtime::{webidl_interface, webidl_methods};
 use js::error::ExnThrown;
-use js::gc::handle::Heap;
+use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::native::{CallArgs, ExceptionStackBehavior, Value};
 use js::prelude::HandleValue;
@@ -150,12 +150,7 @@ impl AbortSignal {
     fn set_onabort(&self, scope: &Scope<'_>, val: HandleValue<'_>) {
         // Remove the old handler listener, if any. Root it before taking the
         // mutable borrow of `self`.
-        let old_callback = self
-            .data()
-            .onabort_handler
-            .as_ref()
-            .map(|heap| heap.get(scope));
-
+        let old_callback = self.data().onabort_handler.get(scope);
         if let Some(func) = old_callback {
             event_algorithms::remove_an_event_listener(
                 &mut self.data_mut().parent,

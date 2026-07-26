@@ -13,51 +13,30 @@ use js::{
 
 use crate::queuing::{QueueWithSizes, QueuingStrategy, ValueWithSize};
 
-/// Materialise a `TypeError` as a value without throwing it: many stream steps
-/// reject a promise "with a `TypeError` exception" rather than throwing.
+/// Materialize a `TypeError` as a value without making it the pending exception.
+///
+/// Note: this temporarily throws the error and then immediately clears the pending
+/// exception. It doesn't preserve a potential preexisting exception.
 pub fn make_type_error<'r>(scope: &'r Scope<'_>, message: &std::ffi::CStr) -> HandleValue<'r> {
     js::error::throw_type_error(scope, message);
-    // Root the pending exception before clearing it — never hold it as a bare
-    // `Value` local.
-    let error = scope.root_value(
-        js::exception::get_pending(scope)
-            .expect("a TypeError was just thrown")
-            .get(),
-    );
-    js::exception::clear(scope);
-    error
-}
-
-/// Resolve an optional promise slot with undefined, if it is set.
-pub(crate) fn resolve_promise_slot_undefined(scope: &Scope<'_>, promise: &Promise<'_>) {
-    let undef = scope.root_value(value::undefined());
-    promise.resolve(scope, undef).expect("resolve promise");
+    js::exception::take_pending(scope).expect("a TypeError was just thrown")
 }
 
 /// Pack two values into a JS object for a two-state reaction payload.
-///
-/// The elements are set with `set_element` (which takes already-rooted
-/// `HandleValue`s) rather than via a stack `HandleValueArray`: building the array
-/// with `NewArrayObject` would copy the two values into an unrooted stack slot
-/// and only read them *after* allocating the array, so a GC triggered by that
-/// allocation could move a young value (e.g. a freshly created promise), leaving
-/// the array element pointing at a stale cell.
 pub(crate) fn pair_payload<'r>(
     scope: &'r Scope<'_>,
     a: HandleValue<'_>,
     b: HandleValue<'_>,
 ) -> Result<HandleValue<'r>, ExnThrown> {
+    let attrs = js::class_spec::JSPROP_ENUMERATE as std::ffi::c_uint;
     let obj = Object::new_plain(scope)?;
-    obj.set_element(scope, 0, a)?;
-    obj.set_element(scope, 1, b)?;
+    obj.define_element(scope, 0, a, attrs)?;
+    obj.define_element(scope, 1, b, attrs)?;
     Ok(scope.root_value(obj.as_value()))
 }
 
 /// Build the `CreateArrayFromList(«a, b»)` two-element array for a composite
-/// cancel reason, root-safely. Like [`pair_payload`], the elements are set with
-/// already-rooted `HandleValue`s rather than copied through a stack
-/// `HandleValueArray`, which `Array::with_contents` would read only after an
-/// allocation that can move a young value out from under the stale copy.
+/// cancel reason.
 pub(crate) fn composite_reason<'r>(
     scope: &'r Scope<'_>,
     a: HandleValue<'_>,
@@ -147,12 +126,15 @@ pub(crate) fn extract_size_algorithm(
             scope,
             c"queuing strategy size must be a function",
         )),
-        None => Function::new_callback(
+        // The "returns 1" default size algorithm is a per-global singleton (it is
+        // an internal slot, never author-observable).
+        None => js::class::get_or_init_shared_function(
             scope,
-            c"size",
-            1,
-            default_size_algorithm,
-            value::undefined(),
+            default_size_algorithm as *const () as usize,
+            |scope| {
+                let undef = HandleValue::undefined();
+                Function::new_callback(scope, c"size", 1, default_size_algorithm, undef)
+            },
         )
         .map(|f| f.as_value()),
     }
@@ -270,6 +252,5 @@ pub(crate) fn is_non_negative_number(v: f64) -> bool {
 
 /// A promise resolved with undefined.
 pub(crate) fn resolved_undefined_promise<'r>(scope: &'r Scope<'_>) -> Promise<'r> {
-    let undef = scope.root_value(value::undefined());
-    Promise::new_resolved_with_value(scope, undef).expect("resolved promise")
+    Promise::new_resolved_with_value(scope, HandleValue::undefined()).expect("resolved promise")
 }

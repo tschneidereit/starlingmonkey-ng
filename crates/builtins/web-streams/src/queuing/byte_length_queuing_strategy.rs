@@ -8,7 +8,7 @@ use js::error::ExnThrown;
 use js::gc::scope::Scope;
 use js::native::Value;
 use js::prelude::{CallbackArgs, HandleValue};
-use js::{value, Function, Object};
+use js::{Function, Object};
 
 /// <https://streams.spec.whatwg.org/#blqs-class>
 #[webidl_interface]
@@ -63,7 +63,7 @@ impl ByteLengthQueuingStrategy {
             scope,
             byte_length_queuing_strategy_size as *const () as usize,
             |scope| {
-                let undef = scope.root_value(value::undefined());
+                let undef = HandleValue::undefined();
                 Function::new_callback(scope, c"size", 1, byte_length_queuing_strategy_size, undef)
             },
         )

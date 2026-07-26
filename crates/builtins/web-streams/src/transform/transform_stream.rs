@@ -19,7 +19,6 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
-use js::value;
 use js::Promise;
 
 /// <https://streams.spec.whatwg.org/#ts-class>
@@ -72,7 +71,7 @@ impl TransformStream {
         //         original object. We need to retain the object so we can `invoke` the various
         //         methods on it.
         let transformer_value = match transformer {
-            None => scope.root_value(value::undefined()),
+            None => HandleValue::undefined(),
             Some(v) => {
                 if !v.is_object() {
                     return Err(js::error::throw_type_error(
@@ -90,6 +89,30 @@ impl TransformStream {
                 }
                 ExnThrown
             })?;
+        // Step 2 (continued): converting the dictionary validates that each present
+        // callback member is callable (a `TypeError`), before the step-3/4
+        // `readableType`/`writableType` `RangeError`s.
+        crate::support::ensure_callback_members_callable(
+            scope,
+            &[
+                (
+                    transformer_dict.cancel.as_ref(),
+                    c"transformer cancel must be a function",
+                ),
+                (
+                    transformer_dict.flush.as_ref(),
+                    c"transformer flush must be a function",
+                ),
+                (
+                    transformer_dict.start.as_ref(),
+                    c"transformer start must be a function",
+                ),
+                (
+                    transformer_dict.transform.as_ref(),
+                    c"transformer transform must be a function",
+                ),
+            ],
+        )?;
         // Step 3: If _transformerDict_["``readableType``"] `exists`, throw a ``RangeError``
         //         exception.
         if transformer_dict.readable_type.is_some() {
@@ -161,8 +184,35 @@ impl TransformStream {
             start_promise.resolve(scope, result)?;
         } else {
             // Step 13: Otherwise, `resolve` _startPromise_ with undefined.
-            let undef = scope.root_value(value::undefined());
-            start_promise.resolve(scope, undef)?;
+            start_promise.resolve(scope, HandleValue::undefined())?;
+        }
+        // Not a spec step: mark an identity transform by linking its writable to its readable,
+        // so a native byte source piped into the writable can be propagated to the readable
+        // directly. Only a transform that runs no content code per chunk qualifies, so the
+        // shortcut has no content-visible effect: a transformer with any callback
+        // (`transform`/`start`/`flush`/`cancel` — which could enqueue extra chunks, or expect a
+        // cancel hook), or either strategy carrying a `size` function (invoked once per chunk on
+        // the non-shortcut path), disqualifies it.
+        let no_strategy_size = readable_strategy
+            .as_ref()
+            .and_then(|s| s.size.as_ref())
+            .is_none()
+            && writable_strategy
+                .as_ref()
+                .and_then(|s| s.size.as_ref())
+                .is_none();
+        if no_strategy_size
+            && transformer_dict.transform.is_none()
+            && transformer_dict.start.is_none()
+            && transformer_dict.flush.is_none()
+            && transformer_dict.cancel.is_none()
+        {
+            let readable = self.data().readable.get(scope);
+            self.data()
+                .writable
+                .get(scope)
+                .data_mut()
+                .identity_transform_readable = Some(Heap::from(readable));
         }
         Ok(())
     }

@@ -11,7 +11,6 @@ use js::function::Callback;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::prelude::ToJSVal;
-use js::value;
 use js::Function;
 use js::{Object, Promise};
 
@@ -32,9 +31,12 @@ pub(crate) fn invoke_promise_algorithm<'r>(
     args: &[HandleValue<'r>],
 ) -> Promise<'r> {
     if algorithm.is_undefined() {
-        let undef = scope.root_value(value::undefined());
-        return Promise::new_resolved_with_value(scope, undef)
-            .expect("failed to create resolved promise");
+        // An absent algorithm resolves with undefined. This branch runs once
+        // per pull for a source without `pull` and once per chunk for a sink
+        // without `write`, and its promise is only ever reacted to internally,
+        // so the per-global reused instance serves without allocating.
+        return Promise::shared_resolved_undefined(scope)
+            .expect("failed to get shared resolved promise");
     }
     match Function::call(scope, receiver, algorithm, args) {
         Ok(result) => {
@@ -48,7 +50,7 @@ pub(crate) fn invoke_promise_algorithm<'r>(
                 // A WebIDL operation invocation (a user source/sink/transformer
                 // method, called with the dictionary as `this`). WebIDL's
                 // `Promise<T>` conversion of the result is `NewPromiseCapability`
-                // + `Resolve` ("a promise resolved with"), which mints a *new*
+                // + `Resolve` ("a promise resolved with"), which creates a *new*
                 // promise rather than returning a promise result as-is. When the
                 // method returns a promise (e.g. an async transformer method),
                 // adopting it adds a microtask tick — observable in cancel and
@@ -73,7 +75,7 @@ pub(crate) fn invoke_algorithm<'r>(
     args: &[impl ToJSVal<'r>],
 ) -> Result<HandleValue<'r>, ExnThrown> {
     if algorithm.is_undefined() {
-        return Ok(scope.root_value(value::undefined()));
+        return Ok(HandleValue::undefined());
     }
     Function::call(scope, receiver, algorithm, args)
 }
@@ -125,22 +127,32 @@ pub(crate) fn callback_member<'r>(
     message: &CStr,
 ) -> Result<HandleValue<'r>, ExnThrown> {
     match member {
-        None => Ok(scope.root_value(value::undefined())),
+        None => Ok(HandleValue::undefined()),
         Some(obj) if obj.is_callable() => Ok(scope.root_value(obj.as_value())),
         Some(_) => Err(js::error::throw_type_error(scope, message)),
     }
 }
 
-/// Build an ordinary `{ value, done }` iterator-result object (the spec's
-/// `CreateIterResultObject`), returned as a value.
-pub(crate) fn create_iter_result<'r>(
-    scope: &'r Scope<'_>,
-    chunk: HandleValue<'_>,
-    done: bool,
-) -> Result<HandleValue<'r>, ExnThrown> {
-    let obj = Object::new_plain(scope)?;
-    obj.set_property(scope, c"value", chunk)?;
-    let done_val = scope.root_value(value::from_bool(done));
-    obj.set_property(scope, c"done", done_val)?;
-    Ok(scope.root_value(obj.as_value()))
+/// Validate that each present callback dictionary member is callable.
+///
+/// WebIDL converts a dictionary's callback-function members as part of converting
+/// the dictionary, throwing a `TypeError` for a non-callable value. The macro
+/// holds these members as plain [`Object`]s and defers callability to the use
+/// sites (see [`callback_member`]); a stream constructor applies the check up
+/// front — before its later steps, e.g. the `type`/`readableType` `RangeError` —
+/// so a non-callable member surfaces the spec's `TypeError` rather than a later
+/// error. `members` are listed in lexicographic order of the member identifiers
+/// to match WebIDL's dictionary-conversion order.
+pub(crate) fn ensure_callback_members_callable(
+    scope: &Scope<'_>,
+    members: &[(Option<&Object<'_>>, &CStr)],
+) -> Result<(), ExnThrown> {
+    for &(member, message) in members {
+        if let Some(obj) = member {
+            if !obj.is_callable() {
+                return Err(js::error::throw_type_error(scope, message));
+            }
+        }
+    }
+    Ok(())
 }

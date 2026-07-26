@@ -381,6 +381,17 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
 
                 let mir_ty = cx.tcx.type_of(type_impl.def_id).skip_binder();
 
+                // A binding to a bare type parameter (e.g. the blanket
+                // `impl<T: ClassDef> StackType for Stack<T> { type Inner = T; }`)
+                // carries no attribute information of its own: the concrete
+                // type is supplied by other impls and checked at their sites.
+                // Treating it as unannotated would make an annotated
+                // declaration unsatisfiable in any crate containing both a
+                // parameter binding and a concrete annotated one.
+                if matches!(mir_ty.kind(), ty::Param(_)) {
+                    continue;
+                }
+
                 let impl_ty_must_root = associated_type_has_attr(sym, cx, mir_ty, sym.must_root);
                 let impl_ty_allow_unrooted =
                     associated_type_has_attr(sym, cx, mir_ty, sym.allow_unrooted_interior);

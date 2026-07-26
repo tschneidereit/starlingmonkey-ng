@@ -4,14 +4,12 @@
 
 use super::algorithms;
 use super::read_request::ReadRequest;
-use super::readable_stream::ReadableStream;
-use super::readable_stream::ReadableStreamImpl;
+use super::readable_stream::{ReadableStream, ReadableStreamImpl};
 use core_runtime::{webidl_interface, webidl_methods};
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
-use js::value;
 use js::Promise;
 
 /// <https://streams.spec.whatwg.org/#default-reader-class>
@@ -65,7 +63,7 @@ impl DefaultReader {
                 scope,
                 c"Cannot read from a reader that does not have an owner stream",
             );
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Let _promise_ be `a new promise`.
         let promise = Promise::new_pending(scope)?;
@@ -78,7 +76,7 @@ impl DefaultReader {
             promise: Heap::from(promise),
         };
         // Step 4: Perform ! `DefaultReaderRead`(`this`, _readRequest_).
-        algorithms::readable_stream_default_reader_read(scope, self, read_request);
+        algorithms::readable_stream_default_reader_read(scope, *self, read_request);
         // Step 5: Return _promise_.
         Ok(promise)
     }
@@ -108,10 +106,10 @@ impl DefaultReader {
                 scope,
                 c"Cannot cancel a reader that does not have an owner stream",
             );
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Return ! `ReadableStreamReaderGenericCancel`(`this`, _reason_).
-        let reason = reason.unwrap_or_else(|| scope.root_value(value::undefined()));
+        let reason = reason.unwrap_or_else(|| HandleValue::undefined());
         Ok(algorithms::readable_stream_reader_generic_cancel(
             scope, self, reason,
         ))

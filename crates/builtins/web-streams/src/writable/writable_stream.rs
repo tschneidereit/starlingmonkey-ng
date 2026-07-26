@@ -10,20 +10,16 @@ use super::underlying_sink::UnderlyingSink;
 use crate::algorithms::extract_high_water_mark;
 use crate::algorithms::extract_size_algorithm;
 use crate::queuing::QueuingStrategy;
+use crate::support;
 use crate::writable::WritableStreamDefaultController;
 use core_runtime::{webidl_interface, webidl_methods};
-use js::conversion::ConversionError;
 use js::conversion::FromJSVal;
-use js::conversion::ToJSVal;
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
 use js::prelude::HandleValue;
-use js::value;
 use js::Promise;
-use std::borrow::Cow;
-use std::fmt;
 
 /// A traced slot holding a `Promise`.
 ///
@@ -99,7 +95,7 @@ pub struct WritableStream {
     /// A WritableStreamDefaultController created with the ability to control the state and queue of
     /// this stream
     ///
-    /// `Option` because the stream is minted before `SetUp...Controller` wires
+    /// `Option` because the stream is created before `SetUp...Controller` wires
     /// it; always `Some` thereafter.
     pub(crate) controller: Option<Heap<WritableStreamDefaultControllerImpl>>,
     /// <https://streams.spec.whatwg.org/#writablestream-detached>
@@ -135,6 +131,12 @@ pub struct WritableStream {
     /// A list of promises representing the stream’s internal queue of write requests not yet
     /// processed by the underlying sink
     pub(crate) write_requests: std::collections::VecDeque<PromiseSlot>,
+    /// If this writable is the writable end of an identity `TransformStream`,
+    /// this holds the transform's readable end. `pipeTo` uses it to propagate
+    /// a native byte source through the identity transform.
+    /// `None` for a standalone writable or a non-identity transform.
+    pub(crate) identity_transform_readable:
+        Option<Heap<crate::readable::readable_stream::ReadableStreamImpl>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -144,45 +146,6 @@ pub enum WritableStreamState {
     Closed,
     Erroring,
     Errored,
-}
-
-impl fmt::Display for WritableStreamState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Writable => "writable",
-            Self::Closed => "closed",
-            Self::Erroring => "erroring",
-            Self::Errored => "errored",
-        })
-    }
-}
-
-impl FromJSVal<'_, '_> for WritableStreamState {
-    type Config = ();
-
-    fn from_jsval(scope: &Scope<'_>, val: HandleValue<'_>, _: ()) -> Result<Self, ConversionError> {
-        let s = String::from_jsval(scope, val, ())?;
-        match s.as_str() {
-            "writable" => Ok(Self::Writable),
-            "closed" => Ok(Self::Closed),
-            "erroring" => Ok(Self::Erroring),
-            "errored" => Ok(Self::Errored),
-            _ => Err(ConversionError::Failure(Cow::Borrowed(
-                c"invalid value for WritableStreamState",
-            ))),
-        }
-    }
-}
-
-impl<'s> ToJSVal<'s> for WritableStreamState {
-    fn to_jsval_raw(&self, scope: &'s Scope<'s>) -> Result<Value, ConversionError> {
-        match self {
-            Self::Writable => "writable".to_jsval_raw(scope),
-            Self::Closed => "closed".to_jsval_raw(scope),
-            Self::Erroring => "erroring".to_jsval_raw(scope),
-            Self::Errored => "errored".to_jsval_raw(scope),
-        }
-    }
 }
 
 #[webidl_methods]
@@ -204,7 +167,7 @@ impl WritableStream {
         //         the original object. We need to retain the object so we can `invoke` the various
         //         methods on it.
         let underlying_sink_value = match underlying_sink {
-            None => scope.root_value(value::undefined()),
+            None => HandleValue::undefined(),
             Some(v) => {
                 if !v.is_object() {
                     return Err(js::error::throw_type_error(
@@ -222,6 +185,30 @@ impl WritableStream {
                 }
                 ExnThrown
             })?;
+        // Step 2 (continued): converting the dictionary validates that each present
+        // callback member is callable (a `TypeError`), before the step-3 `type`
+        // `RangeError`.
+        support::ensure_callback_members_callable(
+            scope,
+            &[
+                (
+                    underlying_sink_dict.abort.as_ref(),
+                    c"underlying sink abort must be a function",
+                ),
+                (
+                    underlying_sink_dict.close.as_ref(),
+                    c"underlying sink close must be a function",
+                ),
+                (
+                    underlying_sink_dict.start.as_ref(),
+                    c"underlying sink start must be a function",
+                ),
+                (
+                    underlying_sink_dict.write.as_ref(),
+                    c"underlying sink write must be a function",
+                ),
+            ],
+        )?;
         // Step 3: If _underlyingSinkDict_["``type``"] `exists`, throw a ``RangeError`` exception.
         //         This is to allow us to add new potential types in the future, without
         //         backward-compatibility concerns.
@@ -267,7 +254,7 @@ impl WritableStream {
         //         ``TypeError`` exception.
         if algorithms::is_writable_stream_locked(self) {
             js::error::throw_type_error(scope, c"Cannot abort a stream that already has a writer");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Return ! `WritableStreamAbort`(`this`, _reason_).
         Ok(algorithms::writable_stream_abort(scope, self, reason))
@@ -280,13 +267,13 @@ impl WritableStream {
         //         ``TypeError`` exception.
         if algorithms::is_writable_stream_locked(self) {
             js::error::throw_type_error(scope, c"Cannot close a stream that already has a writer");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: If ! `WritableStreamCloseQueuedOrInFlight`(`this`) is true, return `a promise
         //         rejected with` a ``TypeError`` exception.
         if algorithms::writable_stream_close_queued_or_in_flight(self) {
             js::error::throw_type_error(scope, c"Cannot close an already-closing stream");
-            return Promise::new_rejected_with_pending_error(scope).map_err(|_| ExnThrown);
+            return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 3: Return ! `WritableStreamClose`(`this`).
         Ok(algorithms::writable_stream_close(scope, self))
