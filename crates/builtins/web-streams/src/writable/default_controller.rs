@@ -19,7 +19,7 @@ use web_globals::signals::AbortSignal;
 
 /// <https://streams.spec.whatwg.org/#ws-default-controller-class>
 ///
-/// `no_ctor`: not constructible from JS; minted internally and populated by
+/// `no_ctor`: not constructible from JS; created internally and populated by
 /// `SetUpWritableStreamDefaultController`.
 #[webidl_interface(no_ctor)]
 pub struct WritableStreamDefaultController {
@@ -59,12 +59,17 @@ pub struct WritableStreamDefaultController {
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-stream>
     /// The WritableStream instance controlled
     ///
-    /// `Option`: set by `SetUp...Controller` after the controller is minted.
+    /// `Option`: set by `SetUp...Controller` after the controller is created.
     pub(crate) stream: Option<Heap<WritableStreamImpl>>,
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-writealgorithm>
     /// A promise-returning algorithm, taking one argument (the chunk to write), which writes data to
     /// the underlying sink
     pub(crate) write_algorithm: Heap<Value>,
+    /// The sink-write-reaction callbacks (`WritableStreamDefaultControllerProcessWrite`
+    /// steps 4-5; payload = this controller), created on the first write and
+    /// reused for every subsequent chunk. `None` until the first write.
+    pub(crate) write_fulfilled_fn: Option<Heap<js::function::Function>>,
+    pub(crate) write_rejected_fn: Option<Heap<js::function::Function>>,
 }
 
 #[webidl_methods]

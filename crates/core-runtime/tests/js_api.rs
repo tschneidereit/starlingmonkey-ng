@@ -187,6 +187,30 @@ fn test_js_api_with_runtime() {
         assert!(Finite::<f64>::new(f64::NAN).is_none());
     }
 
+    // --- Vec / Record with scope-tied element types ---
+    {
+        use js::conversion::Record;
+        use js::prelude::HandleValue;
+
+        // `for_of` hands the conversion a single reused slot; the `Vec` impl
+        // must re-root each element into its own slot. Identical elements
+        // here would mean every handle still aliases that one slot.
+        let rval = js::compile::evaluate(&scope, "[1, 2, 3]").unwrap();
+        let vals = Vec::<HandleValue>::from_jsval(&scope, rval, ()).unwrap();
+        let ints: Vec<i32> = vals.iter().map(|v| v.to_int32()).collect();
+        assert_eq!(ints, [1, 2, 3]);
+
+        let rval = js::compile::evaluate(&scope, "({a: 1, b: 2})").unwrap();
+        let rec = Record::<String, HandleValue>::from_jsval(&scope, rval, ()).unwrap();
+        let pairs: Vec<(String, i32)> = rec.into_iter().map(|(k, v)| (k, v.to_int32())).collect();
+        assert_eq!(pairs, [("a".to_string(), 1), ("b".to_string(), 2)]);
+
+        // Stack newtypes work as element types too.
+        let rval = js::compile::evaluate(&scope, "[{x: 1}, {x: 2}]").unwrap();
+        let objs = Vec::<Object>::from_jsval(&scope, rval, ()).unwrap();
+        assert_eq!(objs.len(), 2);
+    }
+
     // --- Comparison operations ---
     {
         let v1 = 42.to_jsval(&scope).unwrap();

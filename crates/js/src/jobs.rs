@@ -31,6 +31,13 @@ pub fn use_internal_job_queues(scope: &Scope<'_>) -> Result<(), ExnThrown> {
     ExnThrown::check(ok)
 }
 
+/// Enqueue `job` on the job queue: it runs as its own microtask, called with
+/// no arguments, in the same FIFO the engine uses for promise reactions.
+pub fn queue_microtask(scope: &Scope<'_>, job: &crate::Function<'_>) -> Result<(), ExnThrown> {
+    let ok = unsafe { wrappers2::EnqueueJob(scope.cx_mut(), job.handle()) };
+    ExnThrown::check(ok)
+}
+
 /// Drain the job queue, executing all pending microtasks.
 ///
 /// This runs all queued promise reactions and other microtasks until the

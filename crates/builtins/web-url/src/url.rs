@@ -7,7 +7,7 @@ use crate::algorithms;
 use core_runtime::{webidl_interface, webidl_methods};
 use js::error::{throw_type_error, ExnThrown};
 use js::exception;
-use js::gc::handle::Heap;
+use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 
 /// <https://url.spec.whatwg.org/#url-class>
@@ -57,8 +57,7 @@ impl URL<'_> {
         self.data_mut().url = Some(parsed_url.clone());
 
         // Step 4: Empty `this`’s `query object`’s `list`.
-        if let Some(query_object_heap) = self.data().query_object.as_ref() {
-            let query_object = query_object_heap.get(scope);
+        if let Some(query_object) = self.data().query_object.get(scope) {
             query_object.data_mut().list.clear();
 
             // Step 5: Let _query_ be `this`’s `URL`’s `query`.
@@ -314,8 +313,7 @@ impl URL<'_> {
         }
 
         // Step 6: Set `this`’s `query object`’s `list` to the result of `parsing` _input_.
-        if let Some(query_object_heap) = self.data().query_object.as_ref() {
-            let query_object = query_object_heap.get(scope);
+        if let Some(query_object) = self.data().query_object.get(scope) {
             if value.is_empty() {
                 query_object.data_mut().list.clear();
             } else {
@@ -333,8 +331,7 @@ impl URL<'_> {
         // Step 1: Return this’s query object.
         self.data()
             .query_object
-            .as_ref()
-            .map(|heap| heap.get(scope))
+            .get(scope)
             .expect("URL query object must be initialized")
     }
 

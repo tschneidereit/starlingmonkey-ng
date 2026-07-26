@@ -8,15 +8,13 @@ use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
 use js::native::Value;
-use js::prelude::{CallbackArgs, HandleValue};
-use js::value;
-use js::Promise;
+use js::prelude::{CallbackArgs, HandleValue, OptionHeapExt};
+use js::{value, Function, Promise};
 use web_globals::signals::abort_controller::AbortController;
 
 use crate::algorithms::{
     cast_payload, dequeue_value, enqueue_value_with_size, is_non_negative_number, make_type_error,
-    pair_parts, pair_payload, reset_queue, resolve_promise_slot_undefined,
-    resolved_undefined_promise,
+    pair_parts, pair_payload, reset_queue, resolved_undefined_promise,
 };
 use crate::queuing::{QueueWithSizes, ValueWithSize};
 use crate::support;
@@ -177,7 +175,7 @@ fn ws_abort_promise_fulfilled(
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let (stream, abort_promise) = abort_reaction_parts(scope, payload);
-    resolve_promise_slot_undefined(scope, &abort_promise);
+    abort_promise.resolve(scope, HandleValue::undefined())?;
     writable_stream_reject_close_and_closed_promise_if_needed(scope, &stream);
     Ok(value::undefined())
 }
@@ -231,7 +229,7 @@ pub(crate) fn acquire_writable_stream_default_writer<'r>(
 ) -> Result<WritableStreamDefaultWriter<'r>, ExnThrown> {
     // Step 1: Let _writer_ be a `new` ``WritableStreamDefaultWriter``.
     // Step 2: Perform ? `SetUpDefaultWriter`(_writer_, _stream_).
-    //         The writer's constructor runs SetUp; minting via the factory performs both steps and
+    //         The writer's constructor runs SetUp; creating via the factory performs both steps and
     //         propagates the setup's exception.
     let writer = WritableStreamDefaultWriter::new(scope, *stream)?;
     // Step 3: Return _writer_.
@@ -269,7 +267,7 @@ pub(crate) fn create_writable_stream<'r>(
     //         _startAlgorithm_, _writeAlgorithm_, _closeAlgorithm_, _abortAlgorithm_,
     //         _highWaterMark_, _sizeAlgorithm_).
     //         The algorithms are native (no JS receiver), so `algorithm_receiver` is undefined.
-    let receiver = scope.root_value(value::undefined());
+    let receiver = HandleValue::undefined();
     set_up_writable_stream_default_controller(
         scope,
         &stream,
@@ -460,12 +458,11 @@ pub(crate) fn writable_stream_abort<'r>(
     // Step 7: Let _wasAlreadyErroring_ be false.
     let mut was_already_erroring = false;
     let mut effective_reason = reason;
-    let undef = scope.root_value(value::undefined());
     // Step 8: If _state_ is "`erroring`", Set _wasAlreadyErroring_ to true. Set _reason_ to
     //         undefined.
     if state == WritableStreamState::Erroring {
         was_already_erroring = true;
-        effective_reason = undef;
+        effective_reason = HandleValue::undefined();
     }
     // Step 9: Let _promise_ be `a new promise`.
     let promise = Promise::new_pending(scope).expect("new promise");
@@ -522,7 +519,12 @@ pub(crate) fn writable_stream_close<'r>(
     //         "`writable`", `resolve` _writer_.`[[readyPromise]]` with undefined.
     if let Some(writer) = writable_stream_writer(scope, stream) {
         if stream.data().backpressure && state == WritableStreamState::Writable {
-            resolve_promise_slot_undefined(scope, &writer.data().ready_promise.get(scope));
+            writer
+                .data()
+                .ready_promise
+                .get(scope)
+                .resolve(scope, HandleValue::undefined())
+                .unwrap();
         }
     }
     // Step 9: Perform ! `WritableStreamDefaultControllerClose`(_stream_.`[[controller]]`).
@@ -716,7 +718,9 @@ pub(crate) fn writable_stream_finish_in_flight_close(
         .expect("in-flight close request")
         .root(scope)
         .into_promise();
-    resolve_promise_slot_undefined(scope, &in_flight_promise);
+    in_flight_promise
+        .resolve(scope, HandleValue::undefined())
+        .unwrap();
     // Step 4: Let _state_ be _stream_.`[[state]]`.
     let state = stream.data().state;
     // Step 5: Assert: _stream_.`[[state]]` is "`writable`" or "`erroring`".
@@ -738,7 +742,9 @@ pub(crate) fn writable_stream_finish_in_flight_close(
                 .unwrap()
                 .root(scope)
                 .into_promise();
-            resolve_promise_slot_undefined(scope, &abort_promise);
+            abort_promise
+                .resolve(scope, HandleValue::undefined())
+                .unwrap();
         }
     }
     // Step 7: Set _stream_.`[[state]]` to "`closed`".
@@ -746,7 +752,12 @@ pub(crate) fn writable_stream_finish_in_flight_close(
     // Step 8: Let _writer_ be _stream_.`[[writer]]`.
     // Step 9: If _writer_ is not undefined, `resolve` _writer_.`[[closedPromise]]` with undefined.
     if let Some(writer) = writable_stream_writer(scope, stream) {
-        resolve_promise_slot_undefined(scope, &writer.data().closed_promise.get(scope));
+        writer
+            .data()
+            .closed_promise
+            .get(scope)
+            .resolve(scope, HandleValue::undefined())
+            .unwrap();
     }
     // Step 10: Assert: _stream_.`[[pendingAbortRequest]]` is undefined.
     debug_assert!(stream.data().pending_abort_request.is_none());
@@ -812,7 +823,7 @@ pub(crate) fn writable_stream_finish_in_flight_write(
         .expect("in-flight write request")
         .root(scope)
         .into_promise();
-    resolve_promise_slot_undefined(scope, &promise);
+    promise.resolve(scope, HandleValue::undefined()).unwrap();
 }
 
 /// <https://streams.spec.whatwg.org/#writable-stream-finish-in-flight-write-with-error>
@@ -978,7 +989,7 @@ pub(crate) fn writable_stream_update_backpressure(
                 writer.data_mut().ready_promise.set(promise);
             } else {
                 let ready = writer.data().ready_promise.get(scope);
-                resolve_promise_slot_undefined(scope, &ready);
+                ready.resolve(scope, HandleValue::undefined()).unwrap();
             }
         }
     }
@@ -1250,7 +1261,7 @@ pub(crate) fn set_up_writable_stream_default_controller(
         &[scope.root_value(controller.as_value())],
     )?;
     // Step 16: Let _startPromise_ be `a promise resolved with` _startResult_.
-    //          WebIDL "a promise resolved with" always mints a *new* promise (it
+    //          WebIDL "a promise resolved with" always creates a *new* promise (it
     //          does not return the value as-is the way `Promise.resolve` does for
     //          a promise input), so when `startResult` is itself a promise — as
     //          for a `TransformStream`'s writable side — adopting it adds a
@@ -1508,12 +1519,12 @@ pub(crate) fn writable_stream_default_controller_get_chunk_size(
     // Step 2: Let _returnValue_ be the result of performing
     //         _controller_.`[[strategySizeAlgorithm]]`, passing in _chunk_, and interpreting the
     //         result as a `completion record`.
-    let undef = scope.root_value(value::undefined());
     let return_value =
-        support::invoke_algorithm(scope, size_algorithm, undef, &[chunk]).and_then(|v| {
-            use js::conversion::FromJSVal;
-            f64::from_jsval(scope, v, ()).map_err(|_| ExnThrown)
-        });
+        support::invoke_algorithm(scope, size_algorithm, HandleValue::undefined(), &[chunk])
+            .and_then(|v| {
+                use js::conversion::FromJSVal;
+                f64::from_jsval_throwing(scope, v, ())
+            });
     match return_value {
         // Step 4: Return _returnValue_.[[Value]].
         Ok(size) => size,
@@ -1611,15 +1622,30 @@ pub(crate) fn writable_stream_default_controller_process_write(
     //         "`writable`", perform !
     //         `WritableStreamDefaultControllerClearAlgorithms`(_controller_). Perform !
     //         `WritableStreamFinishInFlightWriteWithError`(_stream_, _reason_).
-    // (Steps 4 and 5 are implemented by `ws_write_promise_fulfilled` / `ws_write_promise_rejected`.)
-    let payload = scope.root_value(controller.as_value());
-    support::react(
-        scope,
-        &sink_write_promise,
-        Some((ws_write_promise_fulfilled, payload)),
-        Some((ws_write_promise_rejected, payload)),
-    )
-    .expect("attach write reactions");
+    // (Steps 4 and 5 are implemented by `ws_write_promise_fulfilled` /
+    // `ws_write_promise_rejected`.)
+    if controller.data().write_fulfilled_fn.is_none() {
+        let payload = scope.root_value(controller.as_value());
+        let fulfilled = Function::new_callback(scope, c"", 1, ws_write_promise_fulfilled, payload)
+            .expect("create write reaction");
+        controller.data_mut().write_fulfilled_fn = Some(Heap::from(fulfilled));
+        let rejected = Function::new_callback(scope, c"", 1, ws_write_promise_rejected, payload)
+            .expect("create write reaction");
+        controller.data_mut().write_rejected_fn = Some(Heap::from(rejected));
+    }
+    let fulfilled = controller
+        .data()
+        .write_fulfilled_fn
+        .get(scope)
+        .expect("created above");
+    let rejected = controller
+        .data()
+        .write_rejected_fn
+        .get(scope)
+        .expect("created above");
+    sink_write_promise
+        .add_reactions_ignoring_unhandled_rejection(scope, Some(*fulfilled), Some(*rejected))
+        .expect("attach write reactions");
 }
 
 /// <https://streams.spec.whatwg.org/#writable-stream-default-controller-write>

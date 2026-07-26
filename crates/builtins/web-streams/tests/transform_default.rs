@@ -102,3 +102,16 @@ fn readable_writable_shape() {
         "#);
     assert_eq!(out, "true,true,true");
 }
+
+/// A non-callable transformer callback throws a `TypeError` at dictionary
+/// conversion, before the step-3 `readableType` `RangeError`.
+#[test]
+fn non_callable_callback_throws_type_error_before_readable_type_check() {
+    let out = run(r#"
+        let err = "none";
+        try { new TransformStream({ transform: {}, readableType: "bytes" }); err = "no-throw"; }
+        catch (e) { err = e.constructor.name; }
+        globalThis.__out = err;
+        "#);
+    assert_eq!(out, "TypeError");
+}

@@ -9,16 +9,16 @@
 //! Both types are parameterized by a [`JSType`] marker that carries
 //! static type information about the kind of JS object.
 
-use std::marker::PhantomData;
-use std::pin::Pin;
-use std::ptr::NonNull;
-
 use crate::builtins::{CastError, CastTarget, JSType};
 use crate::conversion::{ConversionError, ToJSVal};
 use crate::gc::scope::Scope;
 use crate::heap::{MozHeap, Trace};
 use crate::native::{JSObject, JSTracer, RawHandle};
 use mozjs::gc::{GCMethods, Handle};
+use mozjs_sys::jsval::ObjectValue;
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::ptr::NonNull;
 
 /// A scope-rooted handle to a JavaScript object of type `T`.
 ///
@@ -369,6 +369,34 @@ impl<T: JSType> Heap<T> {
     }
 }
 
+/// Rooting helpers for a nullable heap reference.
+///
+/// `Option<Heap<T>>` is the standard shape for a field that may be absent, and
+/// reading one is always the same two steps: match out the `Some`, then root
+/// what it holds. These methods mirror [`Heap::get`] and [`Heap::take`] so the
+/// call site looks the same whether or not the field is optional.
+pub trait OptionHeapExt<T: JSType> {
+    /// Return a rooted handle to the contained item, if there is one.
+    fn get<'s>(&self, scope: &'s Scope<'_>) -> Option<T::Rooted<'s>>;
+
+    /// Return a rooted handle to the contained item, if there is one,
+    /// and clear the field.
+    ///
+    /// Note: The name avoids colliding with the inherent [`Option::take`].
+    fn take_rooted<'s>(&mut self, scope: &'s Scope<'_>) -> Option<T::Rooted<'s>>;
+}
+
+#[crate::allow_unrooted]
+impl<T: JSType> OptionHeapExt<T> for Option<Heap<T>> {
+    fn get<'s>(&self, scope: &'s Scope<'_>) -> Option<T::Rooted<'s>> {
+        self.as_ref().map(|heap| heap.get(scope))
+    }
+
+    fn take_rooted<'s>(&mut self, scope: &'s Scope<'_>) -> Option<T::Rooted<'s>> {
+        self.take().map(|heap| heap.take(scope))
+    }
+}
+
 impl<T: JSType> std::cmp::Eq for Heap<T> {}
 impl<T: JSType> std::cmp::PartialEq for Heap<T> {
     fn eq(&self, other: &Self) -> bool {
@@ -479,5 +507,19 @@ impl From<crate::native::Value> for Heap<crate::native::Value> {
             heap,
             _marker: PhantomData,
         }
+    }
+}
+
+impl<T: JSType> ToJSVal<'_> for Heap<T> {
+    #[inline]
+    fn to_jsval_raw(&self, _scope: &Scope<'_>) -> Result<crate::value::Value, ConversionError> {
+        Ok(ObjectValue(self.heap.get()))
+    }
+}
+
+impl ToJSVal<'_> for Heap<crate::native::Value> {
+    #[inline]
+    fn to_jsval_raw(&self, _scope: &Scope<'_>) -> Result<crate::value::Value, ConversionError> {
+        Ok(self.heap.get())
     }
 }

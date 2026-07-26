@@ -6,7 +6,7 @@
 
 use bitflags::bitflags;
 use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods};
-use js::gc::handle::Heap;
+use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 
 use crate::performance;
@@ -80,7 +80,7 @@ impl Event {
     #[getter]
     pub fn target<'r>(&self, scope: &'r Scope<'_>) -> Option<super::event_target::EventTarget<'r>> {
         // Step 1: Return this's target.
-        self.data().target.as_ref().map(|h| h.get(scope))
+        self.data().target.get(scope)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-srcelement>
@@ -90,7 +90,7 @@ impl Event {
         scope: &'r Scope<'_>,
     ) -> Option<super::event_target::EventTarget<'r>> {
         // Step 1: Return this's target.
-        self.data().target.as_ref().map(|h| h.get(scope))
+        self.data().target.get(scope)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-currenttarget>
@@ -102,7 +102,7 @@ impl Event {
         // Since we don't implement event propagation, `currentTarget` is `target` during dispatch,
         // and `null` otherwise.
         if self.is_dispatching() {
-            self.data().target.as_ref().map(|h| h.get(scope))
+            self.data().target.get(scope)
         } else {
             None
         }

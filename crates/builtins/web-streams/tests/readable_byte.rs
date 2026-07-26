@@ -169,3 +169,16 @@ fn byte_stream_size_function_error_ordering() {
         "#);
     assert_eq!(out, "RangeError,TypeError");
 }
+
+/// A non-callable underlying-source callback throws a `TypeError` at dictionary
+/// conversion, before the byte-stream + size-function `RangeError`.
+#[test]
+fn non_callable_callback_throws_type_error_before_byte_size_check() {
+    let out = run(r#"
+        let err = "none";
+        try { new ReadableStream({ pull: {}, type: "bytes" }, { size: () => 1 }); err = "no-throw"; }
+        catch (e) { err = e.constructor.name; }
+        globalThis.__out = err;
+        "#);
+    assert_eq!(out, "TypeError");
+}

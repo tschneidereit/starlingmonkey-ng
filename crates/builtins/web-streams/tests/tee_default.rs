@@ -82,6 +82,46 @@ fn cancel_one_branch_other_still_drains() {
     assert_eq!(out, "xy");
 }
 
+/// `tee()` packs its internal per-chunk reaction state into an object that author
+/// code cannot reach or tamper with. A hostile numeric accessor on
+/// `Object.prototype` must not be able to intercept or corrupt that packed state:
+/// if the internal payload were an ordinary `Object.prototype`-inheriting object
+/// written with `[[Set]]`/read with `[[Get]]`, the accessor would hijack indices
+/// `0`/`1` and the tee microtask would mis-recover its state.
+#[test]
+fn tee_internal_state_immune_to_proto_numeric_accessor() {
+    // `drain` concatenates into a string rather than an array: the polluted
+    // numeric accessors below would also intercept ordinary `array[0] = …` writes
+    // in author code, which is correct JS behaviour and not what we are testing.
+    let out = run(r#"
+        async function drain(stream) {
+            const reader = stream.getReader();
+            let s = "";
+            for (;;) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                s += value;
+            }
+            return s;
+        }
+        globalThis.__out = "pending";
+        for (const k of ["0", "1"]) {
+            Object.defineProperty(Object.prototype, k, {
+                configurable: true,
+                get() { return "HIJACKED"; },
+                set(_v) {},
+            });
+        }
+        const rs = new ReadableStream({ start(c) { c.enqueue("a"); c.enqueue("b"); c.close(); } });
+        const [b1, b2] = rs.tee();
+        Promise.all([drain(b1), drain(b2)]).then(
+            ([s1, s2]) => { globalThis.__out = s1 + "|" + s2; },
+            e => { globalThis.__out = "rejected:" + e; },
+        );
+        "#);
+    assert_eq!(out, "ab|ab");
+}
+
 /// An error in the source propagates to both branches' readers.
 #[test]
 fn source_error_propagates_to_both() {

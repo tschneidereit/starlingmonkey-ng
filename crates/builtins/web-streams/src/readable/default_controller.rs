@@ -13,13 +13,12 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
-use js::prelude::HandleValue;
-use js::value;
+use js::prelude::{HandleValue, OptionHeapExt};
 
 /// <https://streams.spec.whatwg.org/#rs-default-controller-class>
 ///
 /// `no_ctor`: per WebIDL the interface exposes no constructor, so
-/// `new ReadableStreamDefaultController()` throws. Instances are minted
+/// `new ReadableStreamDefaultController()` throws. Instances are created
 /// internally via the macro-generated `ReadableStreamDefaultController::new`
 /// factory and populated by `SetUpDefaultController`.
 #[webidl_interface(no_ctor)]
@@ -72,9 +71,13 @@ pub struct ReadableStreamDefaultController {
     /// <https://streams.spec.whatwg.org/#ReadableStreamDefaultController-stream>
     /// The ReadableStream instance controlled
     ///
-    /// `Option` because the controller is minted before `SetUp...Controller`
+    /// `Option` because the controller is created before `SetUp...Controller`
     /// wires it to its stream; it is always `Some` thereafter.
     pub(crate) stream: Option<Heap<ReadableStreamImpl>>,
+    /// The pull-reaction callbacks (`DefaultControllerCallPullIfNeeded` steps
+    /// 7-8; payload = this controller), created on the first pull.
+    pub(crate) pull_fulfilled_fn: Option<Heap<js::function::Function>>,
+    pub(crate) pull_rejected_fn: Option<Heap<js::function::Function>>,
 }
 
 #[webidl_methods]
@@ -91,14 +94,14 @@ impl ReadableStreamDefaultController {
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-desired-size>
     #[getter]
-    fn desired_size(&self, scope: &Scope<'_>) -> Option<f64> {
+    pub fn desired_size(&self, scope: &Scope<'_>) -> Option<f64> {
         // Step 1: Return ! `DefaultControllerGetDesiredSize`(`this`).
         algorithms::readable_stream_default_controller_get_desired_size(scope, self)
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-close>
     #[method]
-    fn close(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
+    pub fn close(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
         // Step 1: If ! `DefaultControllerCanCloseOrEnqueue`(`this`) is false, throw a
         //         ``TypeError`` exception.
         if !algorithms::readable_stream_default_controller_can_close_or_enqueue(scope, self) {
@@ -114,7 +117,11 @@ impl ReadableStreamDefaultController {
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-enqueue>
     #[method]
-    fn enqueue(&self, scope: &Scope<'_>, chunk: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
+    pub fn enqueue(
+        &self,
+        scope: &Scope<'_>,
+        chunk: Option<HandleValue<'_>>,
+    ) -> Result<(), ExnThrown> {
         // Step 1: If ! `DefaultControllerCanCloseOrEnqueue`(`this`) is false, throw a
         //         ``TypeError`` exception.
         if !algorithms::readable_stream_default_controller_can_close_or_enqueue(scope, self) {
@@ -124,15 +131,15 @@ impl ReadableStreamDefaultController {
             ));
         }
         // Step 2: Perform ? `DefaultControllerEnqueue`(`this`, _chunk_).
-        let chunk = chunk.unwrap_or_else(|| scope.root_value(value::undefined()));
+        let chunk = chunk.unwrap_or_else(|| HandleValue::undefined());
         algorithms::readable_stream_default_controller_enqueue(scope, self, chunk)
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-error>
     #[method]
-    fn error(&self, scope: &Scope<'_>, e: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
+    pub fn error(&self, scope: &Scope<'_>, e: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
         // Step 1: Perform ! `DefaultControllerError`(`this`, _e_).
-        let e = e.unwrap_or_else(|| scope.root_value(value::undefined()));
+        let e = e.unwrap_or_else(|| HandleValue::undefined());
         algorithms::readable_stream_default_controller_error(scope, self, e);
         Ok(())
     }
@@ -140,9 +147,8 @@ impl ReadableStreamDefaultController {
     pub(crate) fn stream<'r>(&'r self, scope: &'r Scope<'_>) -> ReadableStream<'r> {
         self.data()
             .stream
-            .as_ref()
-            .expect("controller has a stream")
             .get(scope)
+            .expect("controller has a stream")
     }
 }
 

@@ -67,6 +67,27 @@ fn from_async_generator_streams_values() {
     assert_eq!(out, "xyz");
 }
 
+/// A sync iterable that yields a rejected promise: the async-from-sync wrapper
+/// adopts the rejection and closes the sync iterator (running its `return` /
+/// `finally`) before the stream errors, per AsyncFromSyncIteratorContinuation
+/// with closeOnRejection = true.
+#[test]
+fn from_sync_rejected_value_closes_iterator() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        let cleaned = false;
+        const it = (function* () {
+            try { yield Promise.reject(new TypeError("boom")); }
+            finally { cleaned = true; }
+        })();
+        ReadableStream.from(it).getReader().read().then(
+            () => { globalThis.__out = "resolved"; },
+            e => { globalThis.__out = `rejected:${e.constructor.name}:${e.message}|cleaned:${cleaned}`; },
+        );
+        "#);
+    assert_eq!(out, "rejected:TypeError:boom|cleaned:true");
+}
+
 /// Cancelling the stream invokes the iterator's `return` method.
 #[test]
 fn from_cancel_calls_return() {

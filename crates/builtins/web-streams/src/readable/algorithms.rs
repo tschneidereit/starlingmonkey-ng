@@ -3,18 +3,15 @@
 //! Standalone algorithms from <https://streams.spec.whatwg.org/>
 
 use core_runtime::{jsclass, jsmethods};
-use js::conversion::{FromJSVal, ToJSVal};
+use js::conversion::FromJSVal;
 use js::error::ExnThrown;
 use js::exception::take_pending_or_undefined;
-use js::function::EmptyArgs;
-use js::gc::handle::Heap;
+use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
 use js::native::{Handle, Value};
-use js::prelude::{CallbackArgs, HandleObject, HandleValue};
-use js::value;
-use js::Function;
-use js::{Object, Promise};
+use js::prelude::{CallbackArgs, HandleObject, HandleValue, ToJSVal};
+use js::{value, Function, Object, Promise};
 use web_globals::signals::{AbortSignal, AbortSignalImpl};
 
 use super::byob_reader::BYOBReader;
@@ -28,9 +25,8 @@ use super::read_request::{ReadIntoRequest, ReadRequest};
 use super::readable_stream::{ReadableStream, ReadableStreamImpl, ReadableStreamState};
 use super::underlying_source::UnderlyingSource;
 use crate::algorithms::{
-    cast_payload, composite_reason, dequeue_value, enqueue_value_with_size, is_non_negative_number,
-    make_type_error, pair_parts, pair_payload, reset_queue, resolve_promise_slot_undefined,
-    resolved_undefined_promise,
+    composite_reason, dequeue_value, enqueue_value_with_size, is_non_negative_number,
+    make_type_error, pair_parts, pair_payload, reset_queue, resolved_undefined_promise,
 };
 use crate::readable::default_reader::DefaultReaderImpl;
 use crate::support;
@@ -38,7 +34,7 @@ use crate::writable::algorithms::{
     acquire_writable_stream_default_writer, is_writable_stream_locked, writable_stream_abort,
     writable_stream_close_queued_or_in_flight,
     writable_stream_default_writer_close_with_error_propagation,
-    writable_stream_default_writer_release, writable_stream_default_writer_write,
+    writable_stream_default_writer_release, writable_stream_default_writer_write, writer_stream,
 };
 use crate::writable::default_writer::{
     WritableStreamDefaultWriter, WritableStreamDefaultWriterImpl,
@@ -56,26 +52,8 @@ fn stream_default_reader<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
 ) -> Option<DefaultReader<'r>> {
-    let obj: Object<'r> = stream.data().reader.as_ref()?.get(scope);
+    let obj: Object<'r> = stream.data().reader.get(scope)?;
     obj.cast::<DefaultReader>().ok()
-}
-
-/// A `ReadableByteStreamController` value usable as a reaction payload.
-fn byte_controller_value<'r>(
-    scope: &'r Scope<'_>,
-    controller: &ReadableByteStreamController<'_>,
-) -> HandleValue<'r> {
-    scope.root_value(controller.as_value())
-}
-
-/// The stream's `[[controller]]` as a byte controller, or `None` if it is a
-/// default controller.
-fn stream_byte_controller<'r>(
-    scope: &'r Scope<'_>,
-    stream: &ReadableStream<'_>,
-) -> Option<ReadableByteStreamController<'r>> {
-    let obj: Object<'r> = stream.data().controller.as_ref()?.get(scope);
-    obj.cast::<ReadableByteStreamController>().ok()
 }
 
 /// The stream's `[[reader]]` as a BYOB reader, or `None` if unlocked or locked
@@ -84,7 +62,7 @@ fn stream_byob_reader<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
 ) -> Option<BYOBReader<'r>> {
-    let obj: Object<'r> = stream.data().reader.as_ref()?.get(scope);
+    let obj: Object<'r> = stream.data().reader.get(scope)?;
     obj.cast::<BYOBReader>().ok()
 }
 
@@ -94,13 +72,8 @@ fn stream_reader_closed_promise<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
 ) -> Promise<'r> {
-    if let Some(reader) = stream_default_reader(scope, stream) {
-        reader.generic_closed_promise(scope)
-    } else {
-        stream_byob_reader(scope, stream)
-            .expect("a locked stream has a default or BYOB reader")
-            .generic_closed_promise(scope)
-    }
+    let reader = stream.reader(scope).expect("a locked stream has a reader");
+    reader_closed_promise_for(scope, &reader)
 }
 
 /// The `[[closedPromise]]` of a specific reader object (default or BYOB).
@@ -136,7 +109,7 @@ pub(crate) trait GenericReader {
 
 impl GenericReader for DefaultReader<'_> {
     fn generic_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>> {
-        self.data().stream.as_ref().map(|h| h.get(scope))
+        self.data().stream.get(scope)
     }
     fn set_generic_stream(&self, stream: &ReadableStream<'_>) {
         self.data_mut().stream = Some(Heap::from(*stream));
@@ -157,7 +130,7 @@ impl GenericReader for DefaultReader<'_> {
 
 impl GenericReader for BYOBReader<'_> {
     fn generic_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>> {
-        self.data().stream.as_ref().map(|h| h.get(scope))
+        self.data().stream.get(scope)
     }
     fn set_generic_stream(&self, stream: &ReadableStream<'_>) {
         self.data_mut().stream = Some(Heap::from(*stream));
@@ -174,18 +147,6 @@ impl GenericReader for BYOBReader<'_> {
     fn as_reader_value(&self) -> Value {
         self.as_value()
     }
-}
-
-/// Take the pending exception value (clearing it), or undefined if none is set.
-/// Used to turn an abrupt completion into the value a read-into request's `error
-/// steps` reject with.
-fn exception_value_or_undefined<'r>(scope: &'r Scope<'_>) -> HandleValue<'r> {
-    let value = match js::exception::get_pending(scope) {
-        Ok(v) => scope.root_value(v.get()),
-        Err(_) => HandleValue::undefined(),
-    };
-    js::exception::clear(scope);
-    value
 }
 
 /// Construct a view over `buffer` and return it as a rooted value, panicking on
@@ -212,11 +173,7 @@ fn error_controller_with_pending(
     scope: &Scope<'_>,
     controller: &ReadableStreamDefaultController<'_>,
 ) -> ExnThrown {
-    let value = match js::exception::get_pending(scope) {
-        Ok(v) => scope.root_value(v.get()),
-        Err(_) => HandleValue::undefined(),
-    };
-    js::exception::clear(scope);
+    let value = take_pending_or_undefined(scope);
     readable_stream_default_controller_error(scope, controller, value);
     js::exception::set_pending(
         scope,
@@ -247,7 +204,7 @@ fn start_promise_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
+    let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, payload, ())?;
     // Set _controller_.[[started]] to true.
     controller.data_mut().started = true;
     debug_assert!(!controller.data().pulling);
@@ -263,7 +220,7 @@ fn start_promise_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
+    let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, payload, ())?;
     // Perform ! DefaultControllerError(controller, r).
     readable_stream_default_controller_error(scope, &controller, args.get(0));
     Ok(value::undefined())
@@ -275,7 +232,7 @@ fn pull_promise_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
+    let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, payload, ())?;
     // Set _controller_.[[pulling]] to false.
     controller.data_mut().pulling = false;
     // If _controller_.[[pullAgain]] is true, set it to false and call pull-if-needed again.
@@ -292,7 +249,7 @@ fn pull_promise_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
+    let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, payload, ())?;
     // Perform ! DefaultControllerError(controller, e).
     readable_stream_default_controller_error(scope, &controller, args.get(0));
     Ok(value::undefined())
@@ -307,7 +264,7 @@ fn byte_start_promise_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = cast_payload::<ReadableByteStreamController>(scope, payload);
+    let controller = ReadableByteStreamController::from_jsval_throwing(scope, payload, ())?;
     // Set _controller_.[[started]] to true.
     controller.data_mut().started = true;
     debug_assert!(!controller.data().pulling);
@@ -323,7 +280,7 @@ fn byte_start_promise_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = cast_payload::<ReadableByteStreamController>(scope, payload);
+    let controller = ReadableByteStreamController::from_jsval_throwing(scope, payload, ())?;
     // Perform ! ByteStreamControllerError(controller, r).
     readable_byte_stream_controller_error(scope, &controller, args.get(0));
     Ok(value::undefined())
@@ -335,7 +292,7 @@ fn byte_pull_promise_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = cast_payload::<ReadableByteStreamController>(scope, payload);
+    let controller = ReadableByteStreamController::from_jsval_throwing(scope, payload, ())?;
     // Set _controller_.[[pulling]] to false.
     controller.data_mut().pulling = false;
     // If _controller_.[[pullAgain]] is true, set it to false and call pull-if-needed again.
@@ -352,7 +309,7 @@ fn byte_pull_promise_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = cast_payload::<ReadableByteStreamController>(scope, payload);
+    let controller = ReadableByteStreamController::from_jsval_throwing(scope, payload, ())?;
     // Perform ! ByteStreamControllerError(controller, e).
     readable_byte_stream_controller_error(scope, &controller, args.get(0));
     Ok(value::undefined())
@@ -375,23 +332,24 @@ fn tee_pull(scope: &Scope<'_>, state: TeeState<'_>) {
     let reader = state.data().reader.get(scope);
     readable_stream_default_reader_read(
         scope,
-        &reader,
+        reader,
         ReadRequest::Tee {
             state: Heap::from(state),
         },
     );
 }
 
-/// `ReadableStreamDefaultTee` step 13 pull algorithm callback (payload = state).
+/// `ReadableStreamDefaultTee` step 13 pull algorithm callback.
 fn tee_pull_native(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    payload: HandleValue<'_>,
+    state: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = TeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = TeeState::from_jsval(scope, state, ()).unwrap();
     tee_pull(scope, state);
     // Return `a promise resolved with` undefined.
-    Ok(resolved_undefined_promise(scope).as_value())
+    // Fully internal, so the per-global reused instance serves.
+    Ok(Promise::shared_resolved_undefined(scope)?.as_value())
 }
 
 /// Shared cancelN body (returns the cancel promise as a value): payload = state, `which1`
@@ -463,55 +421,120 @@ fn tee_closed_rejected(
     let branch2 = state.data().branch2.get(scope);
     readable_stream_default_controller_error(
         scope,
-        &{
-            let stream = &branch1;
-            stream.controller(scope)
-        },
+        &branch1
+            .default_controller(scope)
+            .expect("branch1 controller"),
         r,
     );
     readable_stream_default_controller_error(
         scope,
-        &{
-            let stream = &branch2;
-            stream.controller(scope)
-        },
+        &branch2
+            .default_controller(scope)
+            .expect("branch2 controller"),
         r,
     );
     if !state.data().canceled1 || !state.data().canceled2 {
-        resolve_promise_slot_undefined(scope, &state.data().cancel_promise.get(scope));
+        state
+            .data()
+            .cancel_promise
+            .get(scope)
+            .resolve(scope, HandleValue::undefined())?;
     }
     Ok(value::undefined())
 }
 
-/// The chunk-steps microtask of the tee read request (payload = [state, chunk]).
 /// Tee branches are created with the default (constant-1) size algorithm, so
 /// their controllers' `enqueue` can never run the size algorithm and therefore
 /// never throws — matching the spec's `! ReadableStreamDefaultControllerEnqueue`.
 const TEE_ENQUEUE_INFALLIBLE: &str =
     "tee branch enqueue is infallible: branches use the default constant-1 size algorithm";
 
+/// The chunk-steps microtask of the tee read request.
 fn tee_chunk_microtask(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    payload: HandleValue<'_>,
+    state: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let (state_value, chunk) = pair_parts(scope, payload);
-    let state = TeeState::from_jsval(scope, state_value, ()).unwrap();
+    let state = TeeState::from_jsval(scope, state, ()).unwrap();
+    let chunk = state.data().pending_chunk.get(scope);
+    state.data().pending_chunk.set(value::undefined());
     // Set _readAgain_ to false.
     state.data_mut().read_again = false;
-    // _chunk1_ and _chunk2_ are _chunk_. (cloneForBranch2 is only set by the transfer wrapper,
-    // which we don't expose; `.tee()` always passes false, so no structured clone is needed.)
+    // Let _chunk1_ and _chunk2_ be _chunk_.
+    // _chunk1_ is the unmodified `chunk`; _chunk2_ may be replaced by a structured clone
+    // below when _cloneForBranch2_ is true.
+    let mut chunk2 = chunk;
+    // If _canceled2_ is false and _cloneForBranch2_ is true,
+    if !state.data().canceled2 && state.data().clone_for_branch2 {
+        // Let _cloneResult_ be `StructuredClone`(_chunk2_).
+        // SAFETY: a default-realm structured clone with no custom callbacks; the buffer is owned
+        // and dropped by the wrapper.
+        match unsafe {
+            js::structured_clone::clone(scope, chunk2, std::ptr::null(), std::ptr::null_mut())
+        } {
+            // Otherwise, set _chunk2_ to _cloneResult_.`[[Value]]`.
+            Ok(cloned) => chunk2 = cloned,
+            // If _cloneResult_ is an abrupt completion,
+            Err(_) => {
+                let clone_err = take_pending_or_undefined(scope);
+                // Perform ! `ReadableStreamDefaultControllerError`(branch1.`[[controller]]`,
+                //          _cloneResult_.`[[Value]]`).
+                let branch1 = state.data().branch1.get(scope);
+                readable_stream_default_controller_error(
+                    scope,
+                    &branch1
+                        .default_controller(scope)
+                        .expect("branch1 controller"),
+                    clone_err,
+                );
+                // Perform ! `ReadableStreamDefaultControllerError`(branch2.`[[controller]]`,
+                //          _cloneResult_.`[[Value]]`).
+                let branch2 = state.data().branch2.get(scope);
+                readable_stream_default_controller_error(
+                    scope,
+                    &branch2
+                        .default_controller(scope)
+                        .expect("branch2 controller"),
+                    clone_err,
+                );
+                // `Resolve` _cancelPromise_ with ! `ReadableStreamCancel`(_stream_,
+                //          _cloneResult_.`[[Value]]`).
+                let stream = state.data().stream.get(scope);
+                let cancel_result = readable_stream_cancel(scope, &stream, clone_err);
+                state
+                    .data()
+                    .cancel_promise
+                    .get(scope)
+                    .resolve(scope, cancel_result)
+                    .expect("resolve cancel");
+                // Return.
+                return Ok(value::undefined());
+            }
+        }
+    }
     // If _canceled1_ is false, perform ! `ReadableStreamDefaultControllerEnqueue`(branch1, chunk1).
     if !state.data().canceled1 {
         let branch1 = state.data().branch1.get(scope);
-        readable_stream_default_controller_enqueue(scope, &branch1.controller(scope), chunk)
-            .expect(TEE_ENQUEUE_INFALLIBLE);
+        readable_stream_default_controller_enqueue(
+            scope,
+            &branch1
+                .default_controller(scope)
+                .expect("branch1 controller"),
+            chunk,
+        )
+        .expect(TEE_ENQUEUE_INFALLIBLE);
     }
     // If _canceled2_ is false, perform ! `ReadableStreamDefaultControllerEnqueue`(branch2, chunk2).
     if !state.data().canceled2 {
         let branch2 = state.data().branch2.get(scope);
-        readable_stream_default_controller_enqueue(scope, &branch2.controller(scope), chunk)
-            .expect(TEE_ENQUEUE_INFALLIBLE);
+        readable_stream_default_controller_enqueue(
+            scope,
+            &branch2
+                .default_controller(scope)
+                .expect("branch2 controller"),
+            chunk2,
+        )
+        .expect(TEE_ENQUEUE_INFALLIBLE);
     }
     // Set _reading_ to false. If _readAgain_ is true, perform _pullAlgorithm_.
     state.data_mut().reading = false;
@@ -522,15 +545,15 @@ fn tee_chunk_microtask(
 }
 
 /// The tee read request's `chunk steps`: queue a microtask to drive both branches.
+/// <https://streams.spec.whatwg.org/#ref-for-read-request-chunk-steps%E2%91%A2>
 pub(crate) fn tee_read_request_chunk_steps(
     scope: &Scope<'_>,
     state: TeeState<'_>,
     chunk: HandleValue<'_>,
 ) -> Result<(), ExnThrown> {
-    let resolved = resolved_undefined_promise(scope);
-    let payload = pair_payload(scope, scope.root_value(state.as_value()), chunk)?;
-    let microtask = Function::new_callback(scope, c"", 0, tee_chunk_microtask, payload)?;
-    resolved.add_reactions(scope, Some(*microtask), None)
+    state.data().pending_chunk.set(*chunk);
+    let microtask = state.data().chunk_microtask_fn.get(scope);
+    js::jobs::queue_microtask(scope, &microtask)
 }
 
 /// The tee read request's `close steps`: close both non-canceled branches and resolve the cancel
@@ -544,24 +567,33 @@ pub(crate) fn tee_read_request_close_steps(
     // If _canceled1_ is false, close branch1.
     if !state.data().canceled1 {
         let branch1 = state.data().branch1.get(scope);
-        readable_stream_default_controller_close(scope, &{
-            let stream = &branch1;
-            stream.controller(scope)
-        });
+        readable_stream_default_controller_close(
+            scope,
+            &branch1
+                .default_controller(scope)
+                .expect("branch1 controller"),
+        );
     }
     // If _canceled2_ is false, close branch2.
     if !state.data().canceled2 {
         let branch2 = state.data().branch2.get(scope);
-        readable_stream_default_controller_close(scope, &{
-            let stream = &branch2;
-            stream.controller(scope)
-        });
+        readable_stream_default_controller_close(
+            scope,
+            &branch2
+                .default_controller(scope)
+                .expect("branch2 controller"),
+        );
     }
     // If _canceled1_ is false or _canceled2_ is false, resolve _cancelPromise_ with undefined.
     if !state.data().canceled1 || !state.data().canceled2 {
-        resolve_promise_slot_undefined(scope, &state.data().cancel_promise.get(scope));
+        state
+            .data()
+            .cancel_promise
+            .get(scope)
+            .resolve(scope, HandleValue::undefined())
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 /// The tee read request's `error steps`: just clear the reading flag.
@@ -700,7 +732,7 @@ pub(crate) fn byte_pull_steps(
         let buffer = match js::ArrayBuffer::new(scope, size) {
             Ok(b) => b,
             Err(_) => {
-                let error = exception_value_or_undefined(scope);
+                let error = take_pending_or_undefined(scope);
                 read_request
                     .take()
                     .unwrap()
@@ -754,7 +786,7 @@ pub(crate) fn acquire_readable_stream_byob_reader<'r>(
 ) -> Result<BYOBReader<'r>, ExnThrown> {
     // Step 1: Let _reader_ be a `new` ``BYOBReader``.
     // Step 2: Perform ? `SetUpBYOBReader`(_reader_, _stream_).
-    //         The reader's constructor runs SetUpBYOBReader, so minting it via the
+    //         The reader's constructor runs SetUpBYOBReader, so creating it via the
     //         factory performs both steps; the factory propagates the setup's exception.
     let reader = BYOBReader::new(scope, *stream)?;
     // Step 3: Return _reader_.
@@ -769,7 +801,7 @@ pub(crate) fn acquire_readable_stream_default_reader<'r>(
 ) -> Result<DefaultReader<'r>, ExnThrown> {
     // Step 1: Let _reader_ be a `new` ``DefaultReader``.
     // Step 2: Perform ? `SetUpDefaultReader`(_reader_, _stream_).
-    //         The reader's constructor runs SetUpDefaultReader, so minting it via
+    //         The reader's constructor runs SetUpDefaultReader, so creating it via
     //         the factory performs both steps; the factory propagates the setup's exception.
     let reader = DefaultReader::new(scope, *stream)?;
     // Step 3: Return _reader_.
@@ -871,27 +903,20 @@ pub(crate) fn initialize_readable_stream(stream: &ReadableStream<'_>) {
     data.state = ReadableStreamState::Readable;
     // Step 2: Set _stream_.`[[reader]]` and _stream_.`[[storedError]]` to undefined.
     data.reader = None;
-    data.stored_error.set(js::value::undefined());
+    data.stored_error.set(value::undefined());
     // Step 3: Set _stream_.`[[disturbed]]` to false.
     data.disturbed = false;
-}
-
-/// <https://streams.spec.whatwg.org/#is-readable-stream-locked>
-/// IsReadableStreamLocked(stream) performs the following steps:
-pub(crate) fn is_readable_stream_locked(stream: &ReadableStream<'_>) -> bool {
-    // Step 1: If _stream_.`[[reader]]` is undefined, return false.
-    // Step 2: Return true.
-    stream.data().reader.is_some()
 }
 
 /// <https://streams.spec.whatwg.org/#readable-stream-from-iterable>
 /// ReadableStreamFromIterable(asyncIterable) performs the following steps:
 ///
 /// The iterator record and the `async`/`sync` distinction are captured in a
-/// GC-traced `FromIterableState` that backs the pull and cancel algorithms (native
+/// `js::iteration::AsyncIteratorRecord`, held by a GC-traced
+/// `FromIterableState` that backs the pull and cancel algorithms (native
 /// `Function::new_callback`s carrying the state as their payload). For a sync
-/// iterable, `[[NextMethod]]` is a native async-from-sync `next` (`afs_next`)
-/// so that `IteratorNext` uniformly yields a promise of an iterator result.
+/// iterable, `[[NextMethod]]` is the record's native async-from-sync `next`,
+/// so `IteratorNext` uniformly yields a promise of an iterator result.
 pub(crate) fn readable_stream_from_iterable<'r>(
     scope: &'r Scope<'_>,
     async_iterable: HandleValue<'_>,
@@ -926,195 +951,41 @@ pub(crate) fn readable_stream_from_iterable<'r>(
     //         (Step 3's start algorithm is the default undefined; steps 4 and 5's pull/cancel
     //         algorithms are the native `from_pull_native` / `from_cancel_native`, carrying the
     //         iterator state as their payload.)
-    let state_value = scope.root_value(state.as_value());
-    let pull = Function::new_callback(scope, c"", 1, from_pull_native, state_value)?;
-    let cancel = Function::new_callback(scope, c"", 1, from_cancel_native, state_value)?;
-    let undef = HandleValue::undefined();
-    let size = HandleValue::undefined();
+    let pull = Function::new_callback(scope, c"", 1, from_pull_native, state)?;
+    let cancel = Function::new_callback(scope, c"", 1, from_cancel_native, state)?;
     let stream = create_readable_stream(
         scope,
-        undef,
+        HandleValue::undefined(),
         scope.root_value(pull.as_value()),
         scope.root_value(cancel.as_value()),
         0.0,
-        size,
+        HandleValue::undefined(),
     )?;
     // Step 7: Return _stream_.
     Ok(stream)
 }
 
-// ---------------------------------------------------------------------------
-// `ReadableStreamFromIterable` iterator machinery.
-//
-// The iterator record lives in a GC-traced `FromIterableState`: `iterator` (the
-// [[Iterator]]), `next_method` (the [[NextMethod]]), and — for a sync iterable
-// wrapped as async — `sync_next` (the sync iterator's `next`, invoked by the
-// native async-from-sync `afs_next`). Every callback receives the state (or the
-// controller) as its payload.
-// ---------------------------------------------------------------------------
-
-/// The iterator-record state backing `ReadableStreamFromIterable`'s pull and
-/// cancel algorithms. Not exposed to JS (`hidden`); minted internally and
-/// reached through each callback's payload value.
+/// The internal state backing `ReadableStreamFromIterable`'s pull and cancel
+/// algorithms.
 #[jsclass(hidden)]
 pub(crate) struct FromIterableState {
-    /// The `[[Iterator]]` — the async (or wrapped sync) iterator object.
-    iterator: Heap<Value>,
-    /// The `[[NextMethod]]` — for a sync iterable this is the native `afs_next`.
-    next_method: Heap<Value>,
-    /// The sync iterator's own `next`, called by `afs_next` (sync wrapping only).
-    sync_next: Heap<Value>,
+    /// The `GetIterator(asyncIterable, async)` record driving the iteration.
+    record: Heap<js::iteration::AsyncIteratorRecordImpl>,
+    /// The pull algorithm's fulfillment callback (payload = the stream's
+    /// controller), created on the first pull and reused for every subsequent
+    /// iteration. `None` until then.
+    pull_fulfilled_fn: Option<Heap<js::function::Function>>,
 }
 
 #[jsmethods]
 impl FromIterableState<'_> {
-    /// `GetIterator(asyncIterable, async)`: populate the iterator record, falling
-    /// back to the sync iterator (wrapped via `afs_next`) when there is no
-    /// `Symbol.asyncIterator` method.
+    /// Step 2: Let _iteratorRecord_ be ? `GetIterator`(_asyncIterable_, async).
     #[constructor]
     fn new(&self, scope: &Scope<'_>, async_iterable: HandleValue<'_>) -> Result<(), ExnThrown> {
-        // The method lookups use the boxed value (so primitive iterables such as
-        // strings work), but each iterator factory is called with the original
-        // value as its `this`. `null` and `undefined` are not iterable.
-        if async_iterable.is_null_or_undefined() {
-            return Err(js::error::throw_type_error(
-                scope,
-                c"value is not async iterable",
-            ));
-        }
-        let obj = Object::from_value_coerce(scope, async_iterable)?;
-
-        let async_key = scope.root_id(js::symbol::get_well_known_key(
-            scope,
-            js::native::SymbolCode::asyncIterator,
-        ));
-        let async_method = from_check_method(scope, obj.get_property_by_id(scope, async_key)?)?;
-
-        match async_method {
-            Some(method) => {
-                let iter = js::Function::call(scope, async_iterable, method, EmptyArgs)?;
-                if !iter.is_object() {
-                    return Err(js::error::throw_type_error(
-                        scope,
-                        c"async iterator must be an object",
-                    ));
-                }
-                let iter_obj = Object::from_value(scope, *iter).map_err(|_| ExnThrown)?;
-                let next = iter_obj.get_property(scope, c"next")?;
-                self.data_mut().iterator.set(*iter);
-                self.data_mut().next_method.set(*next);
-            }
-            None => {
-                let sync_key = scope.root_id(js::symbol::get_well_known_key(
-                    scope,
-                    js::native::SymbolCode::iterator,
-                ));
-                let sync_method =
-                    from_check_method(scope, obj.get_property_by_id(scope, sync_key)?)?
-                        .ok_or_else(|| {
-                            js::error::throw_type_error(scope, c"value is not async iterable")
-                        })?;
-                let sync_iter = js::Function::call(scope, async_iterable, sync_method, EmptyArgs)?;
-                if !sync_iter.is_object() {
-                    return Err(js::error::throw_type_error(
-                        scope,
-                        c"iterator must be an object",
-                    ));
-                }
-                let sync_iter_obj = Object::from_value(scope, *sync_iter).map_err(|_| ExnThrown)?;
-                let sync_next = sync_iter_obj.get_property(scope, c"next")?;
-                self.data_mut().iterator.set(*sync_iter);
-                self.data_mut().sync_next.set(*sync_next);
-                // `CreateAsyncFromSyncIterator`: the next method becomes a native
-                // function that calls the sync `next` and awaits the yielded value.
-                let state_v = scope.root_value(self.as_value());
-                let afs = Function::new_callback(scope, c"", 1, afs_next, state_v)?;
-                self.data_mut().next_method.set(afs.as_value());
-            }
-        }
+        let record = js::iteration::get_async_iterator(scope, async_iterable)?;
+        self.data_mut().record.set(record);
         Ok(())
     }
-}
-
-/// A promise rejected with the currently-pending exception, as a value.
-fn rejected_pending_value(scope: &Scope<'_>) -> Value {
-    Promise::new_rejected_with_pending_error(scope)
-        .map(|p| p.as_value())
-        .unwrap_or_else(|_| value::undefined())
-}
-
-/// Whether `v` is callable, without throwing — the `IsCallable` test for the
-/// `GetMethod`-style method lookups in `ReadableStream.from`.
-fn from_is_callable(scope: &Scope<'_>, v: HandleValue<'_>) -> bool {
-    Object::from_value(scope, *v).is_ok_and(|o| o.is_callable())
-}
-
-/// `GetMethod`-style check: undefined/null yields `None`; a non-callable throws a
-/// `TypeError`; a callable is returned.
-fn from_check_method<'r>(
-    scope: &'r Scope<'_>,
-    v: HandleValue<'r>,
-) -> Result<Option<HandleValue<'r>>, ExnThrown> {
-    if v.is_null_or_undefined() {
-        return Ok(None);
-    }
-    if !from_is_callable(scope, v) {
-        return Err(js::error::throw_type_error(
-            scope,
-            c"iterator method is not callable",
-        ));
-    }
-    Ok(Some(v))
-}
-
-/// The async-from-sync `next`: call the sync iterator's `next`, then return a
-/// promise resolving to `{ value: await result.value, done: result.done }`.
-fn afs_next(
-    scope: &Scope<'_>,
-    _args: CallbackArgs<'_>,
-    payload: HandleValue<'_>,
-) -> Result<Value, ExnThrown> {
-    let state = FromIterableState::from_jsval(scope, payload, ()).unwrap();
-    let sync_iter = state.data().iterator.get(scope);
-    let sync_next = state.data().sync_next.get(scope);
-    let result = match js::Function::call(scope, sync_iter, sync_next, EmptyArgs) {
-        Ok(r) => r,
-        Err(_) => return Ok(rejected_pending_value(scope)),
-    };
-    let result_obj = match Object::from_value(scope, *result) {
-        Ok(o) => o,
-        Err(_) => {
-            js::error::throw_type_error(scope, c"iterator result is not an object");
-            return Ok(rejected_pending_value(scope));
-        }
-    };
-    let done = match result_obj.get_property(scope, c"done") {
-        Ok(v) => v.get().to_boolean(),
-        Err(_) => return Ok(rejected_pending_value(scope)),
-    };
-    let value = match result_obj.get_property(scope, c"value") {
-        Ok(v) => v,
-        Err(_) => return Ok(rejected_pending_value(scope)),
-    };
-    let value_wrapper = Promise::call_original_resolve(scope, value).map_err(|_| ExnThrown)?;
-    let done_payload = scope.root_value(value::from_bool(done));
-    let cb = Function::new_callback(scope, c"", 1, afs_value_fulfilled, done_payload)?;
-    let p = value_wrapper
-        .call_original_then(scope, Some(*cb), None)
-        .map_err(|_| ExnThrown)?;
-    Ok(p.as_value())
-}
-
-/// The async-from-sync value continuation: wrap the awaited value and the
-/// captured `done` flag into an iterator-result object.
-fn afs_value_fulfilled(
-    scope: &Scope<'_>,
-    args: CallbackArgs<'_>,
-    payload: HandleValue<'_>,
-) -> Result<Value, ExnThrown> {
-    let done = payload.get().to_boolean();
-    let result = support::create_iter_result(scope, args.get(0), done)?;
-    Ok(result.get())
 }
 
 /// `ReadableStreamFromIterable` step 4 pull algorithm (payload = state, arg 0 =
@@ -1126,20 +997,33 @@ fn from_pull_native(
 ) -> Result<Value, ExnThrown> {
     let state = FromIterableState::from_jsval(scope, payload, ()).unwrap();
     let controller = args.get(0);
-    let iterator = state.data().iterator.get(scope);
-    let next_method = state.data().next_method.get(scope);
+    let record: js::iteration::AsyncIteratorRecord<'_> = state.data().record.get(scope);
     // Let _nextResult_ be `IteratorNext`(_iteratorRecord_). If abrupt, return a
     // promise rejected with its value.
-    let next_result = match js::Function::call(scope, iterator, next_method, EmptyArgs) {
+    let next_result = match record.call_next(scope) {
         Ok(r) => r,
-        Err(_) => return Ok(rejected_pending_value(scope)),
+        Err(_) => {
+            return Ok(Promise::new_rejected_with_pending_error(scope)
+                .map_err(|_| ExnThrown)?
+                .as_value())
+        }
     };
     // Let _nextPromise_ be a promise resolved with _nextResult_.
     let next_promise = Promise::call_original_resolve(scope, next_result).map_err(|_| ExnThrown)?;
     // React to _nextPromise_ with the fulfillment steps (`from_pull_fulfilled`).
-    let cb = Function::new_callback(scope, c"", 1, from_pull_fulfilled, controller)?;
+    // The callback's payload — the stream's controller — is the same for every
+    // pull, so it is created once and reused for every subsequent iteration.
+    if state.data().pull_fulfilled_fn.is_none() {
+        let cb = Function::new_callback(scope, c"", 1, from_pull_fulfilled, controller)?;
+        state.data_mut().pull_fulfilled_fn = Some(Heap::from(cb));
+    }
+    let cb = state
+        .data()
+        .pull_fulfilled_fn
+        .get(scope)
+        .expect("created above");
     let p = next_promise
-        .call_original_then(scope, Some(*cb), None)
+        .then(scope, Some(*cb), None)
         .map_err(|_| ExnThrown)?;
     Ok(p.as_value())
 }
@@ -1157,84 +1041,39 @@ fn from_pull_fulfilled(
         .cast::<ReadableStreamDefaultController>()
         .map_err(|_| ExnThrown)?;
     // If _iterResult_ is not an Object, throw a TypeError.
-    let result_obj = match Object::from_value(scope, *iter_result) {
-        Ok(o) => o,
-        Err(_) => {
-            return Err(js::error::throw_type_error(
-                scope,
-                c"iterator result is not an object",
-            ))
-        }
-    };
-    let done = result_obj.get_property(scope, c"done")?.get().to_boolean();
+    let result_obj = js::iteration::iter_result_object(scope, iter_result)?;
+    // Let _done_ be ? `IteratorComplete`(_iterResult_).
+    let done = js::iteration::iter_result_done(scope, &result_obj)?;
     if done {
         readable_stream_default_controller_close(scope, &controller);
     } else {
-        let value = result_obj.get_property(scope, c"value")?;
+        // Let _value_ be ? `IteratorValue`(_iterResult_).
+        let value = js::iteration::iter_result_value(scope, &result_obj)?;
         readable_stream_default_controller_enqueue(scope, &controller, value)?;
     }
     Ok(value::undefined())
 }
 
 /// `ReadableStreamFromIterable` step 5 cancel algorithm (payload = state, arg 0 =
-/// the cancellation reason).
+/// the cancellation reason): the iterator's `return`-method path, delegated to
+/// `AsyncIteratorRecord::return_promise`.
 fn from_cancel_native(
     scope: &Scope<'_>,
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let state = FromIterableState::from_jsval(scope, payload, ()).unwrap();
-    let reason = args.get(0);
-    let iterator = state.data().iterator.get(scope);
-    let iterator_obj = Object::from_value(scope, *iterator).map_err(|_| ExnThrown)?;
-    // Let _returnMethod_ be GetMethod(_iterator_, "return"). If abrupt, reject.
-    let return_method = match iterator_obj.get_property(scope, c"return") {
-        Ok(v) => v,
-        Err(_) => return Ok(rejected_pending_value(scope)),
-    };
-    // If undefined, return a promise resolved with undefined.
-    if return_method.is_null_or_undefined() {
-        return Ok(resolved_undefined_promise(scope).as_value());
-    }
-    if !from_is_callable(scope, return_method) {
-        js::error::throw_type_error(scope, c"iterator return is not callable");
-        return Ok(rejected_pending_value(scope));
-    }
-    let return_result = match js::Function::call(scope, iterator, return_method, &[reason]) {
-        Ok(r) => r,
-        Err(_) => return Ok(rejected_pending_value(scope)),
-    };
-    let return_promise =
-        Promise::call_original_resolve(scope, return_result).map_err(|_| ExnThrown)?;
-    let undef = HandleValue::undefined();
-    let cb = Function::new_callback(scope, c"", 1, from_cancel_fulfilled, undef)?;
-    let p = return_promise
-        .call_original_then(scope, Some(*cb), None)
-        .map_err(|_| ExnThrown)?;
+    let record: js::iteration::AsyncIteratorRecord<'_> = state.data().record.get(scope);
+    let p = record.return_promise(scope, args.get(0))?;
     Ok(p.as_value())
-}
-
-/// The cancel algorithm's fulfillment steps: the return result must be an object.
-fn from_cancel_fulfilled(
-    scope: &Scope<'_>,
-    args: CallbackArgs<'_>,
-    _payload: HandleValue<'_>,
-) -> Result<Value, ExnThrown> {
-    if !args.get(0).is_object() {
-        return Err(js::error::throw_type_error(
-            scope,
-            c"iterator result is not an object",
-        ));
-    }
-    Ok(value::undefined())
 }
 
 /// <https://streams.spec.whatwg.org/#readable-stream-pipe-to>
 /// ReadableStreamPipeTo(source, dest, preventClose, preventAbort, preventCancel[, signal]) performs the following steps:
 ///
 /// The pipe operation runs across many native promise reactions. Its shared
-/// mutable state (the reader, writer, flags, the in-flight `currentWrite`
-/// promise, the result `promise`, and the pending shutdown action) lives in a
+/// mutable state (the reader, writer, flags, the parked chunk and pending-write
+/// count, the result `promise`, and the pending shutdown action) lives in a
 /// `PipeState` so it is GC-traced and reachable through the callbacks' payload;
 /// see the `pipe_*` helpers below.
 pub(crate) fn readable_stream_pipe_to<'r>(
@@ -1254,7 +1093,7 @@ pub(crate) fn readable_stream_pipe_to<'r>(
     // Steps 1-5 are type system enforced.
 
     // Step 6: Assert: ! `IsReadableStreamLocked`(_source_) is false.
-    debug_assert!(!is_readable_stream_locked(source));
+    debug_assert!(!source.is_locked());
 
     // Step 7: Assert: ! `IsWritableStreamLocked`(_dest_) is false.
     debug_assert!(!is_writable_stream_locked(dest));
@@ -1271,6 +1110,18 @@ pub(crate) fn readable_stream_pipe_to<'r>(
 
     // Step 11: Set _source_.`[[disturbed]]` to true.
     source.data_mut().disturbed = true;
+
+    // Not a spec step: if `source` is backed by a native byte source and `dest` is the writable
+    // end of an identity TransformStream, propagate the native source to the transform's readable
+    // end. A later native sink (such as `fetch` using that readable as a request body) can then
+    // hand the native source straight to the sink instead of copying it chunk by chunk through
+    // the transform. No content-visible effect.
+    if let Some(host_source) = source.native_source(scope) {
+        let ts_readable = dest.data().identity_transform_readable.get(scope);
+        if let Some(ts_readable) = ts_readable {
+            ts_readable.set_native_source(&host_source);
+        }
+    }
 
     // Step 12: Let _shuttingDown_ be false.
     // (implicit)
@@ -1510,16 +1361,15 @@ fn pipe_step(scope: &Scope<'_>, state: PipeState<'_>) {
         return;
     }
 
-    // Backpressure must be enforced: wait until the writer is ready before reading.
+    // Backpressure must be enforced: wait until the writer is ready before
+    // reading. The reactions are the per-pipe callbacks created in
+    // `PipeState::new`; attaching them directly allocates nothing per loop turn.
     let writer = pipe_writer(scope, state);
     let ready = writer.data().ready_promise.get(scope);
-    let payload = scope.root_value(state.as_value());
-    let _ = support::react(
-        scope,
-        &ready,
-        Some((pipe_ready_fulfilled, payload)),
-        Some((pipe_ready_rejected, payload)),
-    );
+    let fulfilled = state.data().ready_fulfilled_fn.get(scope);
+    let rejected = state.data().ready_rejected_fn.get(scope);
+    let _ =
+        ready.add_reactions_ignoring_unhandled_rejection(scope, Some(*fulfilled), Some(*rejected));
 }
 
 /// The writer is ready: issue a read whose chunk steps write the chunk and loop.
@@ -1538,7 +1388,7 @@ fn pipe_ready_fulfilled(
     let reader = pipe_reader(scope, state);
     readable_stream_default_reader_read(
         scope,
-        &reader,
+        reader,
         ReadRequest::Pipe {
             state: Heap::from(state),
         },
@@ -1557,32 +1407,88 @@ fn pipe_ready_rejected(
     Ok(value::undefined())
 }
 
-/// A no-op reaction used to swallow a write's rejection (the in-flight
-/// `currentWrite` promise must settle, not reject).
-fn pipe_noop(
-    _scope: &Scope<'_>,
-    _args: CallbackArgs<'_>,
-    _payload: HandleValue<'_>,
-) -> Result<Value, ExnThrown> {
-    Ok(value::undefined())
-}
-
-/// The pipe read request's chunk steps: write the chunk to the destination
-/// (tracking the write as `currentWrite`, swallowing its rejection) and continue
-/// the loop.
+/// The pipe read request's chunk steps: park the chunk, count its pending
+/// write, and schedule the deferred write that will write it to the destination
+/// and continue the loop.
+///
+/// The write and the next read are deliberately deferred by one microtask rather
+/// than run synchronously here. The spec's pipe step 15 is informal about timing
+/// (whatwg/streams#1243), but every browser defers: Gecko's `OnReadFulfilled`
+/// does `Promise.resolve().then(() => { write(chunk); readNext(); })`. Deferring
+/// matters because a chunk can be delivered to these chunk steps synchronously
+/// (e.g. when `enqueue()` fulfils a pending read in the same turn); running the
+/// sink's `write()` synchronously from `enqueue()` is observable and forbidden
+/// (`streams/piping/general-addition.any.js`: "enqueue() must not synchronously
+/// call write algorithm").
 pub(crate) fn pipe_read_request_chunk_steps(
     scope: &Scope<'_>,
     state: PipeState<'_>,
     chunk: HandleValue<'_>,
 ) -> Result<(), ExnThrown> {
+    state.data().pending_chunk.set(*chunk);
+    state.data_mut().pending_writes += 1;
+    let deferred = state.data().deferred_write_fn.get(scope);
+    js::jobs::queue_microtask(scope, &deferred)
+}
+
+/// Runs one microtask after a chunk reaches the pipe read request: writes the
+/// parked chunk to the destination and continues the loop. Deferring to here is
+/// what keeps `enqueue()` from synchronously invoking the sink's write algorithm
+/// (see `pipe_read_request_chunk_steps`).
+fn pipe_deferred_write(
+    scope: &Scope<'_>,
+    _args: CallbackArgs<'_>,
+    state: HandleValue<'_>,
+) -> Result<Value, ExnThrown> {
+    let state = PipeState::from_jsval(scope, state, ()).unwrap();
+    let chunk = state.data().pending_chunk.get(scope);
+    state.data().pending_chunk.set(value::undefined());
     let writer = pipe_writer(scope, state);
+
+    // A no-wait shutdown (the destination already errored or close-queued) can
+    // finalize, releasing the writer, while this microtask is queued, but writing
+    // through a released writer violates `WritableStreamDefaultWriterWrite`'s
+    // "stream is not undefined" assert, so we drop the chunk instead.
+    // A clean close is unaffected: its finalize waits for `pending_writes` to drain,
+    // which happens only after this write runs, so the writer is still attached here.
+    if writer_stream(scope, &writer).is_none() {
+        // Nothing consults the count after finalize, but keep it exact.
+        debug_assert!(state.data_mut().pending_writes > 0);
+        state.data_mut().pending_writes -= 1;
+        return Ok(value::undefined());
+    }
     let write_promise = writable_stream_default_writer_write(scope, &writer, chunk);
-    let undef = HandleValue::undefined();
-    let noop = Function::new_callback(scope, c"", 1, pipe_noop, undef)?;
-    let current = write_promise.call_original_then(scope, None, Some(*noop))?;
-    state.data_mut().current_write.set(current);
+
+    // Track settlement on the write's own promise: both settle paths run
+    // `pipe_write_settled`, so no derived promise is needed and the rejection
+    // case is consumed (backward error propagation — the writer's closed
+    // promise — drives shutdown for a failed write).
+    let settled = state.data().write_settled_fn.get(scope);
+    write_promise.add_reactions_ignoring_unhandled_rejection(
+        scope,
+        Some(*settled),
+        Some(*settled),
+    )?;
     pipe_step(scope, state);
-    Ok(())
+    Ok(value::undefined())
+}
+
+/// A write settled (fulfilled or rejected): one fewer chunk is outstanding. If
+/// a shutdown is waiting for the writes to drain and this was the last one,
+/// proceed with the recorded action.
+fn pipe_write_settled(
+    scope: &Scope<'_>,
+    _args: CallbackArgs<'_>,
+    state: HandleValue<'_>,
+) -> Result<Value, ExnThrown> {
+    let state = PipeState::from_jsval(scope, state, ()).unwrap();
+    debug_assert!(state.data_mut().pending_writes > 0);
+    state.data_mut().pending_writes -= 1;
+    if state.data().pending_writes == 0 && state.data().shutdown_waiting {
+        state.data_mut().shutdown_waiting = false;
+        pipe_shutdown_do_proceed(scope, state);
+    }
+    Ok(value::undefined())
 }
 
 // --- Error/close propagation actions ---------------------------------------
@@ -1669,7 +1575,6 @@ fn pipe_begin_shutdown_with_action(
         return;
     }
     state.data_mut().shutting_down = true;
-    state.data_mut().has_action = true;
     state.data_mut().action_kind = kind;
     state.data_mut().action_error.set(*action_error);
     match original_error {
@@ -1679,7 +1584,7 @@ fn pipe_begin_shutdown_with_action(
         }
         None => state.data_mut().has_original = false,
     }
-    pipe_wait_then_proceed(scope, state);
+    pipe_shutdown_wait_then_proceed(scope, state);
 }
 
 /// Begin a shutdown that, after pending writes finish, finalizes directly (with
@@ -1689,7 +1594,7 @@ fn pipe_shutdown(scope: &Scope<'_>, state: PipeState<'_>, error: Option<HandleVa
         return;
     }
     state.data_mut().shutting_down = true;
-    state.data_mut().has_action = false;
+    // No action: `action_kind` stays `PipeAction::None` (its default).
     match error {
         Some(e) => {
             state.data_mut().has_original = true;
@@ -1697,42 +1602,59 @@ fn pipe_shutdown(scope: &Scope<'_>, state: PipeState<'_>, error: Option<HandleVa
         }
         None => state.data_mut().has_original = false,
     }
-    pipe_wait_then_proceed(scope, state);
+    pipe_shutdown_wait_then_proceed(scope, state);
 }
 
 /// If the destination can still accept writes, wait for the in-flight writes to
 /// finish before proceeding; otherwise proceed immediately.
-fn pipe_wait_then_proceed(scope: &Scope<'_>, state: PipeState<'_>) {
+///
+/// "Wait until every chunk that has been read has been written (i.e. the
+/// corresponding promises have settled)" is implemented on the `pending_writes`
+/// count rather than the spec's promise chaining. The count is pipe-internal,
+/// so the difference is unobservable. With writes outstanding, the last write's
+/// settle reaction (`pipe_write_settled`) proceeds; with none, proceed after
+/// one microtask, matching the reference algorithm's
+/// `uponFulfillment(waitForWritesToFinish(), …)` deferral.
+fn pipe_shutdown_wait_then_proceed(scope: &Scope<'_>, state: PipeState<'_>) {
     let dest: WritableStream<'_> = state.data().dest.get(scope);
     if dest.data().state == WritableStreamState::Writable
         && !writable_stream_close_queued_or_in_flight(&dest)
     {
-        let wait = pipe_wait_for_writes_to_finish(scope, state);
-        let payload = scope.root_value(state.as_value());
-        let _ = support::react(
-            scope,
-            &wait,
-            Some((pipe_proceed_after_writes, payload)),
-            None,
-        );
+        if state.data().pending_writes > 0 {
+            state.data_mut().shutdown_waiting = true;
+        } else {
+            let Ok(cb) =
+                Function::new_callback(scope, c"", 0, pipe_shutdown_proceed_deferred, state)
+            else {
+                return;
+            };
+            let _ = js::jobs::queue_microtask(scope, &cb);
+        }
     } else {
-        pipe_do_proceed(scope, state);
+        pipe_shutdown_do_proceed(scope, state);
     }
 }
 
-fn pipe_proceed_after_writes(
+/// One microtask after a shutdown began with no writes outstanding: proceed,
+/// unless a chunk from a read that was already in flight arrived in the
+/// meantime, in which case hand off to its write's settle reaction.
+fn pipe_shutdown_proceed_deferred(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let state = PipeState::from_jsval(scope, payload, ()).unwrap();
-    pipe_do_proceed(scope, state);
+    if state.data().pending_writes > 0 {
+        state.data_mut().shutdown_waiting = true;
+    } else {
+        pipe_shutdown_do_proceed(scope, state);
+    }
     Ok(value::undefined())
 }
 
 /// Perform the recorded shutdown action (if any) and then finalize.
-fn pipe_do_proceed(scope: &Scope<'_>, state: PipeState<'_>) {
-    if !state.data().has_action {
+fn pipe_shutdown_do_proceed(scope: &Scope<'_>, state: PipeState<'_>) {
+    if matches!(state.data().action_kind, PipeAction::None) {
         let error = if state.data().has_original {
             Some(state.data().original_error.get(scope))
         } else {
@@ -1824,39 +1746,6 @@ fn pipe_action_rejected(
     Ok(value::undefined())
 }
 
-/// Get a promise that resolves once every queued write has settled. Each write
-/// is chained onto `currentWrite`; if `currentWrite` advanced while waiting,
-/// wait again.
-fn pipe_wait_for_writes_to_finish<'r>(scope: &'r Scope<'_>, state: PipeState<'_>) -> Promise<'r> {
-    let old: Promise<'_> = state.data().current_write.get(scope);
-    let state_v = scope.root_value(state.as_value());
-    let old_v = scope.root_value(old.as_value());
-    let payload = pair_payload(scope, state_v, old_v).expect("payload");
-    let cb = Function::new_callback(scope, c"", 0, pipe_wait_writes_check, payload).expect("cb");
-    old.call_original_then(scope, Some(*cb), None)
-        .expect("then")
-}
-
-fn pipe_wait_writes_check(
-    scope: &Scope<'_>,
-    _args: CallbackArgs<'_>,
-    payload: HandleValue<'_>,
-) -> Result<Value, ExnThrown> {
-    let (state_v, old_v) = pair_parts(scope, payload);
-    let state = PipeState::from_jsval(scope, state_v, ()).unwrap();
-    let old = Object::from_value(scope, *old_v)
-        .map_err(|_| ExnThrown)?
-        .cast::<Promise>()
-        .unwrap();
-    // If `currentWrite` advanced while we waited, a new write is in flight — wait
-    // for that one too. Otherwise every queued write has settled.
-    if state.data().current_write.eq_stack(&old) {
-        Ok(value::undefined())
-    } else {
-        Ok(pipe_wait_for_writes_to_finish(scope, state).as_value())
-    }
-}
-
 /// Release the reader and writer, detach the abort listener, and settle the
 /// pipe's result promise.
 fn pipe_finalize(scope: &Scope<'_>, state: PipeState<'_>, error: Option<HandleValue<'_>>) {
@@ -1864,34 +1753,30 @@ fn pipe_finalize(scope: &Scope<'_>, state: PipeState<'_>, error: Option<HandleVa
     writable_stream_default_writer_release(scope, &writer);
     let reader = pipe_reader(scope, state);
     let _ = readable_stream_default_reader_release(scope, &reader);
-    if let Some(signal) = state.data().signal.as_ref() {
-        let signal = signal.get(scope);
-        let abort_fn: Function<'_> = state
-            .data()
-            .abort_algorithm
-            .as_ref()
-            .map(|f| f.get(scope))
-            .unwrap();
-        signal.remove_event_listener(
-            scope,
-            "abort".into(),
-            abort_fn.to_jsval(scope).unwrap(),
-            None,
-        );
+    if let Some(signal) = state.data().signal.get(scope) {
+        // Detach the abort algorithm registered in `PipeState::new`, so a later
+        // abort of a still-live signal does not run it after the pipe has
+        // finished. (Harmless if it did since shutdown is idempotent, but this avoids
+        // keeping the finished pipe reachable from the signal.)
+        if let Some(abort_fn) = state.data().abort_algorithm.get(scope) {
+            web_globals::signals::algorithms::remove_abort_algorithm(&signal, &abort_fn);
+        }
     }
     let promise = pipe_promise(scope, state);
     match error {
         Some(e) => {
             let _ = promise.reject(scope, e);
         }
-        None => resolve_promise_slot_undefined(scope, &promise),
+        None => {
+            let _ = promise.resolve(scope, HandleValue::undefined());
+        }
     }
 }
 
 /// The abort algorithm registered on the pipe's signal: shut down with an action
 /// that waits for all of the (conditional) abort-dest and cancel-source actions.
 fn pipe_run_abort_algorithm(scope: &Scope<'_>, state: PipeState<'_>) {
-    let signal: AbortSignal<'_> = state.data().signal.as_ref().map(|s| s.get(scope)).unwrap();
+    let signal: AbortSignal<'_> = state.data().signal.get(scope).unwrap();
     let error = signal.reason(scope);
     pipe_begin_shutdown_with_action(scope, state, PipeAction::AbortAlgorithm, error, Some(error));
 }
@@ -1906,30 +1791,12 @@ fn pipe_abort_algorithm(
     Ok(value::undefined())
 }
 
-/// <https://streams.spec.whatwg.org/#readable-stream-tee>
-/// ReadableStreamTee(stream, cloneForBranch2) will tee a given readable stream. The second argument, cloneForBranch2, governs whether or not the data from the original stream will be cloned (using HTML’s serializable objects framework) before appearing in the second of the returned branches. This is useful for scenarios where both branches are to be consumed in such a way that they might otherwise interfere with each other, such as by transferring their chunks. However, it does introduce a noticeable asymmetry between the two branches, and limits the possible chunks to serializable ones. [HTML] If stream is a readable byte stream, then cloneForBranch2 is ignored and chunks are cloned unconditionally. In this standard ReadableStreamTee is always called with cloneForBranch2 set to false; other specifications pass true via the tee wrapper algorithm. It performs the following steps:
-pub(crate) fn readable_stream_tee<'r>(
-    scope: &'r Scope<'_>,
-    stream: &ReadableStream<'_>,
-    clone_for_branch2: bool,
-) -> Result<Vec<ReadableStream<'r>>, ExnThrown> {
-    // Step 1: Assert: _stream_ `implements` ``ReadableStream``.
-    // Step 2: Assert: _cloneForBranch2_ is a boolean.
-    // Step 3: If _stream_.`[[controller]]` `implements` ``ReadableByteStreamController``, return ?
-    //         `ReadableByteStreamTee`(_stream_).
-    if stream_byte_controller(scope, stream).is_some() {
-        return readable_byte_stream_tee(scope, stream);
-    }
-    // Step 4: Return ? `ReadableStreamDefaultTee`(_stream_, _cloneForBranch2_).
-    readable_stream_default_tee(scope, stream, clone_for_branch2)
-}
-
 #[jsclass(hidden)]
 pub(crate) struct TeeState {
     stream: Heap<ReadableStreamImpl>,
     reader: Heap<DefaultReaderImpl>,
-    clone_for_branch2: bool,
     cancel_promise: Heap<js::promise::Promise>,
+    clone_for_branch2: bool,
     reading: bool,
     read_again: bool,
     canceled1: bool,
@@ -1938,6 +1805,12 @@ pub(crate) struct TeeState {
     reason2: Heap<Value>,
     branch1: Heap<ReadableStreamImpl>,
     branch2: Heap<ReadableStreamImpl>,
+    /// The chunk delivered by the current read, parked until the chunk-steps
+    /// microtask consumes it.
+    pending_chunk: Heap<Value>,
+    /// The chunk-steps microtask callback, allocated once in the constructor
+    /// and queued directly on the job queue per chunk.
+    chunk_microtask_fn: Heap<js::function::Function>,
 }
 
 /// Steps 4-18 of `ReadableStreamDefaultTee` are algorithm.
@@ -1970,6 +1843,10 @@ impl TeeState<'_> {
             .set(Promise::new_pending(scope)?);
         self.data_mut().stream.set(stream);
         self.data_mut().reader.set(reader);
+
+        // The chunk-steps microtask callback, reused for every chunk.
+        let microtask = Function::new_callback(scope, c"", 0, tee_chunk_microtask, state_value)?;
+        self.data_mut().chunk_microtask_fn.set(microtask);
 
         // Step 13: Let _pullAlgorithm_ be the following steps: (steps implemented in `tee_pull_native` and its callees)
         let pull = Function::new_callback(scope, c"", 0, tee_pull_native, state_value)?;
@@ -2022,14 +1899,33 @@ pub(crate) struct PipeState {
     prevent_close: bool,
     prevent_abort: bool,
     prevent_cancel: bool,
-    signal: Option<Heap<AbortSignalImpl>>,
+    has_original: bool,
     shutting_down: bool,
-    has_action: bool,
+    /// A shutdown has begun and is waiting for `pending_writes` to reach zero;
+    /// the settle reaction that drains the count proceeds with the shutdown.
+    shutdown_waiting: bool,
+    signal: Option<Heap<AbortSignalImpl>>,
     action_kind: PipeAction,
     action_error: Heap<Value>,
-    has_original: bool,
     original_error: Heap<Value>,
-    current_write: Heap<js::promise::Promise>,
+    /// The chunk read by the current loop turn, parked until the deferred write
+    /// consumes it. Single-occupancy: the next read is only issued after
+    /// `pipe_deferred_write` has taken the value out (see
+    /// `pipe_read_request_chunk_steps`).
+    pending_chunk: Heap<Value>,
+    /// The number of chunks that have been read but whose writes have not yet
+    /// settled. Counted eagerly at the read request's chunk steps; decremented
+    /// by each write's settle reaction (`pipe_write_settled`). Shutdown's "wait
+    /// until every chunk that has been read has been written" is implemented as
+    /// waiting for this count to drain. The count is pipe-internal, so the
+    /// difference from the spec's promise chaining is unobservable.
+    pending_writes: u32,
+    /// The loop's reaction callbacks, allocated once in the constructor, so the
+    /// steady-state loop allocates no callback objects per chunk.
+    deferred_write_fn: Heap<js::function::Function>,
+    write_settled_fn: Heap<js::function::Function>,
+    ready_fulfilled_fn: Heap<js::function::Function>,
+    ready_rejected_fn: Heap<js::function::Function>,
     promise: Heap<js::promise::Promise>,
     abort_algorithm: Option<Heap<js::function::Function>>,
 }
@@ -2057,9 +1953,23 @@ impl PipeState<'_> {
         self.data_mut().prevent_abort = prevent_abort;
         self.data_mut().prevent_cancel = prevent_cancel;
         self.data_mut().signal = signal.map(Heap::from);
-        self.data_mut()
-            .current_write
-            .set(resolved_undefined_promise(scope));
+
+        let payload = scope.root_value(self.as_value());
+        let deferred = Function::new_callback(scope, c"", 0, pipe_deferred_write, payload)?;
+        self.data_mut().deferred_write_fn.set(deferred);
+        let settled = Function::new_callback(scope, c"", 1, pipe_write_settled, payload)?;
+        self.data_mut().write_settled_fn.set(settled);
+        let ready_ok = Function::new_callback(scope, c"", 1, pipe_ready_fulfilled, payload)?;
+        self.data_mut().ready_fulfilled_fn.set(ready_ok);
+        // The ready-rejection swallower uses no per-pipe state; share one per global.
+        let ready_err = js::class::get_or_init_shared_function(
+            scope,
+            pipe_ready_rejected as *const () as usize,
+            |scope| {
+                Function::new_callback(scope, c"", 1, pipe_ready_rejected, HandleValue::undefined())
+            },
+        )?;
+        self.data_mut().ready_rejected_fn.set(ready_err);
         self.data_mut().promise.set(Promise::new_pending(scope)?);
 
         // Step 14: If _signal_ is not undefined, Let _abortAlgorithm_ be the following steps: Let
@@ -2074,7 +1984,6 @@ impl PipeState<'_> {
         //          If _signal_ is `aborted`, perform _abortAlgorithm_ and return _promise_. `Add`
         //          _abortAlgorithm_ to _signal_.
         if let Some(signal) = signal {
-            let payload = scope.root_value(self.as_value());
             let abort_fn = Function::new_callback(scope, c"", 0, pipe_abort_algorithm, payload)?;
             self.data_mut().abort_algorithm = Some(Heap::from(abort_fn));
             if signal.aborted() {
@@ -2082,12 +1991,7 @@ impl PipeState<'_> {
                 return Ok(());
             }
             // `Add` _abortAlgorithm_ to _signal_.
-            signal.add_event_listener(
-                scope,
-                "abort".into(),
-                abort_fn.to_jsval(scope).unwrap(),
-                None,
-            )?;
+            web_globals::signals::algorithms::add_abort_algorithm(&signal, &abort_fn);
         }
         Ok(())
     }
@@ -2099,7 +2003,7 @@ pub(crate) fn readable_stream_default_tee<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
     clone_for_branch2: bool,
-) -> Result<Vec<ReadableStream<'r>>, ExnThrown> {
+) -> Result<(ReadableStream<'r>, ReadableStream<'r>), ExnThrown> {
     // Step 1: Assert: _stream_ `implements` ``ReadableStream``.
     // Step 2: Assert: _cloneForBranch2_ is a boolean.
     // Step 3: Let _reader_ be ? `AcquireDefaultReader`(_stream_).
@@ -2122,7 +2026,7 @@ pub(crate) fn readable_stream_default_tee<'r>(
     // Step 20: Return « _branch1_, _branch2_ ».
     let branch1 = state.data().branch1.get(scope);
     let branch2 = state.data().branch2.get(scope);
-    Ok(vec![branch1, branch2])
+    Ok((branch1, branch2))
 }
 
 /// <https://streams.spec.whatwg.org/#abstract-opdef-readablebytestreamtee>
@@ -2134,10 +2038,10 @@ pub(crate) fn readable_stream_default_tee<'r>(
 pub(crate) fn readable_byte_stream_tee<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
-) -> Result<Vec<ReadableStream<'r>>, ExnThrown> {
+) -> Result<(ReadableStream<'r>, ReadableStream<'r>), ExnThrown> {
     // Step 1: Assert: _stream_ `implements` ``ReadableStream``.
     // Step 2: Assert: _stream_.`[[controller]]` `implements` ``ReadableByteStreamController``.
-    debug_assert!(stream_byte_controller(scope, stream).is_some());
+    debug_assert!(stream.byte_controller(scope).is_some());
     // Step 3: Let _reader_ be ? `AcquireDefaultReader`(_stream_).
     // Step 4: Let _reading_ be false.
     // Step 5: Let _readAgainForBranch1_ be false.
@@ -2274,11 +2178,11 @@ pub(crate) fn readable_byte_stream_tee<'r>(
     // Step 25: Return « _branch1_, _branch2_ ».
     let branch1 = state.data().branch1.get(scope);
     let branch2 = state.data().branch2.get(scope);
-    Ok(vec![branch1, branch2])
+    Ok((branch1, branch2))
 }
 
 /// The shared state backing `ReadableByteStreamTee`. Not exposed to JS
-/// (`hidden`); minted internally and reached through each callback's payload.
+/// (`hidden`); created internally and reached through each callback's payload.
 /// The `reader` holds whichever reader type (default or BYOB) is currently in
 /// use; it is swapped by `pullWithDefaultReader` / `pullWithBYOBReader`.
 #[jsclass(hidden)]
@@ -2295,6 +2199,14 @@ pub(crate) struct ByteTeeState {
     branch1: Heap<ReadableStreamImpl>,
     branch2: Heap<ReadableStreamImpl>,
     cancel_promise: Heap<js::promise::Promise>,
+    /// The chunk (and, for a BYOB read, its target branch) delivered by the
+    /// current read, parked until the chunk-steps microtask consumes it.
+    pending_chunk: Heap<Value>,
+    pending_for_branch2: bool,
+    /// The two chunk-steps microtask callbacks, allocated once in the constructor
+    /// and queued directly on the job queue per chunk, so delivery allocates nothing.
+    default_microtask_fn: Heap<js::function::Function>,
+    byob_microtask_fn: Heap<js::function::Function>,
 }
 
 #[jsmethods]
@@ -2313,11 +2225,16 @@ impl ByteTeeState<'_> {
             .cancel_promise
             .set(Promise::new_pending(scope)?);
 
-        let state_value = scope.root_value(self.as_value());
+        // The chunk-steps microtask callbacks, reused for every chunk.
+        let default_mt = Function::new_callback(scope, c"", 0, byte_tee_default_microtask, self)?;
+        self.data_mut().default_microtask_fn.set(default_mt);
+        let byob_mt = Function::new_callback(scope, c"", 0, byte_tee_byob_microtask, self)?;
+        self.data_mut().byob_microtask_fn.set(byob_mt);
+
         let undef = HandleValue::undefined();
         // Step 22: _branch1_ = `CreateReadableByteStream`(start, _pull1Algorithm_, _cancel1Algorithm_).
-        let pull1 = Function::new_callback(scope, c"", 1, byte_tee_pull1, state_value)?;
-        let cancel1 = Function::new_callback(scope, c"", 1, byte_tee_cancel1, state_value)?;
+        let pull1 = Function::new_callback(scope, c"", 1, byte_tee_pull1, self)?;
+        let cancel1 = Function::new_callback(scope, c"", 1, byte_tee_cancel1, self)?;
         let branch1 = create_readable_byte_stream(
             scope,
             undef,
@@ -2326,8 +2243,8 @@ impl ByteTeeState<'_> {
         )?;
         self.data_mut().branch1.set(branch1);
         // Step 23: _branch2_ = `CreateReadableByteStream`(start, _pull2Algorithm_, _cancel2Algorithm_).
-        let pull2 = Function::new_callback(scope, c"", 1, byte_tee_pull2, state_value)?;
-        let cancel2 = Function::new_callback(scope, c"", 1, byte_tee_cancel2, state_value)?;
+        let pull2 = Function::new_callback(scope, c"", 1, byte_tee_pull2, self)?;
+        let cancel2 = Function::new_callback(scope, c"", 1, byte_tee_cancel2, self)?;
         let branch2 = create_readable_byte_stream(
             scope,
             undef,
@@ -2374,8 +2291,9 @@ fn byte_tee_branch_controller<'r>(
     state: ByteTeeState<'_>,
     for_branch2: bool,
 ) -> ReadableByteStreamController<'r> {
-    let branch = byte_tee_branch(scope, state, for_branch2);
-    stream_byte_controller(scope, &branch).expect("branch has a byte controller")
+    byte_tee_branch(scope, state, for_branch2)
+        .byte_controller(scope)
+        .expect("branch has a byte controller")
 }
 
 fn byte_tee_cancel_promise<'r>(scope: &'r Scope<'_>, state: ByteTeeState<'_>) -> Promise<'r> {
@@ -2452,7 +2370,7 @@ fn byte_tee_forward_rejected(
     let branch2 = byte_tee_branch_controller(scope, state, true);
     readable_byte_stream_controller_error(scope, &branch2, r);
     if !state.data().canceled1 || !state.data().canceled2 {
-        resolve_promise_slot_undefined(scope, &byte_tee_cancel_promise(scope, state));
+        byte_tee_cancel_promise(scope, state).resolve(scope, HandleValue::undefined())?;
     }
     Ok(value::undefined())
 }
@@ -2476,7 +2394,7 @@ fn byte_tee_pull_with_default_reader(scope: &Scope<'_>, state: ByteTeeState<'_>)
         .expect("default reader");
     readable_stream_default_reader_read(
         scope,
-        &reader,
+        reader,
         ReadRequest::ByteTeeDefault {
             state: Heap::from(state),
         },
@@ -2552,7 +2470,9 @@ fn byte_tee_pull1(
 ) -> Result<Value, ExnThrown> {
     let state = ByteTeeState::from_jsval(scope, payload, ()).unwrap();
     byte_tee_pull(scope, state, false);
-    Ok(resolved_undefined_promise(scope).as_value())
+    // The returned resolved promise is internal (the branch controller only
+    // attaches its pull reactions to it): the per-global reused instance serves.
+    Ok(Promise::shared_resolved_undefined(scope)?.as_value())
 }
 
 fn byte_tee_pull2(
@@ -2562,7 +2482,8 @@ fn byte_tee_pull2(
 ) -> Result<Value, ExnThrown> {
     let state = ByteTeeState::from_jsval(scope, payload, ()).unwrap();
     byte_tee_pull(scope, state, true);
-    Ok(resolved_undefined_promise(scope).as_value())
+    // As in `byte_tee_pull1`: the per-global reused instance serves.
+    Ok(Promise::shared_resolved_undefined(scope)?.as_value())
 }
 
 /// Shared cancelN body (steps 19-20): record the reason and, once both branches
@@ -2592,7 +2513,7 @@ fn byte_tee_cancel(
         let stream = byte_tee_stream(scope, state);
         let cancel_result = readable_stream_cancel(scope, &stream, composite);
         byte_tee_cancel_promise(scope, state)
-            .resolve(scope, scope.root_value(cancel_result.as_value()))
+            .resolve(scope, cancel_result)
             .expect("resolve cancel");
     }
     byte_tee_cancel_promise(scope, state).as_value()
@@ -2623,10 +2544,9 @@ pub(crate) fn byte_tee_default_chunk_steps(
     state: ByteTeeState<'_>,
     chunk: HandleValue<'_>,
 ) -> Result<(), ExnThrown> {
-    let payload = pair_payload(scope, scope.root_value(state.as_value()), chunk)?;
-    let resolved = resolved_undefined_promise(scope);
-    let microtask = Function::new_callback(scope, c"", 0, byte_tee_default_microtask, payload)?;
-    resolved.add_reactions(scope, Some(*microtask), None)
+    state.data().pending_chunk.set(*chunk);
+    let microtask = state.data().default_microtask_fn.get(scope);
+    js::jobs::queue_microtask(scope, &microtask)
 }
 
 /// The chunk enqueued into a byte-tee branch is always a fresh, non-detached,
@@ -2637,19 +2557,40 @@ const BYTE_TEE_ENQUEUE_INFALLIBLE: &str =
     "byte tee branch enqueue is infallible: the chunk is a fresh, transferable view";
 
 /// `ReadableByteStreamTee` closes each branch and responds to its pending
-/// pull-into using the branch's own minted descriptor and an aligned
+/// pull-into using the branch's own created descriptor and an aligned
 /// (zero-length) view, so these never throw — matching the spec's
 /// `! ReadableByteStreamControllerClose` / `! …Respond` / `! …RespondWithNewView`.
 const BYTE_TEE_SETTLE_INFALLIBLE: &str =
-    "byte tee branch close/respond is infallible: minted descriptor, aligned view (spec `!`)";
+    "byte tee branch close/respond is infallible: created descriptor, aligned view (spec `!`)";
+
+/// Error both branches with `error`, cancel the underlying source, and resolve
+/// the tee's cancel promise — the byte-tee read-request steps' shared failure
+/// path. It backs the chunk steps' chunk-clone failure, and the close steps'
+/// fallible branch close/respond (see [`byte_tee_default_close_steps`]).
+fn byte_tee_error_both_branches_and_cancel(
+    scope: &Scope<'_>,
+    state: ByteTeeState<'_>,
+    error: HandleValue<'_>,
+) {
+    let b1 = byte_tee_branch_controller(scope, state, false);
+    readable_byte_stream_controller_error(scope, &b1, error);
+    let b2 = byte_tee_branch_controller(scope, state, true);
+    readable_byte_stream_controller_error(scope, &b2, error);
+    let stream = byte_tee_stream(scope, state);
+    let cancel_result = readable_stream_cancel(scope, &stream, error);
+    byte_tee_cancel_promise(scope, state)
+        .resolve(scope, cancel_result)
+        .expect("resolve cancel");
+}
 
 fn byte_tee_default_microtask(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    payload: HandleValue<'_>,
+    state: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let (state_v, chunk) = pair_parts(scope, payload);
-    let state = ByteTeeState::from_jsval(scope, state_v, ()).unwrap();
+    let state = ByteTeeState::from_jsval(scope, state, ()).unwrap();
+    let chunk = state.data().pending_chunk.get(scope);
+    state.data().pending_chunk.set(value::undefined());
     state.data_mut().read_again_for_branch1 = false;
     state.data_mut().read_again_for_branch2 = false;
     let canceled1 = state.data().canceled1;
@@ -2659,16 +2600,8 @@ fn byte_tee_default_microtask(
         match byte_tee_clone_as_uint8array(scope, chunk) {
             Ok(cloned) => chunk2 = cloned,
             Err(_) => {
-                let clone_err = exception_value_or_undefined(scope);
-                let b1 = byte_tee_branch_controller(scope, state, false);
-                readable_byte_stream_controller_error(scope, &b1, clone_err);
-                let b2 = byte_tee_branch_controller(scope, state, true);
-                readable_byte_stream_controller_error(scope, &b2, clone_err);
-                let stream = byte_tee_stream(scope, state);
-                let cancel_result = readable_stream_cancel(scope, &stream, clone_err);
-                byte_tee_cancel_promise(scope, state)
-                    .resolve(scope, scope.root_value(cancel_result.as_value()))
-                    .expect("resolve cancel");
+                let clone_err = take_pending_or_undefined(scope);
+                byte_tee_error_both_branches_and_cancel(scope, state, clone_err);
                 return Ok(value::undefined());
             }
         }
@@ -2703,30 +2636,47 @@ pub(crate) fn byte_tee_default_close_steps(
     state.data_mut().reading = false;
     let canceled1 = state.data().canceled1;
     let canceled2 = state.data().canceled2;
-    let b1 = byte_tee_branch_controller(scope, state, false);
-    // If _canceled1_ is false, perform ! `ReadableByteStreamControllerClose`(branch1).
-    if !canceled1 {
-        readable_byte_stream_controller_close(scope, &b1).expect(BYTE_TEE_SETTLE_INFALLIBLE);
+    // The branch close/respond steps are infallible in the spec, but a
+    // branch whose pending BYOB pull-into is partially filled below its element
+    // size (reachable when a consumer does a multi-byte-element BYOB read and the
+    // source delivers a non-aligned remainder) makes `…ControllerClose` throw its
+    // "insufficient bytes" `TypeError`. Run them as a fallible unit; on failure,
+    // error both branches and cancel the source rather than aborting.
+    let settle = (|| -> Result<(), ExnThrown> {
+        let b1 = byte_tee_branch_controller(scope, state, false);
+        // If _canceled1_ is false, perform ! `ReadableByteStreamControllerClose`(branch1).
+        if !canceled1 {
+            readable_byte_stream_controller_close(scope, &b1)?;
+        }
+        let b2 = byte_tee_branch_controller(scope, state, true);
+        // If _canceled2_ is false, perform ! `ReadableByteStreamControllerClose`(branch2).
+        if !canceled2 {
+            readable_byte_stream_controller_close(scope, &b2)?;
+        }
+        // If branch1.[[controller]].[[pendingPullIntos]] is not empty, perform !
+        // `ReadableByteStreamControllerRespond`(branch1, 0).
+        if !b1.data().pending_pull_intos.is_empty() {
+            readable_byte_stream_controller_respond(scope, &b1, 0)?;
+        }
+        // If branch2.[[controller]].[[pendingPullIntos]] is not empty, perform !
+        // `ReadableByteStreamControllerRespond`(branch2, 0).
+        if !b2.data().pending_pull_intos.is_empty() {
+            readable_byte_stream_controller_respond(scope, &b2, 0)?;
+        }
+        Ok(())
+    })();
+
+    if settle.is_err() {
+        let error = take_pending_or_undefined(scope);
+        byte_tee_error_both_branches_and_cancel(scope, state, error);
+        return Ok(());
     }
-    let b2 = byte_tee_branch_controller(scope, state, true);
-    // If _canceled2_ is false, perform ! `ReadableByteStreamControllerClose`(branch2).
-    if !canceled2 {
-        readable_byte_stream_controller_close(scope, &b2).expect(BYTE_TEE_SETTLE_INFALLIBLE);
-    }
-    // If branch1.[[controller]].[[pendingPullIntos]] is not empty, perform !
-    // `ReadableByteStreamControllerRespond`(branch1, 0).
-    if !b1.data().pending_pull_intos.is_empty() {
-        readable_byte_stream_controller_respond(scope, &b1, 0).expect(BYTE_TEE_SETTLE_INFALLIBLE);
-    }
-    // If branch2.[[controller]].[[pendingPullIntos]] is not empty, perform !
-    // `ReadableByteStreamControllerRespond`(branch2, 0).
-    if !b2.data().pending_pull_intos.is_empty() {
-        readable_byte_stream_controller_respond(scope, &b2, 0).expect(BYTE_TEE_SETTLE_INFALLIBLE);
-    }
+
     if !canceled1 || !canceled2 {
-        resolve_promise_slot_undefined(scope, &byte_tee_cancel_promise(scope, state));
+        byte_tee_cancel_promise(scope, state).resolve(scope, HandleValue::undefined())
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 /// The BYOB read-into request's `chunk steps`: queue a microtask to respond to
@@ -2737,15 +2687,10 @@ pub(crate) fn byte_tee_byob_chunk_steps(
     for_branch2: bool,
     chunk: HandleValue<'_>,
 ) -> Result<(), ExnThrown> {
-    let payload = byte_tee_pack3(
-        scope,
-        scope.root_value(state.as_value()),
-        chunk,
-        for_branch2,
-    )?;
-    let resolved = resolved_undefined_promise(scope);
-    let microtask = Function::new_callback(scope, c"", 0, byte_tee_byob_microtask, payload)?;
-    resolved.add_reactions(scope, Some(*microtask), None)
+    state.data().pending_chunk.set(*chunk);
+    state.data_mut().pending_for_branch2 = for_branch2;
+    let microtask = state.data().byob_microtask_fn.get(scope);
+    js::jobs::queue_microtask(scope, &microtask)
 }
 
 fn byte_tee_byob_microtask(
@@ -2753,8 +2698,10 @@ fn byte_tee_byob_microtask(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let (state_v, chunk, for_branch2) = byte_tee_unpack3(scope, payload);
-    let state = ByteTeeState::from_jsval(scope, state_v, ()).unwrap();
+    let state = ByteTeeState::from_jsval(scope, payload, ()).unwrap();
+    let chunk = state.data().pending_chunk.get(scope);
+    state.data().pending_chunk.set(value::undefined());
+    let for_branch2 = state.data().pending_for_branch2;
     state.data_mut().read_again_for_branch1 = false;
     state.data_mut().read_again_for_branch2 = false;
     // _byobBranch_ is the branch this read-into targets; _otherBranch_ is the
@@ -2793,16 +2740,8 @@ fn byte_tee_byob_microtask(
                 .expect(BYTE_TEE_ENQUEUE_INFALLIBLE);
             }
             Err(_) => {
-                let clone_err = exception_value_or_undefined(scope);
-                let bc = byte_tee_branch_controller(scope, state, for_branch2);
-                readable_byte_stream_controller_error(scope, &bc, clone_err);
-                let oc = byte_tee_branch_controller(scope, state, !for_branch2);
-                readable_byte_stream_controller_error(scope, &oc, clone_err);
-                let stream = byte_tee_stream(scope, state);
-                let cancel_result = readable_stream_cancel(scope, &stream, clone_err);
-                byte_tee_cancel_promise(scope, state)
-                    .resolve(scope, scope.root_value(cancel_result.as_value()))
-                    .expect("resolve cancel");
+                let clone_err = take_pending_or_undefined(scope);
+                byte_tee_error_both_branches_and_cancel(scope, state, clone_err);
                 return Ok(value::undefined());
             }
         }
@@ -2847,71 +2786,55 @@ pub(crate) fn byte_tee_byob_close_steps(
     } else {
         state.data().canceled2
     };
-    // If _byobCanceled_ is false, perform ! `ReadableByteStreamControllerClose`(byobBranch).
-    if !byob_canceled {
-        let bc = byte_tee_branch_controller(scope, state, for_branch2);
-        readable_byte_stream_controller_close(scope, &bc).expect(BYTE_TEE_SETTLE_INFALLIBLE);
-    }
-    // If _otherCanceled_ is false, perform ! `ReadableByteStreamControllerClose`(otherBranch).
-    if !other_canceled {
-        let oc = byte_tee_branch_controller(scope, state, !for_branch2);
-        readable_byte_stream_controller_close(scope, &oc).expect(BYTE_TEE_SETTLE_INFALLIBLE);
-    }
-    if !chunk.is_undefined() {
-        // If _byobCanceled_ is false, perform !
-        // `ReadableByteStreamControllerRespondWithNewView`(byobBranch, chunk).
+    // The branch close/respond steps are infallible in the spec, but a
+    // branch whose pending BYOB pull-into is partially filled below its element
+    // size (reachable when a consumer does a multi-byte-element BYOB read and the
+    // source delivers a non-aligned remainder) makes `…ControllerClose` throw its
+    // "insufficient bytes" `TypeError`. Run them as a fallible unit; on failure,
+    // error both branches and cancel the source rather than aborting.
+    let settle = (|| -> Result<(), ExnThrown> {
+        // If _byobCanceled_ is false, perform ! `ReadableByteStreamControllerClose`(byobBranch).
         if !byob_canceled {
             let bc = byte_tee_branch_controller(scope, state, for_branch2);
-            readable_byte_stream_controller_respond_with_new_view(
-                scope,
-                &bc,
-                byte_tee_view(scope, chunk),
-            )
-            .expect(BYTE_TEE_SETTLE_INFALLIBLE);
+            readable_byte_stream_controller_close(scope, &bc)?;
         }
-        // If _otherCanceled_ is false and otherBranch's [[pendingPullIntos]] is not empty,
-        // perform ! `ReadableByteStreamControllerRespond`(otherBranch, 0).
-        let oc = byte_tee_branch_controller(scope, state, !for_branch2);
-        if !other_canceled && !oc.data().pending_pull_intos.is_empty() {
-            readable_byte_stream_controller_respond(scope, &oc, 0)
-                .expect(BYTE_TEE_SETTLE_INFALLIBLE);
+        // If _otherCanceled_ is false, perform ! `ReadableByteStreamControllerClose`(otherBranch).
+        if !other_canceled {
+            let oc = byte_tee_branch_controller(scope, state, !for_branch2);
+            readable_byte_stream_controller_close(scope, &oc)?;
         }
+        if !chunk.is_undefined() {
+            // If _byobCanceled_ is false, perform !
+            // `ReadableByteStreamControllerRespondWithNewView`(byobBranch, chunk).
+            if !byob_canceled {
+                let bc = byte_tee_branch_controller(scope, state, for_branch2);
+                readable_byte_stream_controller_respond_with_new_view(
+                    scope,
+                    &bc,
+                    byte_tee_view(scope, chunk),
+                )?;
+            }
+            // If _otherCanceled_ is false and otherBranch's [[pendingPullIntos]] is not empty,
+            // perform ! `ReadableByteStreamControllerRespond`(otherBranch, 0).
+            let oc = byte_tee_branch_controller(scope, state, !for_branch2);
+            if !other_canceled && !oc.data().pending_pull_intos.is_empty() {
+                readable_byte_stream_controller_respond(scope, &oc, 0)?;
+            }
+        }
+        Ok(())
+    })();
+
+    if settle.is_err() {
+        let error = take_pending_or_undefined(scope);
+        byte_tee_error_both_branches_and_cancel(scope, state, error);
+        return Ok(());
     }
+
     if !byob_canceled || !other_canceled {
-        resolve_promise_slot_undefined(scope, &byte_tee_cancel_promise(scope, state));
+        byte_tee_cancel_promise(scope, state).resolve(scope, HandleValue::undefined())
+    } else {
+        Ok(())
     }
-    Ok(())
-}
-
-/// Pack `(state, chunk, bool)` into a JS array payload.
-fn byte_tee_pack3<'r>(
-    scope: &'r Scope<'_>,
-    state: HandleValue<'_>,
-    chunk: HandleValue<'_>,
-    flag: bool,
-) -> Result<HandleValue<'r>, ExnThrown> {
-    // `state` is a rooted handle: keeping it rooted across `new_plain` (which can
-    // compact) is what stops the array from storing a moved/stale pointer.
-    let arr = Object::new_plain(scope)?;
-    arr.set_element(scope, 0, state)?;
-    arr.set_element(scope, 1, chunk)?;
-    arr.set_element(scope, 2, scope.root_value(value::from_bool(flag)))?;
-    Ok(scope.root_value(arr.as_value()))
-}
-
-fn byte_tee_unpack3<'r>(
-    scope: &'r Scope<'_>,
-    payload: HandleValue<'_>,
-) -> (HandleValue<'r>, HandleValue<'r>, bool) {
-    let arr = Object::from_value(scope, *payload).expect("payload is an array");
-    let state = arr.get_element(scope, 0).expect("element 0");
-    let chunk = arr.get_element(scope, 1).expect("element 1");
-    let flag = arr
-        .get_element(scope, 2)
-        .expect("element 2")
-        .get()
-        .to_boolean();
-    (state, chunk, flag)
 }
 
 /// <https://streams.spec.whatwg.org/#readable-stream-add-read-into-request>
@@ -2971,8 +2894,8 @@ pub(crate) fn readable_stream_cancel<'r>(
     match state {
         // Step 2: If _stream_.`[[state]]` is "`closed`", return `a promise resolved with` undefined.
         ReadableStreamState::Closed => {
-            let undef = HandleValue::undefined();
-            return Promise::new_resolved_with_value(scope, undef).expect("resolved promise");
+            return Promise::new_resolved_with_value(scope, HandleValue::undefined())
+                .expect("resolved promise");
         }
         // Step 3: If _stream_.`[[state]]` is "`errored`", return `a promise rejected with`
         //         _stream_.`[[storedError]]`.
@@ -3008,20 +2931,21 @@ pub(crate) fn readable_stream_cancel<'r>(
     }
     // Step 7: Let _sourceCancelPromise_ be ! _stream_.`[[controller]]`.`[[CancelSteps]]`(_reason_).
     //         The controller is polymorphic: a byte controller runs its own [[CancelSteps]].
-    let source_cancel_promise = if let Some(byte_controller) = stream_byte_controller(scope, stream)
-    {
+    let source_cancel_promise = if let Some(byte_controller) = stream.byte_controller(scope) {
         byte_cancel_steps(scope, &byte_controller, reason)
     } else {
-        let controller = stream.controller(scope);
+        let controller = stream
+            .default_controller(scope)
+            .expect("stream has a default controller");
         cancel_steps(scope, &controller, reason)
     };
     // Step 8: Return the result of `reacting` to _sourceCancelPromise_ with a fulfillment step that
     //         returns undefined.
-    let undef = HandleValue::undefined();
     let on_fulfilled =
-        Function::new_callback(scope, c"", 1, return_undefined, undef).expect("create reaction");
+        Function::new_callback(scope, c"", 1, return_undefined, HandleValue::undefined())
+            .expect("create reaction");
     source_cancel_promise
-        .call_original_then(scope, Some(*on_fulfilled), None)
+        .then(scope, Some(*on_fulfilled), None)
         .expect("then")
 }
 
@@ -3058,9 +2982,8 @@ pub(crate) fn readable_stream_close(scope: &Scope<'_>, stream: &ReadableStream<'
         return;
     }
     // Step 5: `Resolve` _reader_.`[[closedPromise]]` with undefined.
-    let undef = HandleValue::undefined();
     stream_reader_closed_promise(scope, stream)
-        .resolve(scope, undef)
+        .resolve(scope, HandleValue::undefined())
         .expect("resolve closed promise");
     // Step 6: If _reader_ `implements` ``DefaultReader``, Let _readRequests_ be
     //         _reader_.`[[readRequests]]`. Set _reader_.`[[readRequests]]` to an empty `list`. `For
@@ -3293,8 +3216,7 @@ pub(crate) fn readable_stream_reader_generic_initialize(
         // Step 4: Otherwise, if _stream_.`[[state]]` is "`closed`", Set
         //         _reader_.`[[closedPromise]]` to `a promise resolved with` undefined.
         ReadableStreamState::Closed => {
-            let undef = HandleValue::undefined();
-            Promise::new_resolved_with_value(scope, undef)?
+            Promise::new_resolved_with_value(scope, HandleValue::undefined())?
         }
         // Step 5: Otherwise, Assert: _stream_.`[[state]]` is "`errored`". Set
         //         _reader_.`[[closedPromise]]` to `a promise rejected with` _stream_.`[[storedError]]`.
@@ -3343,7 +3265,7 @@ pub(crate) fn readable_stream_reader_generic_release(
         .set_settled_is_handled(scope)?;
     // Step 7: Perform ! _stream_.`[[controller]]`.`[[ReleaseSteps]]`().
     //         The controller is polymorphic: a byte controller runs its own [[ReleaseSteps]].
-    if let Some(byte_controller) = stream_byte_controller(scope, &stream) {
+    if let Some(byte_controller) = stream.byte_controller(scope) {
         byte_release_steps(&byte_controller);
     } else {
         release_steps();
@@ -3415,9 +3337,8 @@ pub(crate) fn readable_stream_byob_reader_read(
     let stream = reader
         .data()
         .stream
-        .as_ref()
-        .expect("reader has a stream")
-        .get(scope);
+        .get(scope)
+        .expect("reader has a stream");
     stream.data_mut().disturbed = true;
     if stream.data().state == ReadableStreamState::Errored {
         let stored_error = stream.data().stored_error.get(scope);
@@ -3428,8 +3349,9 @@ pub(crate) fn readable_stream_byob_reader_read(
             .error_steps(scope, stored_error)
             .expect("read-into request error steps");
     } else {
-        let controller =
-            stream_byte_controller(scope, &stream).expect("byte stream has a byte controller");
+        let controller = stream
+            .byte_controller(scope)
+            .expect("byte stream has a byte controller");
         readable_byte_stream_controller_pull_into(scope, &controller, view, min, &mut request);
     }
 }
@@ -3483,7 +3405,7 @@ pub(crate) fn readable_stream_default_reader_error_read_requests(
 #[js::allow_unrooted]
 pub(crate) fn readable_stream_default_reader_read(
     scope: &Scope<'_>,
-    reader: &DefaultReader<'_>,
+    reader: DefaultReader<'_>,
     read_request: ReadRequest,
 ) {
     // The read request carries an untraced `Heap` (the `read()` promise, or the
@@ -3498,9 +3420,8 @@ pub(crate) fn readable_stream_default_reader_read(
     let stream: ReadableStream<'_> = reader
         .data()
         .stream
-        .as_ref()
-        .expect("reader has a stream")
-        .get(scope);
+        .get(scope)
+        .expect("reader has a stream");
     // Step 3: Set _stream_.`[[disturbed]]` to true.
     stream.data_mut().disturbed = true;
     let state = stream.data().state;
@@ -3529,10 +3450,12 @@ pub(crate) fn readable_stream_default_reader_read(
         //         _stream_.`[[controller]]`.`[[PullSteps]]`(_readRequest_).
         //         The controller is polymorphic: a byte controller runs its own [[PullSteps]].
         ReadableStreamState::Readable => {
-            if let Some(byte_controller) = stream_byte_controller(scope, &stream) {
+            if let Some(byte_controller) = stream.byte_controller(scope) {
                 byte_pull_steps(scope, &byte_controller, &mut read_request);
             } else {
-                let controller = stream.controller(scope);
+                let controller = stream
+                    .default_controller(scope)
+                    .expect("stream has a controller");
                 pull_steps(scope, &controller, &mut read_request);
             }
         }
@@ -3562,7 +3485,7 @@ pub(crate) fn set_up_readable_stream_byob_reader(
     stream: &ReadableStream<'_>,
 ) -> Result<(), ExnThrown> {
     // Step 1: If ! `IsReadableStreamLocked`(_stream_) is true, throw a ``TypeError`` exception.
-    if is_readable_stream_locked(stream) {
+    if stream.is_locked() {
         return Err(js::error::throw_type_error(
             scope,
             c"This stream has already been locked for exclusive reading by another reader",
@@ -3570,7 +3493,7 @@ pub(crate) fn set_up_readable_stream_byob_reader(
     }
     // Step 2: If _stream_.`[[controller]]` does not `implement` ``ReadableByteStreamController``,
     //         throw a ``TypeError`` exception.
-    if stream_byte_controller(scope, stream).is_none() {
+    if stream.byte_controller(scope).is_none() {
         return Err(js::error::throw_type_error(
             scope,
             c"Cannot use a BYOB reader with a non-byte stream",
@@ -3591,7 +3514,7 @@ pub(crate) fn set_up_readable_stream_default_reader(
     stream: &ReadableStream<'_>,
 ) -> Result<(), ExnThrown> {
     // Step 1: If ! `IsReadableStreamLocked`(_stream_) is true, throw a ``TypeError`` exception.
-    if is_readable_stream_locked(stream) {
+    if stream.is_locked() {
         return Err(js::error::throw_type_error(
             scope,
             c"This stream has already been locked for exclusive reading by another reader",
@@ -3643,14 +3566,28 @@ pub(crate) fn readable_stream_default_controller_call_pull_if_needed(
     // Step 8: `Upon rejection` of _pullPromise_ with reason _e_, Perform !
     //         `DefaultControllerError`(_controller_, _e_).
     // (Steps 7 and 8 are implemented by `pull_promise_fulfilled` / `pull_promise_rejected`.)
-    let payload = scope.root_value(controller.as_value());
-    support::react(
-        scope,
-        &pull_promise,
-        Some((pull_promise_fulfilled, payload)),
-        Some((pull_promise_rejected, payload)),
-    )
-    .expect("attach pull reactions");
+    if controller.data().pull_fulfilled_fn.is_none() {
+        let payload = scope.root_value(controller.as_value());
+        let fulfilled = Function::new_callback(scope, c"", 1, pull_promise_fulfilled, payload)
+            .expect("create pull reaction");
+        controller.data_mut().pull_fulfilled_fn = Some(Heap::from(fulfilled));
+        let rejected = Function::new_callback(scope, c"", 1, pull_promise_rejected, payload)
+            .expect("create pull reaction");
+        controller.data_mut().pull_rejected_fn = Some(Heap::from(rejected));
+    }
+    let fulfilled = controller
+        .data()
+        .pull_fulfilled_fn
+        .get(scope)
+        .expect("created above");
+    let rejected = controller
+        .data()
+        .pull_rejected_fn
+        .get(scope)
+        .expect("created above");
+    pull_promise
+        .add_reactions_ignoring_unhandled_rejection(scope, Some(*fulfilled), Some(*rejected))
+        .expect("attach pull reactions");
 }
 
 /// <https://streams.spec.whatwg.org/#readable-stream-default-controller-should-call-pull>
@@ -3672,9 +3609,7 @@ pub(crate) fn readable_stream_default_controller_should_call_pull(
     }
     // Step 4: If ! `IsReadableStreamLocked`(_stream_) is true and !
     //         `ReadableStreamGetNumReadRequests`(_stream_) > 0, return true.
-    if is_readable_stream_locked(&stream)
-        && readable_stream_get_num_read_requests(scope, &stream) > 0
-    {
+    if stream.is_locked() && readable_stream_get_num_read_requests(scope, &stream) > 0 {
         return true;
     }
     // Step 5: Let _desiredSize_ be ! `DefaultControllerGetDesiredSize`(_controller_).
@@ -3746,9 +3681,7 @@ pub(crate) fn readable_stream_default_controller_enqueue(
     // Step 3: If ! `IsReadableStreamLocked`(_stream_) is true and !
     //         `ReadableStreamGetNumReadRequests`(_stream_) > 0, perform !
     //         `ReadableStreamFulfillReadRequest`(_stream_, _chunk_, false).
-    if is_readable_stream_locked(&stream)
-        && readable_stream_get_num_read_requests(scope, &stream) > 0
-    {
+    if stream.is_locked() && readable_stream_get_num_read_requests(scope, &stream) > 0 {
         readable_stream_fulfill_read_request(scope, &stream, chunk, false);
     } else {
         // Step 4: Otherwise, Let _result_ be the result of performing
@@ -3920,7 +3853,7 @@ pub(crate) fn set_up_readable_stream_default_controller(
     )?;
     // Step 10: Let _startPromise_ be `a promise resolved with` _startResult_.
     //          As in the writable controller's setup, WebIDL "a promise resolved
-    //          with" mints a new promise (it does not return a promise input
+    //          with" creates a new promise (it does not return a promise input
     //          as-is the way `Promise.resolve` does).
     let start_promise = Promise::new_resolved_with_value(scope, start_result)?;
     // Step 11: `Upon fulfillment` of _startPromise_, Set _controller_.`[[started]]` to true.
@@ -4039,14 +3972,28 @@ pub(crate) fn readable_byte_stream_controller_call_pull_if_needed(
     // Step 8: `Upon rejection` of _pullPromise_ with reason _e_, Perform !
     //         `ByteStreamControllerError`(_controller_, _e_).
     // (Steps 7 and 8 are implemented by `byte_pull_promise_fulfilled` / `byte_pull_promise_rejected`.)
-    let payload = byte_controller_value(scope, controller);
-    support::react(
-        scope,
-        &pull_promise,
-        Some((byte_pull_promise_fulfilled, payload)),
-        Some((byte_pull_promise_rejected, payload)),
-    )
-    .expect("attach byte pull reactions");
+    if controller.data().pull_fulfilled_fn.is_none() {
+        let payload = controller.to_jsval(scope).unwrap();
+        let fulfilled = Function::new_callback(scope, c"", 1, byte_pull_promise_fulfilled, payload)
+            .expect("create byte pull reaction");
+        controller.data_mut().pull_fulfilled_fn = Some(Heap::from(fulfilled));
+        let rejected = Function::new_callback(scope, c"", 1, byte_pull_promise_rejected, payload)
+            .expect("create byte pull reaction");
+        controller.data_mut().pull_rejected_fn = Some(Heap::from(rejected));
+    }
+    let fulfilled = controller
+        .data()
+        .pull_fulfilled_fn
+        .get(scope)
+        .expect("created above");
+    let rejected = controller
+        .data()
+        .pull_rejected_fn
+        .get(scope)
+        .expect("created above");
+    pull_promise
+        .add_reactions_ignoring_unhandled_rejection(scope, Some(*fulfilled), Some(*rejected))
+        .expect("attach byte pull reactions");
 }
 
 /// <https://streams.spec.whatwg.org/#readable-byte-stream-controller-clear-algorithms>
@@ -4315,7 +4262,7 @@ pub(crate) fn readable_byte_stream_controller_enqueue(
         // Step 11: Otherwise, Assert: ! `IsReadableStreamLocked`(_stream_) is false. Perform !
         //          `ByteStreamControllerEnqueueChunkToQueue`(_controller_, _transferredBuffer_,
         //          _byteOffset_, _byteLength_).
-        debug_assert!(!is_readable_stream_locked(&stream));
+        debug_assert!(!stream.is_locked());
         readable_byte_stream_controller_enqueue_chunk_to_queue(
             controller,
             transferred_buffer,
@@ -4696,17 +4643,13 @@ pub(crate) fn readable_byte_stream_controller_get_byob_request<'r>(
         )
         .expect("constructing a Uint8Array over the pending pull-into");
         let byob_request =
-            ReadableStreamBYOBRequest::new(scope).expect("minting a ReadableStreamBYOBRequest");
+            ReadableStreamBYOBRequest::new(scope).expect("creating a ReadableStreamBYOBRequest");
         byob_request.data_mut().controller = Some(Heap::from(*controller));
         byob_request.data_mut().view.set(view.as_value());
         controller.data_mut().byob_request = Some(Heap::from(byob_request));
     }
     // Step 2: Return _controller_.`[[ReadableStreamBYOBRequest]]`.
-    controller
-        .data()
-        .byob_request
-        .as_ref()
-        .map(|req| req.get(scope))
+    controller.data().byob_request.get(scope)
 }
 
 /// <https://streams.spec.whatwg.org/#readable-byte-stream-controller-get-desired-size>
@@ -4760,8 +4703,8 @@ pub(crate) fn readable_byte_stream_controller_invalidate_byob_request(
     controller: &ReadableByteStreamController<'_>,
 ) {
     // Step 1: If _controller_.`[[ReadableStreamBYOBRequest]]` is null, return.
-    let byob_request = match controller.data().byob_request.as_ref() {
-        Some(req) => req.get(scope),
+    let byob_request = match controller.data().byob_request.get(scope) {
+        Some(req) => req,
         None => return,
     };
     // Step 2: Set _controller_.`[[ReadableStreamBYOBRequest]]`.`[[controller]]` to undefined.
@@ -5524,7 +5467,7 @@ pub(crate) fn set_up_readable_byte_stream_controller(
         &[scope.root_value(controller.as_value())],
     )?;
     // Step 15: Let _startPromise_ be `a promise resolved with` _startResult_.
-    //          As in the default controller's setup, WebIDL "a promise resolved with" mints a new
+    //          As in the default controller's setup, WebIDL "a promise resolved with" creates a new
     //          promise (it does not return a promise input as-is the way `Promise.resolve` does).
     let start_promise = Promise::new_resolved_with_value(scope, start_result)?;
     // Step 16: `Upon fulfillment` of _startPromise_, Set _controller_.`[[started]]` to true.
@@ -5534,7 +5477,7 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     //          `ByteStreamControllerError`(_controller_, _r_).
     // (Steps 16 and 17 are implemented by `byte_start_promise_fulfilled` /
     // `byte_start_promise_rejected`.)
-    let payload = byte_controller_value(scope, controller);
+    let payload = controller.to_jsval(scope).unwrap();
     support::react(
         scope,
         &start_promise,
@@ -5590,9 +5533,22 @@ pub(crate) fn set_up_readable_byte_stream_controller_from_underlying_source(
     )?;
     // Step 8: Let _autoAllocateChunkSize_ be _underlyingSourceDict_["``autoAllocateChunkSize``"],
     //         if it `exists`, or undefined otherwise.
-    let auto_allocate_chunk_size = underlying_source_dict.auto_allocate_chunk_size;
+    // WebIDL `[EnforceRange] unsigned long long`: a non-finite value, or one that's
+    // negative after truncating toward zero, throws a `TypeError`. (The upper
+    // bound 2^64-1 is beyond `f64` precision.) Applied here because the dictionary
+    // member is held as `f64` rather than enforced during conversion.
+    let auto_allocate_chunk_size = match underlying_source_dict.auto_allocate_chunk_size {
+        Some(n) if !n.is_finite() || n.trunc() < 0.0 => {
+            return Err(js::error::throw_type_error(
+                scope,
+                c"autoAllocateChunkSize is out of range",
+            ));
+        }
+        Some(n) => Some(n.trunc()),
+        None => None,
+    };
     // Step 9: If _autoAllocateChunkSize_ is 0, then throw a ``TypeError`` exception.
-    if auto_allocate_chunk_size == Some(0) {
+    if auto_allocate_chunk_size == Some(0.0) {
         return Err(js::error::throw_type_error(
             scope,
             c"autoAllocateChunkSize cannot be 0",
@@ -5610,6 +5566,6 @@ pub(crate) fn set_up_readable_byte_stream_controller_from_underlying_source(
         cancel_algorithm,
         underlying_source,
         high_water_mark,
-        auto_allocate_chunk_size.map(|n| n as f64),
+        auto_allocate_chunk_size,
     )
 }

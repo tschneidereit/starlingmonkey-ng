@@ -7,7 +7,7 @@ use js::exception::take_pending_or_undefined;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
-use js::prelude::{CallbackArgs, HandleValue};
+use js::prelude::{CallbackArgs, HandleValue, OptionHeapExt};
 use js::value;
 use js::Function;
 use js::{Object, Promise};
@@ -15,9 +15,7 @@ use js::{Object, Promise};
 use super::transform_stream::TransformStream;
 use super::transform_stream_default_controller::TransformStreamDefaultController;
 use super::transformer::Transformer;
-use crate::algorithms::{
-    cast_payload, make_type_error, pair_parts, pair_payload, resolve_promise_slot_undefined,
-};
+use crate::algorithms::{cast_payload, make_type_error, pair_parts, pair_payload};
 use crate::readable::algorithms::{
     create_readable_stream, readable_stream_default_controller_can_close_or_enqueue,
     readable_stream_default_controller_close, readable_stream_default_controller_enqueue,
@@ -218,14 +216,19 @@ fn ts_perform_transform_rejected(
 }
 
 /// `TransformStreamDefaultSinkWriteAlgorithm` step 3 fulfillment steps
-/// (payload = [controller, chunk]).
+/// (payload = the controller; the chunk is taken from the controller's
+/// `pending_write_chunk` slot).
 fn ts_sink_write_after_backpressure(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    payload: HandleValue<'_>,
+    controller: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let (controller_value, chunk) = pair_parts(scope, payload);
-    let controller = cast_payload::<TransformStreamDefaultController>(scope, controller_value);
+    let controller = cast_payload::<TransformStreamDefaultController>(scope, controller);
+    let chunk = controller.data().pending_write_chunk.get(scope);
+    controller
+        .data()
+        .pending_write_chunk
+        .set(value::undefined());
     let stream = ts_controller_stream(scope, &controller);
     let writable = ts_writable(scope, &stream);
     let state = writable.data().state;
@@ -261,7 +264,7 @@ fn ts_sink_close_fulfilled(
     } else {
         let readable_controller = stream_default_controller(scope, &readable);
         readable_stream_default_controller_close(scope, &readable_controller);
-        resolve_promise_slot_undefined(scope, &finish);
+        finish.resolve(scope, HandleValue::undefined())?;
     }
     Ok(value::undefined())
 }
@@ -302,7 +305,7 @@ fn ts_sink_abort_fulfilled(
     } else {
         let readable_controller = stream_default_controller(scope, &readable);
         readable_stream_default_controller_error(scope, &readable_controller, reason);
-        resolve_promise_slot_undefined(scope, &finish);
+        finish.resolve(scope, HandleValue::undefined())?;
     }
     Ok(value::undefined())
 }
@@ -346,7 +349,7 @@ fn ts_source_cancel_fulfilled(
         let writable_controller = writable.controller(scope);
         writable_stream_default_controller_error_if_needed(scope, &writable_controller, reason);
         transform_stream_unblock_write(scope, &stream);
-        resolve_promise_slot_undefined(scope, &finish);
+        finish.resolve(scope, HandleValue::undefined())?;
     }
     Ok(value::undefined())
 }
@@ -504,7 +507,7 @@ pub(crate) fn transform_stream_set_backpressure(
             .as_ref()
             .unwrap()
             .get(scope);
-        resolve_promise_slot_undefined(scope, &promise);
+        promise.resolve(scope, HandleValue::undefined()).unwrap();
     }
     // Step 3: Set _stream_.`[[backpressureChangePromise]]` to `a new promise`.
     let new_promise = Promise::new_pending(scope).expect("new promise");
@@ -740,11 +743,23 @@ pub(crate) fn transform_stream_default_controller_perform_transform<'r>(
     // Step 2: Return the result of `reacting` to _transformPromise_ with the following rejection
     //         steps given the argument _r_: Perform !
     //         `TransformStreamError`(_controller_.`[[stream]]`, _r_). Throw _r_.
-    let payload = ts_controller_value(scope, controller);
-    let on_rejected =
-        Function::new_callback(scope, c"", 1, ts_perform_transform_rejected, payload).expect("cb");
+    // (The rejection callback's payload — the controller — never changes, so it
+    // is created on the first transform and reused for every subsequent chunk.)
+    if controller.data().transform_rejected_fn.is_none() {
+        let payload = ts_controller_value(scope, controller);
+        let on_rejected =
+            Function::new_callback(scope, c"", 1, ts_perform_transform_rejected, payload)
+                .expect("cb");
+        controller.data_mut().transform_rejected_fn = Some(Heap::from(on_rejected));
+    }
+    let on_rejected = controller
+        .data()
+        .transform_rejected_fn
+        .as_ref()
+        .expect("created above")
+        .get(scope);
     transform_promise
-        .call_original_then(scope, None, Some(*on_rejected))
+        .then(scope, None, Some(*on_rejected))
         .expect("then")
 }
 
@@ -794,16 +809,25 @@ pub(crate) fn transform_stream_default_sink_write_algorithm<'r>(
         let backpressure_change_promise = stream
             .data()
             .backpressure_change_promise
-            .as_ref()
-            .expect("backpressureChangePromise is set")
-            .get(scope);
-        let controller_value = ts_controller_value(scope, &controller);
-        let payload = pair_payload(scope, controller_value, chunk).expect("payload");
-        let on_fulfilled =
-            Function::new_callback(scope, c"", 1, ts_sink_write_after_backpressure, payload)
-                .expect("cb");
+            .get(scope)
+            .expect("backpressureChangePromise is set");
+        // Park the chunk on the controller and reuse the per-controller callback,
+        // so only the returned derived promise is allocated per chunk.
+        controller.data().pending_write_chunk.set(*chunk);
+        if controller.data().write_after_backpressure_fn.is_none() {
+            let payload = ts_controller_value(scope, &controller);
+            let on_fulfilled =
+                Function::new_callback(scope, c"", 1, ts_sink_write_after_backpressure, payload)
+                    .expect("cb");
+            controller.data_mut().write_after_backpressure_fn = Some(Heap::from(on_fulfilled));
+        }
+        let on_fulfilled = controller
+            .data()
+            .write_after_backpressure_fn
+            .get(scope)
+            .expect("created above");
         return backpressure_change_promise
-            .call_original_then(scope, Some(*on_fulfilled), None)
+            .then(scope, Some(*on_fulfilled), None)
             .expect("then");
     }
     // Step 4: Return ! `TransformStreamDefaultControllerPerformTransform`(_controller_, _chunk_).

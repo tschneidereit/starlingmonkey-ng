@@ -30,7 +30,7 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
 
     // The tee/pipe/from-iterable algorithms keep their cross-callback state in
     // internal `#[jsclass]` objects (so the state is GC-traced and reachable
-    // through each callback's payload). They are minted via `create_instance_with`,
+    // through each callback's payload). They are created via `create_instance_with`,
     // which needs the prototype registered per-global — but they are not
     // web-exposed interfaces, so the named constructor that `add_to_global`
     // installs is deleted from the global afterward (the prototype registry, keyed
@@ -39,6 +39,7 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
     readable::algorithms::ByteTeeState::add_to_global(scope, global);
     readable::algorithms::PipeState::add_to_global(scope, global);
     readable::algorithms::FromIterableState::add_to_global(scope, global);
+    readable::read_all_bytes::ReadAllBytesState::add_to_global(scope, global);
 
     // Chain the async iterator's prototype under `%AsyncIteratorPrototype%` so it
     // inherits `[Symbol.asyncIterator]` (returning `this`).
@@ -52,18 +53,6 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
         // The default async iterator prototype has no `constructor` property
         // (per WebIDL §3.7.10.1, only `next`/`return`).
         let _ = proto.delete_property(scope, c"constructor");
-        // `return` is declared `return(value)` (length 1), but the `value`
-        // parameter is optional in the implementation, so fix up `length`.
-        if let Ok(return_fn) = proto.get_property(scope, c"return") {
-            if let Ok(return_obj) = Object::from_value(scope, *return_fn) {
-                let _ = return_obj.define_property(
-                    scope,
-                    c"length",
-                    1i32,
-                    js::class_spec::JSPROP_READONLY as u32,
-                );
-            }
-        }
     }
 
     // WebIDL `async iterable<chunk>`: `ReadableStream.prototype[@@asyncIterator]`

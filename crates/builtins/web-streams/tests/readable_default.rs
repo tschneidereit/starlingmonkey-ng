@@ -65,7 +65,7 @@ fn bound_function_callbacks() {
 /// A promise-returning operation invoked with a wrong-`this` (the prototype, or
 /// `undefined`) must *reject* with a `TypeError`, not throw synchronously —
 /// WebIDL §3.7.7. This drives the macro's `ResultPromise` brand-check reject
-/// branch (a rejected promise minted from the pending brand-check exception), a
+/// branch (a rejected promise created from the pending brand-check exception), a
 /// distinct path from the argument-error reject branch; under GC zeal it
 /// exercises that branch directly.
 #[test]
@@ -159,4 +159,28 @@ fn locked_and_double_get_reader() {
         globalThis.__out = `${before},${after},${threw}`;
         "#);
     assert_eq!(out, "false,true,true");
+}
+
+/// A `read()` result is an ordinary object with *own* `value`/`done` data
+/// properties (the spec's `CreateIterResultObject`), so a hostile accessor
+/// installed on `Object.prototype` cannot intercept or replace them. Building the
+/// result with `[[Set]]` would walk the prototype chain and let the accessor
+/// observe the chunk and prevent the own property from being created.
+#[test]
+fn read_result_has_own_properties_immune_to_proto_accessor() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        let leaked = "none";
+        Object.defineProperty(Object.prototype, "value", {
+            configurable: true,
+            get() { return "HIJACKED"; },
+            set(v) { leaked = v; },
+        });
+        const rs = new ReadableStream({ start(c) { c.enqueue(42); } });
+        rs.getReader().read().then(r => {
+            globalThis.__out =
+                `own=${Object.hasOwn(r, "value")},value=${r.value},leaked=${leaked}`;
+        });
+        "#);
+    assert_eq!(out, "own=true,value=42,leaked=none");
 }
