@@ -24,4 +24,8 @@ add_completion_callback(function(tests, harness_status, asserts) {
   });
   // Print results as JSON — the orchestrator reads this from stdout.
   console.log("WPT_RESULTS_JSON:" + JSON.stringify(results));
+  // Stop the event loop now that results are out: a finished test may have left a live setInterval
+  // (or other pending timer) running, which would otherwise keep the process alive until the
+  // harness timeout.
+  if (typeof __wptDone === "function") __wptDone();
 });

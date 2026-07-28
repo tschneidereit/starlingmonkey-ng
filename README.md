@@ -478,17 +478,27 @@ bash scripts/test-gc-zeal.sh full   # exhaustive
 The project includes a [WPT](https://web-platform-tests.org/) harness that
 validates web API conformance against the official test suite.
 
-**Current coverage:**
-- `DOMException`: 115/115 tests passing
-- `btoa`/`atob`: 285/286 tests passing
+### Setup
 
-**Setup:**
+Running the full test suite requires a bunch of additions to `/etc/hosts`.
+These can be applied with the following command:
 
 ```bash
 just wpt-setup
 ```
 
-**Run:**
+Additionally, a local clone of the WPT test suite needs to be available.
+To use a single clone across multiple working trees, pass the location using
+the `WPT_ROOT` env var, or the `--wpt-root` when running the suite.
+
+Use the following command to create a new clone at the right revision under
+[deps/](deps/):
+
+```bash
+just clone-wpt-tests
+```
+
+### Running tests
 
 ```bash
 just wpt-test              # all configured WPT tests
@@ -497,9 +507,33 @@ just wpt-test DOMException # only DOMException tests
 just wpt-update            # run and update expectation files
 ```
 
+use `just wpt-test-wasm` to run under WebAssembly instead of native, and
+`just wpt-update-wasm` to update wasm-specific expectations.
+
+Tests run concurrently (defaulting to number of CPUs * 2 since many aren't
+compute-bound) and results are reported strictly in test order, so the output
+does not depend on which test finished first. Use `--jobs=N` to override the
+default.
+
 Test results are compared against expectation files in
 `tests/wpt-harness/expectations/`. When adding new web APIs, add corresponding
 WPT test paths to `tests/wpt-harness/tests.json` and run `just wpt-update`.
+
+**Native and wasm.** The same tests run on both targets, which do not always
+behave identically: the two HTTP stacks, `hyper` and `wasi:http`, differ in what
+they accept and preserve.
+Tests with different expectations have the additional field `"wasm_status"`:
+
+```json
+{
+  "a subtest that agrees everywhere": { "status": "PASS" },
+  "a subtest that does not":          { "status": "PASS", "wasm_status": "FAIL" }
+}
+```
+
+A test that cannot run on a target *at all* is prefixed in `tests.json` with
+`SKIP-WASM(reason)` or `SKIP-NATIVE(reason)` instead. Prefer `wasm_status`:
+skipping a whole file gives up the subtests that would have passed.
 
 ---
 
