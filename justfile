@@ -26,8 +26,12 @@ test *TARGET:
     cargo test --features debugmozjs --workspace {{TARGET}}
 
 # Clone the WPT test suite (shallow clone, ~200MB).
-wpt-setup *ARGS:
+clone-wpt-tests *ARGS:
     ./scripts/clone-wpt.sh {{ARGS}}
+
+# Clone the WPT test suite (shallow clone, ~200MB).
+wpt-setup *ARGS:
+    cat deps/wpt-hosts | sudo tee -a /etc/hosts
 
 # Run WPT tests, optionally filtering by pattern.
 wpt-test *PATTERN:
