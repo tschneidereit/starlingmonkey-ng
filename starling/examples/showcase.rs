@@ -214,7 +214,7 @@ impl Rect {
 // #[jsmodule]: native ES module
 // ============================================================================
 
-/// A native module importable as `import { pi, add, ... } from "math"`.
+/// A native module importable as `import { PI, add, ... } from "math"`.
 #[jsmodule]
 mod math {
     pub const PI: f64 = std::f64::consts::PI;

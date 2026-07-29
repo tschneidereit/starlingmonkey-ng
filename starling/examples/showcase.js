@@ -3,7 +3,7 @@
 // Loaded as an ES module by the `showcase` example. Every class, module,
 // and global function defined in Rust is used here.
 
-import { pi, e, add, multiply, greet, safeDivide, clamp } from "math";
+import { PI, E, add, multiply, greet, safeDivide, clamp } from "math";
 
 // =========================================================================
 // 1. Native module — constants
@@ -11,11 +11,11 @@ import { pi, e, add, multiply, greet, safeDivide, clamp } from "math";
 
 const results = [];
 
-results.push(`pi = ${pi}`);
-results.push(`e = ${e}`);
+results.push(`PI = ${PI}`);
+results.push(`E = ${E}`);
 
-if (Math.abs(pi - 3.141592653589793) > 1e-10) throw new Error("pi wrong");
-if (Math.abs(e - 2.718281828459045) > 1e-10) throw new Error("e wrong");
+if (Math.abs(PI - 3.141592653589793) > 1e-10) throw new Error("PI wrong");
+if (Math.abs(E - 2.718281828459045) > 1e-10) throw new Error("E wrong");
 
 // =========================================================================
 // 2. Native module — functions
@@ -45,13 +45,13 @@ try {
 // 3. Global functions and constants
 // =========================================================================
 
-results.push(`appName = ${appName}`);
-results.push(`appVersion = ${appVersion}`);
+results.push(`APP_NAME = ${APP_NAME}`);
+results.push(`APP_VERSION = ${APP_VERSION}`);
 results.push(`formatTimestamp(1709683200) = ${formatTimestamp(1709683200)}`);
 results.push(`randomBetween(1, 1) = ${randomBetween(1, 1)}`);
 
-if (appName !== "StarlingMonkey Showcase") throw new Error("appName wrong");
-if (appVersion !== "0.1.0") throw new Error("appVersion wrong");
+if (APP_NAME !== "StarlingMonkey Showcase") throw new Error("APP_NAME wrong");
+if (APP_VERSION !== "0.1.0") throw new Error("APP_VERSION wrong");
 if (randomBetween(5, 5) !== 5) throw new Error("randomBetween wrong");
 
 // =========================================================================

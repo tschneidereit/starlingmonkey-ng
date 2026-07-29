@@ -3,18 +3,13 @@
 //! Integration tests for typed variadic arguments via `RestArgs<T>`.
 //!
 //! `RestArgs<T>` collects every JS argument from the position where it appears
-//! (after the fixed parameters) into a `Vec<T>`, converting each element with
-//! `FromJSVal`. It is valid on `#[method]` and `#[static_method]`; the macro
-//! rejects it on constructors and `#[jsnamespace]` functions, and rejects the
-//! bare `RestArgs<Value>` element type (unrooted JSVals are not GC-safe).
+//! (after the fixed parameters) into a `Vec<T>`.
+//! It is valid wherever a callable takes arguments: `#[method]`,
+//! `#[static_method]`, `#[constructor]`, and the free functions exposed by
+//! `#[jsmodule]`, `#[jsglobals]`, `#[jsnamespace]`, and `#[webidl_namespace]`
+//! (see the [`constructor_tests`] and [`free_fn_tests`] modules).
 //!
-//! Supported inner types: `f64`/`f32`, `String`, `bool`, the integer types
-//! (`i8`..`u64`, converted with `ConversionBehavior::Default`), class newtypes,
-//! and `HandleValue<'_>` (each handle aliases the engine-rooted argv slot, so a
-//! `Vec` of them is GC-safe — the [`handle_value_tests`] module proves this
-//! under a forced collection). Only the owned `Value` element type and the bare
-//! `RestArgs` default are rejected by the macro. Those compile-time rejections
-//! aren't exercised here because the repo has no `trybuild` harness.
+//! `T` must implement [`js::conversion::FromJSVal`] and, for GC types, be rooted.
 
 use core_runtime::jsclass;
 use core_runtime::jsmethods;
@@ -387,5 +382,411 @@ mod handle_value_tests {
         assert_eq!(val.to_int32(), 60);
 
         unsafe { SetGCZeal(scope.raw_cx_no_gc(), 0, 0) };
+    }
+}
+
+// ============================================================================
+// `RestArgs` on constructors
+//
+// `parse_method_info` has always collected the rest parameter for every method
+// kind, but `gen_constructor_body` dropped it on the floor, so a constructor
+// taking `RestArgs` failed to compile. Constructors now go through the same
+// collection as methods.
+// ============================================================================
+
+mod constructor_tests {
+    use core_runtime::test_util::eval_with_setup;
+    use core_runtime::{jsclass, jsmethods};
+
+    // No `use js::class::RestArgs` here on purpose: the macro rewrites the
+    // parameter type to its fully-qualified path, so the unqualified name in
+    // the signatures below resolves without an import. This module failing to
+    // compile means that rewrite regressed.
+
+    #[jsclass]
+    struct Tally {
+        total: f64,
+        label: String,
+    }
+
+    #[jsmethods]
+    impl Tally {
+        /// Variadic-only constructor: collection starts at argument 0.
+        #[constructor]
+        fn construct(rest: RestArgs<f64>) -> Self {
+            Self {
+                total: rest.iter().sum(),
+                label: String::new(),
+            }
+        }
+
+        #[getter]
+        fn total(&self) -> f64 {
+            self.data().total
+        }
+
+        #[getter]
+        fn label(&self) -> String {
+            self.data().label.clone()
+        }
+    }
+
+    #[jsclass]
+    struct Labelled {
+        label: String,
+        count: u32,
+    }
+
+    #[jsmethods]
+    impl Labelled {
+        /// A fixed leading parameter followed by a variadic tail, so collection
+        /// must start at index 1 rather than 0.
+        #[constructor]
+        fn construct(label: String, rest: RestArgs<String>) -> Self {
+            Self {
+                label,
+                count: rest.len() as u32,
+            }
+        }
+
+        #[getter]
+        fn label(&self) -> String {
+            self.data().label.clone()
+        }
+
+        #[getter]
+        fn count(&self) -> u32 {
+            self.data().count
+        }
+    }
+
+    fn setup() {
+        core_runtime::runtime::register_global_initializer(|scope, global| {
+            Tally::add_to_global(scope, global);
+            Labelled::add_to_global(scope, global);
+        });
+    }
+
+    fn eval(code: &str) -> String {
+        eval_with_setup(setup, code)
+    }
+
+    #[test]
+    fn constructor_collects_variadic_args() {
+        assert_eq!(eval("new Tally(1, 2, 3).total"), "6");
+    }
+
+    #[test]
+    fn constructor_with_no_variadic_args() {
+        assert_eq!(eval("new Tally().total"), "0");
+    }
+
+    #[test]
+    fn constructor_collects_after_fixed_params() {
+        assert_eq!(eval("new Labelled('a', 'x', 'y', 'z').count"), "3");
+        assert_eq!(eval("new Labelled('a', 'x', 'y', 'z').label"), "a");
+    }
+
+    #[test]
+    fn constructor_with_fixed_param_and_empty_tail() {
+        assert_eq!(eval("new Labelled('a').count"), "0");
+    }
+}
+
+// ============================================================================
+// `RestArgs` on free functions
+//
+// `#[jsmodule]`, `#[jsglobals]`, `#[jsnamespace]`, and `#[webidl_namespace]`
+// share `parse_free_fn_export`/`gen_free_fn_native`, which previously ignored
+// `RestArgs` entirely — the parameter was treated as an ordinary one and
+// failed `FromJSVal`. All four now use the same collection as methods.
+// ============================================================================
+
+mod free_fn_tests {
+    use core_runtime::config::RuntimeConfig;
+    use core_runtime::module::evaluate_module;
+    use core_runtime::runtime::Runtime;
+    use core_runtime::test_util::eval_with_setup;
+    use core_runtime::{jsglobals, jsmodule, jsnamespace, webidl_namespace};
+    use js::class::RestArgs;
+    use js::conversion::FromJSVal;
+
+    #[jsmodule]
+    mod rest_module {
+        pub fn sum_all(rest: RestArgs<f64>) -> f64 {
+            rest.iter().sum()
+        }
+
+        pub fn join_all(sep: String, rest: RestArgs<String>) -> String {
+            rest.join(sep.as_str())
+        }
+    }
+
+    #[jsglobals]
+    mod rest_globals {
+        pub fn global_sum(rest: RestArgs<f64>) -> f64 {
+            rest.iter().sum()
+        }
+
+        pub fn global_join(sep: String, rest: RestArgs<String>) -> String {
+            rest.join(sep.as_str())
+        }
+    }
+
+    #[jsnamespace(name = "restNs")]
+    mod rest_ns {
+        use js::gc::scope::Scope;
+
+        pub fn ns_sum(rest: RestArgs<f64>) -> f64 {
+            rest.iter().sum()
+        }
+
+        /// Combines the `scope` passthrough with a variadic tail, confirming
+        /// the two parameter filters compose.
+        pub fn ns_count(scope: &Scope<'_>, rest: RestArgs<String>) -> u32 {
+            let _ = scope;
+            rest.len() as u32
+        }
+    }
+
+    #[webidl_namespace(name = "RestWebIDL")]
+    mod rest_webidl_ns {
+        pub fn widl_sum(rest: RestArgs<i32>) -> i32 {
+            rest.iter().sum()
+        }
+    }
+
+    fn setup() {
+        core_runtime::runtime::register_global_initializer(|scope, global| {
+            rest_globals::add_to_global(scope, global);
+            rest_ns::add_to_global(scope, global);
+            rest_webidl_ns::add_to_global(scope, global);
+            // SAFETY: called during global initialization, before any JS runs.
+            unsafe {
+                rest_module::register(scope);
+            }
+        });
+    }
+
+    fn eval(code: &str) -> String {
+        eval_with_setup(setup, code)
+    }
+
+    fn eval_module(body: &str) -> String {
+        setup();
+        let rt = Runtime::init(&RuntimeConfig::default());
+        let scope = rt.default_global();
+        let source = format!("import * as m from \"restModule\";\nglobalThis._result = {body};");
+        // SAFETY: `scope` outlives the evaluation, and the module registry was
+        // populated by `setup` before any JS ran.
+        unsafe { evaluate_module(&scope, &source, "rest_test.mjs") }.expect("module eval failed");
+        let val = js::compile::evaluate_with_filename(&scope, "globalThis._result", "read.js", 1)
+            .expect("readback failed");
+        String::from_jsval(&scope, val, ()).expect("null string")
+    }
+
+    // --- #[jsmodule] ---
+
+    #[test]
+    fn module_fn_collects_variadic_args() {
+        assert_eq!(eval_module("m.sumAll(1, 2, 3)"), "6");
+        assert_eq!(eval_module("m.sumAll()"), "0");
+    }
+
+    #[test]
+    fn module_fn_collects_after_fixed_param() {
+        assert_eq!(eval_module("m.joinAll('-', 'a', 'b', 'c')"), "a-b-c");
+    }
+
+    // --- #[jsglobals] ---
+
+    #[test]
+    fn global_fn_collects_variadic_args() {
+        assert_eq!(eval("globalSum(1, 2, 3, 4)"), "10");
+        assert_eq!(eval("globalSum()"), "0");
+    }
+
+    #[test]
+    fn global_fn_collects_after_fixed_param() {
+        assert_eq!(eval("globalJoin('+', 'x', 'y')"), "x+y");
+    }
+
+    // --- #[jsnamespace] / #[webidl_namespace] ---
+
+    #[test]
+    fn namespace_fn_collects_variadic_args() {
+        assert_eq!(eval("restNs.nsSum(2, 4)"), "6");
+        assert_eq!(eval("restNs.nsSum()"), "0");
+    }
+
+    #[test]
+    fn namespace_fn_with_scope_and_variadic() {
+        assert_eq!(eval("restNs.nsCount('a', 'b', 'c')"), "3");
+    }
+
+    #[test]
+    fn webidl_namespace_fn_collects_variadic_args() {
+        assert_eq!(eval("RestWebIDL.widlSum(1, 2, 3, 4, 5)"), "15");
+    }
+
+    /// A variadic tail is not a declared parameter, so it must not inflate
+    /// `fn.length` — the same rule `length_ignores_rest_parameter` pins for
+    /// methods, checked here because free functions compute `nargs` on a
+    /// different path.
+    #[test]
+    fn length_ignores_rest_parameter_on_free_fns() {
+        assert_eq!(eval("globalSum.length"), "0");
+        assert_eq!(eval("globalJoin.length"), "1");
+        assert_eq!(eval("restNs.nsSum.length"), "0");
+        assert_eq!(eval("restNs.nsCount.length"), "0");
+        assert_eq!(eval("RestWebIDL.widlSum.length"), "0");
+    }
+
+    /// The unqualified `RestArgs` in each mod block above is rewritten to the
+    /// fully-qualified path by the macro, exactly as it is for methods — this
+    /// compiles only if that rewrite reaches the free-function paths.
+    #[test]
+    fn rest_args_type_is_rewritten_in_signatures() {
+        assert_eq!(rest_module::sum_all(RestArgs::new(vec![1.0, 2.0])), 3.0);
+        assert_eq!(rest_globals::global_sum(RestArgs::new(vec![4.0])), 4.0);
+    }
+}
+
+// ============================================================================
+// `RestArgs` on a promise-returning operation
+//
+// For `Result<Promise<'_>, ExnThrown>` returns, WebIDL §3.7.7 says a failed
+// argument conversion must *reject* the returned promise rather than throw
+// synchronously. `emit_native_fn` achieves that for fixed parameters by moving
+// their extraction inside a rejecting closure; the variadic tail is collected
+// in the same place, so it behaves the same way.
+// ============================================================================
+
+mod promise_return_tests {
+    use core_runtime::config::RuntimeConfig;
+    use core_runtime::event_loop::run_microtasks;
+    use core_runtime::runtime::{clear_global_initializers, register_global_initializer, Runtime};
+    use core_runtime::{jsclass, jsmethods};
+    use js::conversion::FromJSVal;
+    use js::error::ExnThrown;
+    use js::gc::scope::Scope;
+    use js::Promise;
+
+    #[jsclass]
+    struct Waiter {}
+
+    #[jsmethods]
+    impl Waiter {
+        #[constructor]
+        fn construct() -> Self {
+            Self {}
+        }
+
+        /// A promise-returning operation whose arguments are all variadic.
+        #[method]
+        fn join_async<'r>(
+            &self,
+            scope: &'r Scope<'_>,
+            rest: RestArgs<String>,
+        ) -> Result<Promise<'r>, ExnThrown> {
+            Promise::new_resolved_with_value(scope, rest.join(","))
+        }
+
+        /// The same, behind a fixed leading parameter, so the tail is collected
+        /// from index 1 inside the closure.
+        #[method]
+        fn join_async_after<'r>(
+            &self,
+            scope: &'r Scope<'_>,
+            sep: String,
+            rest: RestArgs<String>,
+        ) -> Result<Promise<'r>, ExnThrown> {
+            Promise::new_resolved_with_value(scope, rest.join(sep.as_str()))
+        }
+    }
+
+    /// Evaluate `code`, drain microtasks, and return `String(globalThis.__out)`.
+    fn run(code: &str) -> String {
+        clear_global_initializers();
+        register_global_initializer(|scope, global| {
+            Waiter::add_to_global(scope, global);
+        });
+        let rt = Runtime::init(&RuntimeConfig::default());
+        let scope = rt.default_global();
+        if js::compile::evaluate_with_filename(&scope, code, "test.js", 1).is_err() {
+            panic!("evaluation threw: {:?}", ExnThrown::capture(&scope));
+        }
+        run_microtasks(&scope);
+        let out = js::compile::evaluate_with_filename(&scope, "globalThis.__out", "out.js", 1)
+            .expect("reading __out threw");
+        String::from_jsval(&scope, out, ()).unwrap()
+    }
+
+    #[test]
+    fn variadic_promise_op_resolves() {
+        assert_eq!(
+            run(r#"
+                globalThis.__out = "pending";
+                new Waiter().joinAsync("a", "b").then(v => { globalThis.__out = v; });
+            "#),
+            "a,b"
+        );
+    }
+
+    /// A `Symbol` can't convert to `String`, so collecting the tail fails. That
+    /// must surface as a rejection, not a synchronous throw — matching how a bad
+    /// *fixed* argument to the same operation behaves.
+    #[test]
+    fn bad_variadic_element_rejects_rather_than_throwing() {
+        assert_eq!(
+            run(r#"
+                globalThis.__out = "pending";
+                let threw = false;
+                let p;
+                try { p = new Waiter().joinAsync(Symbol()); } catch (e) { threw = true; }
+                Promise.resolve(p).then(
+                    () => { globalThis.__out = `threw=${threw},resolved`; },
+                    e => { globalThis.__out = `threw=${threw},rejected:${e.constructor.name}`; },
+                );
+            "#),
+            "threw=false,rejected:TypeError"
+        );
+    }
+
+    /// The same, with the tail behind a fixed parameter.
+    #[test]
+    fn bad_variadic_element_after_fixed_param_rejects() {
+        assert_eq!(
+            run(r#"
+                globalThis.__out = "pending";
+                let threw = false;
+                let p;
+                try { p = new Waiter().joinAsyncAfter("-", Symbol()); } catch (e) { threw = true; }
+                Promise.resolve(p).then(
+                    () => { globalThis.__out = `threw=${threw},resolved`; },
+                    e => { globalThis.__out = `threw=${threw},rejected:${e.constructor.name}`; },
+                );
+            "#),
+            "threw=false,rejected:TypeError"
+        );
+    }
+
+    /// The pre-existing behaviour for a bad *fixed* argument, as the baseline
+    /// the variadic tail has to match.
+    #[test]
+    fn bad_fixed_arg_rejects_rather_than_throwing() {
+        assert_eq!(
+            run(r#"
+                globalThis.__out = "pending";
+                let threw = false;
+                let p;
+                try { p = new Waiter().joinAsyncAfter(Symbol()); } catch (e) { threw = true; }
+                Promise.resolve(p).then(
+                    () => { globalThis.__out = `threw=${threw},resolved`; },
+                    e => { globalThis.__out = `threw=${threw},rejected:${e.constructor.name}`; },
+                );
+            "#),
+            "threw=false,rejected:TypeError"
+        );
     }
 }

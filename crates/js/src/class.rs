@@ -307,12 +307,17 @@ impl<T: ClassDef> JSType for T {
     }
 }
 
-/// Typed variadic rest arguments in `#[jsmethods]` and `#[webidl_methods]`.
+/// Typed variadic rest arguments.
 ///
-/// Use this as the type of the last parameter to collect all remaining
-/// JS arguments. `T` must implement [`FromJSVal`](crate::conversion::FromJSVal) and either not
-/// need rooting, such as `i32`, `f64` or `String`, or be a scope-rooted type, such as
-/// `HandleValue<'_>`, `Promise<'_>`, or `Request<'_>`.
+/// Use this as the type of the last parameter to collect all remaining JS
+/// arguments. It is accepted anywhere a callable takes arguments: `#[method]`,
+/// `#[static_method]`, and `#[constructor]` in `#[jsmethods]`/
+/// `#[webidl_methods]` blocks, and the free functions exposed by `#[jsmodule]`,
+/// `#[jsglobals]`, `#[jsnamespace]`, and `#[webidl_namespace]`.
+///
+/// `T` must implement [`FromJSVal`](crate::conversion::FromJSVal) and either
+/// not need rooting, such as `i32`, `f64` or `String`, or be a scope-rooted
+/// type, such as `HandleValue<'_>`, `Promise<'_>`, or `Request<'_>`.
 ///
 /// Note that instead of `HandleValue<'_>`, you can also use `&CallArgs`, which gives you access
 /// to the raw, already rooted, arguments vector and count.
@@ -328,7 +333,7 @@ impl<T: ClassDef> JSType for T {
 /// ```
 pub struct RestArgs<T>(Vec<T>);
 
-impl<T> RestArgs<T> {
+impl<'s, 'v, T: FromJSVal<'s, 'v>> RestArgs<T> {
     /// Creates a new `RestArgs` from a pre-converted vector.
     pub fn new(values: Vec<T>) -> Self {
         Self(values)
