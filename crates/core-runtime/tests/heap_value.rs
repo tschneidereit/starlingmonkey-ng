@@ -12,6 +12,9 @@
 //! call. The move-safety of the boxed post-write barrier is still exercised
 //! at the nursery-eviction phase that precedes compaction.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::config::RuntimeConfig;
 use core_runtime::runtime::Runtime;
 use js::gc::handle::Heap;

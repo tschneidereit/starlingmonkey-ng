@@ -8,6 +8,9 @@
 //! variant must be traced so its stored pointer is updated, or a later read
 //! returns a stale/wrong object.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::config::RuntimeConfig;
 use core_runtime::runtime::Runtime;
 use core_runtime::Traceable;

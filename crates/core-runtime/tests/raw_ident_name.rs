@@ -3,6 +3,9 @@
 //! A method/getter named with a raw identifier (a Rust keyword like `type`)
 //! must map to that keyword in JS, not to `rType` after camel-casing.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::test_util::eval_with_setup;
 use core_runtime::{jsclass, jsmethods};
 

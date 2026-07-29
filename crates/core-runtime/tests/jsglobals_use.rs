@@ -6,6 +6,9 @@
 //! `pub use {A, B};` or a renamed `pub use Foo as Bar;` was silently skipped,
 //! so the class was never installed on the global. All forms are now handled.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::test_util::eval_with_setup;
 use core_runtime::{jsclass, jsglobals, jsmethods};
 

@@ -13,6 +13,9 @@
 //! - `onabort` getter identity and the set-to-null path, which `event.any.js`
 //!   does not assert.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::test_util::eval_with_setup;
 
 fn setup() {

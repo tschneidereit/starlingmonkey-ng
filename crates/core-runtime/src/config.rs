@@ -142,7 +142,8 @@ fn split_args(s: &str) -> Result<Vec<String>, clap::Error> {
     Ok(args)
 }
 
-#[cfg(test)]
+// Nothing platform-specific in these tests, so skip them on wasm32.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

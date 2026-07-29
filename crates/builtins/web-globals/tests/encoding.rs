@@ -2,6 +2,9 @@
 
 //! Integration tests for the Encoding API (TextEncoder, TextDecoder).
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::test_util::{eval_with_setup, throws_with_setup};
 
 fn setup() {

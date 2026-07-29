@@ -172,7 +172,8 @@ pub fn add_to_global<'s>(scope: &'s Scope<'_>, global: Object<'s>) {
         .expect("failed to define globalThis.location");
 }
 
-#[cfg(test)]
+// Nothing platform-specific in these tests, so skip them on wasm32.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use core_runtime::{runtime, test_util::eval_with_setup};
 

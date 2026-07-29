@@ -229,7 +229,8 @@ impl ThrowException for DOMExceptionError {
     }
 }
 
-#[cfg(test)]
+// Nothing platform-specific in these tests, so skip them on wasm32.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod dom_exception_integration {
     use core_runtime::{
         config::RuntimeConfig,
@@ -369,7 +370,8 @@ mod dom_exception_integration {
 /// These tests use `#[jsglobals]` to register functions that return
 /// `Result<T, TypeError>`, `Result<T, RangeError>`, `Result<T, SyntaxError>`,
 /// `Result<T, DOMExceptionError>`, and `Result<T, String>`.
-#[cfg(test)]
+// Nothing platform-specific in these tests, so skip them on wasm32.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod throw_exception_integration {
     use crate::dom_exception::DOMExceptionError;
     use core_runtime::{jsglobals, test_util::eval_with_setup};
