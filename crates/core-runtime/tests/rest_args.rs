@@ -11,6 +11,9 @@
 //!
 //! `T` must implement [`js::conversion::FromJSVal`] and, for GC types, be rooted.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::jsclass;
 use core_runtime::jsmethods;
 use core_runtime::test_util::{eval_with_setup, throws_with_setup};

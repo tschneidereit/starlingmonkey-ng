@@ -8,6 +8,9 @@
 //! must instead throw the error; its `Ok` value is ignored (a JS setter yields
 //! undefined).
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::jsclass;
 use core_runtime::jsmethods;
 use core_runtime::test_util::{eval_with_setup, throws_with_setup};

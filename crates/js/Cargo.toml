@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 edition.workspace = true
 
+[lib]
+# No unit tests; skip building the (SpiderMonkey-sized) lib test harness binary.
+test = false
+
 [features]
 crown = ['mozjs/crown']
 debugmozjs = ['mozjs/debugmozjs']

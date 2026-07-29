@@ -14,6 +14,9 @@
 //! borrow panics instead of aliasing. Note that we can't test the panic behavior,
 //! since the test process is aborted completely because unwinding across the FFI
 //! boundary doesn't work.
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::test_util::eval_with_setup;
 use core_runtime::{jsclass, jsmethods};
 

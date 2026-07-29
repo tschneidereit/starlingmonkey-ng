@@ -5,6 +5,9 @@
 //! Tests that need a JS runtime are grouped in a single test because
 //! `JSEngine` can only be initialized once per process.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 /// Tests for `#[jsclass(js_proto = "Error")]` — inheriting from a JS built-in prototype.
 mod js_proto_tests {
     use core_runtime::jsclass;

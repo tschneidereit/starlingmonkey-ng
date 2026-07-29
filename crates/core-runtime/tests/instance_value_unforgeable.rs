@@ -6,6 +6,9 @@
 //! trampoline used to skip `install_unforgeable`, so an instance returned from
 //! a JS method call lacked the own accessor entirely.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::jsclass;
 use core_runtime::jsmethods;
 use core_runtime::test_util::eval_with_setup;

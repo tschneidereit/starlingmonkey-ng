@@ -9,6 +9,8 @@
 //! JS-visible `Probe.prototype` (which normal GC tracing keeps current), and
 //! Rust-side instance minting must still work.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
 #![cfg(feature = "debugmozjs")]
 
 use core_runtime::config::RuntimeConfig;

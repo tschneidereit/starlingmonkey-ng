@@ -5,6 +5,9 @@
 //! Tests that need a JS runtime are grouped in a single test because
 //! `JSEngine` can only be initialized once per process.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::config::RuntimeConfig;
 use core_runtime::runtime::Runtime;
 use js::value;

@@ -10,6 +10,9 @@
 // Vec<T> (sequence) tests
 // ============================================================================
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 mod sequence_tests {
     use core_runtime::jsclass;
     use core_runtime::jsmethods;

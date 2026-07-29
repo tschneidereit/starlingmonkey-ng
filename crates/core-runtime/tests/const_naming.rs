@@ -11,6 +11,9 @@
 //! (see `typedef_macros::constant_tests`); these tests pin the same rule for
 //! `#[jsmodule]`, `#[jsglobals]`, `#[jsnamespace]`, and `#[webidl_namespace]`.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::config::RuntimeConfig;
 use core_runtime::module::evaluate_module;
 use core_runtime::runtime::Runtime;

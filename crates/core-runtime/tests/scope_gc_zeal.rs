@@ -9,6 +9,8 @@
 //! Grouped in a single test because `JSEngine` can only be initialized once
 //! per process. Each section sets its own GC zeal mode.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
 #![cfg(feature = "debugmozjs")]
 
 use core_runtime::config::RuntimeConfig;

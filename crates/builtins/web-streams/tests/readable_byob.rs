@@ -15,6 +15,9 @@
 //! the fast, design-validating smoke test (and the GC-rooting keystone under
 //! zeal, since pull-into transfers buffers and creates views).
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::config::RuntimeConfig;
 use core_runtime::event_loop::run_microtasks;
 use core_runtime::runtime::{clear_global_initializers, register_global_initializer, Runtime};

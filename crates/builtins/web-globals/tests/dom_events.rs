@@ -8,6 +8,9 @@
 //! headless harness cannot run), an idlharness test that is not enabled, or —
 //! in the case of GC interaction — something WPT cannot express at all.
 
+// This file contains nothing platform-specific, so skip it on wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use core_runtime::test_util::eval_with_setup;
 
 fn setup() {
