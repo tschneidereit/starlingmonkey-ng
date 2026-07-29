@@ -5,7 +5,8 @@
 # Usage:
 #   just build           Build the project (debug mode)
 #   just test            Run all Rust tests
-#   just wpt-setup       Clone the WPT test suite
+#   just clone-wpt-tests Clone the WPT test suite
+#   just wpt-setup       Add the WPT hosts entries to /etc/hosts
 #   just wpt-test        Run all WPT tests
 #   just wpt-test base64 Run WPT tests matching "base64"
 #   just wpt-update      Run WPT tests and update expectations
@@ -29,7 +30,7 @@ test *TARGET:
 clone-wpt-tests *ARGS:
     ./scripts/clone-wpt.sh {{ARGS}}
 
-# Clone the WPT test suite (shallow clone, ~200MB).
+# Add the hosts entries the WPT server needs to /etc/hosts.
 wpt-setup *ARGS:
     cat deps/wpt-hosts | sudo tee -a /etc/hosts
 
@@ -66,30 +67,32 @@ clippy *ARGS:
     cargo clippy {{ARGS}}
 
 # Run GC zeal stress tests.
-gc-zeal:
-    ./scripts/test-gc-zeal.sh
+# Defaults to quick tests on the `js` and `core-runtime` packages.
+# See `./scripts/test-gc-zeal.sh` for usage info.
+gc-zeal *ARGS:
+    ./scripts/test-gc-zeal.sh {{ARGS}}
 
-# Run crown lint checker.
-crown:
+# Run crown static GC analysis.
+check-gc:
     ./scripts/check-crown.sh --workspace --examples
 
-# Run most checks: formatting, clippy, tests.
+# Run basic checks: formatting, clippy, tests.
 check:
     just fmt-check --all
     just clippy --all
     just test --examples
 
-# Run most checks: `check` + `crown` + `gc-zeal`.
+# Run most checks: `check` + `check-gc` + `gc-zeal`.
 check-all:
     just check
-    just crown
+    just check-gc
     just gc-zeal
 
-# Run all checks: formatting, clippy, tests.
+# Run basic checks: formatting, clippy, tests.
 check-wasm:
-    just fmt-check --all --exclude tools
+    just fmt-check --all
     just clippy --all
-    just test --examples --target=wasm32-wasip2
+    just test-wasm --examples
 
 # Build for wasm32-wasip2.
 build-wasm *TARGET:

@@ -24,11 +24,10 @@ JS modules, and functions and properties on the global object.
 - [Error Handling](#error-handling)
 - [Inheritance](#inheritance)
 - [Promise / Async](#promise--async)
-- [Building](#building)
-- [Running Tests](#running-tests)
+- [Building and Testing](#building-and-testing)
 - [Web Platform Tests (WPT)](#web-platform-tests-wpt)
-- [GC Rooting Linter (Crown)](#gc-rooting-linter-crown)
-- [Architecture](#architecture)
+- [GC Rooting Checks](#gc-rooting-checks)
+- [Key Design Points](#key-design-points)
 
 ---
 
@@ -43,8 +42,15 @@ starling script.js
 ES module features work out of the box — `import`/`export`, strict mode, and
 multi-file projects:
 
-```bash
-# main.js
+```js
+// greet.js
+export function greet(name) {
+  return `hello, ${name}`;
+}
+```
+
+```js
+// main.js
 import { greet } from "./greet.js";
 console.log(greet("world"));
 ```
@@ -74,8 +80,9 @@ StarlingMonkey's suite of builtins is a work in progress for now.
 ### C++ built-ins
 
 The previous incarnation of StarlingMonkey was written in C++. This one has
-support for running built-ins from that version, in the [crates/builtins/cpp-builtins]()
-crate. Only the old `console` builtin is added right now.
+support for running built-ins from that version, in the
+[crates/builtins/cpp-builtins](crates/builtins/cpp-builtins) crate. Only the old
+`console` builtin is added right now.
 
 Builtins are tested against the
 [Web Platform Tests](https://github.com/web-platform-tests/wpt) suite running
@@ -86,10 +93,10 @@ on both native and `wasm32-wasip2` targets.
 ## CLI Reference
 
 ```
-starling [OPTIONS] [PATH]
+starling [OPTIONS] [SCRIPT_PATH]
 
 Arguments:
-  [PATH]   Path to the entry JS/MJS file (default: ./index.js)
+  [SCRIPT_PATH]   Path to the entry JS/MJS file (default: ./index.js)
 
 Options:
   -e, --eval <SCRIPT>                Evaluate inline script instead of a file
@@ -135,10 +142,10 @@ impl Counter {
     fn new(initial: i32) -> Self { Self { value: initial } }
 
     #[method]
-    fn increment(&mut self) { self.value += 1; }
+    fn increment(&mut self) { self.data_mut().value += 1; }
 
     #[getter]
-    fn value(&self) -> i32 { self.value }
+    fn value(&self) -> i32 { self.data().value }
 
     #[static_method]
     fn zero() -> Self { Self { value: 0 } }
@@ -146,17 +153,30 @@ impl Counter {
 
 // Register on the JS global and create an instance from Rust:
 Counter::add_to_global(&scope, global);
-let c = Counter::new(&scope, 0);   // Counter<'s> stack newtype
+let c: Result<Counter<'_>, ExnThrown> = Counter::new(&scope, 0);
 ```
 
-The `#[jsclass]` macro generates three types from the annotated struct, allowing
+Inside `#[jsmethods]`, `self` is the stack newtype, not the data struct, so
+fields are reached through `self.data()` and `self.data_mut()` rather than
+directly. From Rust, the generated constructor allocates a JS object and so
+returns `Result<Counter<'s>, ExnThrown>`.
+
+Note: `self.data()` and `self.data_mut()` should only ever be used ephemerally.
+Otherwise there's a risk of having multiple incompatible borrows, which we
+can't statically guard against. There's a dynamic check, but it results in
+slightly opaque error stacks and is hence hard to debug.
+
+The `#[jsclass]` macro generates two types from the annotated struct, allowing
 the type to be used from JS and Rust while ensuring proper GC rooting:
 
 | Generated type | Purpose |
 |----------------|---------|
 | `CounterImpl` | Inner data struct implementing `ClassDef` (`#[doc(hidden)]`). |
 | `Counter<'s>` | Stack newtype wrapping `Stack<'s, CounterImpl>` — use within a GC scope. |
-| `CounterRef` | Heap ref wrapping `Heap<CounterImpl>` — store inside `#[derive(Traceable)]` structs, such as other builtins. |
+
+To store a reference to an instance in a long-lived struct, hold a
+`Heap<CounterImpl>` inside a `#[derive(Traceable)]` struct — see
+[`#[derive(Traceable)]`](#derivetraceable).
 
 **`#[jsclass]` options:**
 
@@ -173,11 +193,10 @@ the type to be used from JS and Rust while ensuring proper GC rooting:
 |-----------|------|
 | `#[constructor]` | Called when JS code runs `new Counter(...)`. |
 | `#[method]` / `#[method(name = "jsName")]` | Instance method on the prototype. |
-| `#[getter]` | Read-only JS property accessor (`obj.x`). |
-| `#[setter]` | Write accessor; paired with matching getter by name. |
-| `#[property]` | Convenience: generates both getter and looks for a `set_<name>` setter. |
+| `#[getter]` | Read accessor for a JS property (`obj.x`). |
+| `#[setter]` | Write accessor; `fn set_x(&mut self, v: T)` pairs with the `x` getter. |
 | `#[static_method]` | Method on the constructor (`Counter.zero()`). |
-| `#[destructor]` | Called by SpiderMonkey just before the object is freed. |
+| `#[destructor]` | Runs during GC finalization, before the Rust data is dropped. |
 
 **Return types:**
 
@@ -196,16 +215,17 @@ the constructor:
 
 ```rust
 #[jsmethods]
-impl DOMException {
-    pub const INDEX_SIZE_ERR: u16 = 1;
-    pub const NOT_FOUND_ERR: u16 = 8;
+impl Counter {
+    pub const MIN: i32 = 0;
+    pub const MAX: i32 = 1000;
     // ...
 }
 ```
 
 **Variadic arguments:**
 
-Use `RestArgs<T>` as the last parameter to collect extra typed arguments:
+Use `RestArgs<T>` as the last parameter to collect the remaining arguments, each
+converted with `FromJSVal`:
 
 ```rust
 #[static_method]
@@ -214,7 +234,13 @@ fn sum(a: f64, rest: RestArgs<f64>) -> f64 {
 }
 ```
 
-There's also support for untyped access to arguments via `&CallArgs`.
+This works on any callable that takes arguments: `#[method]`,
+`#[static_method]`, `#[constructor]`, and the free functions exposed by
+`#[jsmodule]`, `#[jsglobals]`, `#[jsnamespace]`, and `#[webidl_namespace]`.
+
+The element type must implement `FromJSVal` and be GC-safe where applicable.
+Use `RestArgs<HandleValue<'_>>` for untyped elements, or take the raw `&CallArgs`
+for untyped access to the whole argument list.
 
 ### `#[jsmodule]`
 
@@ -222,7 +248,7 @@ Turn a Rust `mod` block into an importable ES module:
 
 ```rust
 #[jsmodule]
-mod math {
+mod math_utils {
     pub const PI: f64 = std::f64::consts::PI;
 
     pub fn add(a: f64, b: f64) -> f64 { a + b }
@@ -233,11 +259,15 @@ mod math {
 }
 
 // Register before evaluating any JS that imports it:
-unsafe { math::register(&scope); }
+unsafe { math_utils::register(&scope); }
 ```
 
+Exported functions are renamed to camelCase; constants keep their declared name.
+The import specifier is the `mod` name camelCased, so `mod math_utils` is
+imported as `"mathUtils"`:
+
 ```js
-import { PI, add, safeDivide } from "math";
+import { PI, add, safeDivide } from "mathUtils";
 ```
 
 Override the import specifier: `#[jsmodule(name = "my-math")]`
@@ -260,8 +290,13 @@ mod app_globals {
 }
 
 // Install on a global object:
-unsafe { app_globals::add_to_global(&scope, global); }
+app_globals::add_to_global(&scope, global);
 ```
+
+JS sees `greet` and `APP_NAME`: as everywhere else, functions are camelCased
+and constants keep their declared name.
+
+`pub use`'d classes must be `#[jsclass]`es or `#[webidl_interface]`s.
 
 ### `#[jsnamespace]` / `#[webidl_namespace]`
 
@@ -270,11 +305,14 @@ Create a plain singleton object (like `console`):
 ```rust
 #[jsnamespace(name = "console")]
 mod console_ns {
-    pub fn log(scope: &Scope<'_>, rest: RestArgs<Value>) { /* ... */ }
-    pub fn warn(scope: &Scope<'_>, rest: RestArgs<Value>) { /* ... */ }
+    use js::gc::scope::Scope;
+    use js::native::CallArgs;
+
+    pub fn log(scope: &Scope<'_>, args: &CallArgs) { /* ... */ }
+    pub fn warn(scope: &Scope<'_>, args: &CallArgs) { /* ... */ }
 }
 
-unsafe { console_ns::add_to_global(&scope, global); }
+console_ns::add_to_global(&scope, global);
 ```
 
 `#[webidl_namespace]` is the same but auto-sets `Symbol.toStringTag` per
@@ -292,7 +330,17 @@ struct DOMException {
     name: String,
     message: String,
 }
+
+#[webidl_methods]
+impl DOMException {
+    pub const INDEX_SIZE_ERR: u16 = 1;
+    // ... constructors, methods, getters, as with `#[jsmethods]`
+}
 ```
+
+Pair it with `#[webidl_methods]` rather than `#[jsmethods]`: it takes the same
+member attributes, but registers methods with WebIDL's property flags (they're
+enumerable, unlike JS builtins').
 
 Same options as `#[jsclass]`: `name`, `extends`, `js_proto`, `to_string_tag`.
 
@@ -304,14 +352,16 @@ stored in your Rust structs:
 ```rust
 #[derive(Traceable)]
 struct AppState {
-    node: MyClassRef,           // traced automatically
+    node: Heap<MyClassImpl>,    // traced automatically
     #[no_trace]
     counter: u32,               // excluded from tracing
 }
 ```
 
-Use `MyClassRef` (the heap-ref type from `#[jsclass]`) whenever storing a JS
-object reference in a long-lived struct.
+Whenever a JS object reference outlives the GC scope it was created in, store
+it as `Heap<MyClassImpl>` (naming the inner data type from `#[jsclass]`) inside
+a `#[derive(Traceable)]` struct. Root it back onto the stack with
+`Heap::get(&scope)`, which hands back the stack newtype (`MyClass<'s>`).
 
 ---
 
@@ -321,7 +371,7 @@ Methods returning `Result<T, E>` where `E: ThrowException` throw typed JS
 exceptions on `Err`:
 
 ```rust
-use core_runtime::class::{TypeError, RangeError, SyntaxError};
+use js::error::{TypeError, RangeError, SyntaxError};
 
 #[jsmethods]
 impl MyClass {
@@ -343,22 +393,28 @@ impl MyClass {
 | `RangeError(String)` | `RangeError` |
 | `SyntaxError(String)` | `SyntaxError` |
 | `String` | automatically converted to `TypeError` |
-| `DOMExceptionError { name, message }` | `DOMException` |
+| `ExnThrown` | no-op: an exception is already pending |
+
+The first four live in `js::error`. `web_globals::dom_exception` adds
+`DOMExceptionError { name, message }`, which throws a `DOMException`.
 
 Implement `ThrowException` for custom error types:
 
 ```rust
-use core_runtime::class::ThrowException;
+use js::error::{ExnThrown, ThrowException, TypeError};
 use js::gc::scope::Scope;
 
 struct MyError(String);
 
 impl ThrowException for MyError {
-    unsafe fn throw(self, scope: &Scope<'_>) {
-        TypeError(self.0).throw(scope);
+    fn throw(self, scope: &Scope<'_>) -> ExnThrown {
+        TypeError(self.0).throw(scope)
     }
 }
 ```
+
+`ExnThrown` is a witness that a JS exception is now pending and must be percolated up
+until the exception is handled.
 
 ---
 
@@ -367,6 +423,12 @@ impl ThrowException for MyError {
 ```rust
 #[jsclass]
 struct Shape { color: String }
+
+#[jsmethods]
+impl Shape {
+    #[constructor]
+    fn new(color: String) -> Self { Self { color } }
+}
 
 #[jsclass(extends = Shape)]
 struct Circle {
@@ -382,16 +444,22 @@ impl Circle {
     }
 
     #[method]
-    fn area(&self) -> f64 { std::f64::consts::PI * self.radius * self.radius }
+    fn area(&self) -> f64 {
+        std::f64::consts::PI * self.data().radius * self.data().radius
+    }
 }
 ```
 
-Upcast and downcast from Rust:
+The parent needs its own `#[jsmethods]` block with a `#[constructor]`: that's
+what generates the `Shape::init` used to build the `parent` field.
+
+Cast between the two from Rust with `cast`, which checks the JS object's type
+tag in both directions:
 
 ```rust
 let circle: Circle<'s> = /* ... */;
-let shape: Shape<'s> = circle.upcast();             // always succeeds
-let back: Result<Circle<'s>, _> = shape.cast::<Circle<'_>>();  // type-checked
+let shape: Shape<'s> = circle.cast::<Shape<'_>>().unwrap();   // widening
+let back: Result<Circle<'s>, _> = shape.cast::<Circle<'_>>(); // narrowing
 ```
 
 ---
@@ -403,7 +471,7 @@ let back: Result<Circle<'s>, _> = shape.cast::<Circle<'_>>();  // type-checked
 Return `JSPromise` from any method to create a JS `Promise`:
 
 ```rust
-use libstarling::js::JSPromise;
+use js::promise::JSPromise;
 
 #[jsmethods]
 impl Fetcher {
@@ -417,58 +485,47 @@ impl Fetcher {
 }
 ```
 
-The method returns the `Promise` to JS immediately. The runtime drives all
-pending futures to completion via `drain_promises(&scope)`.
+The method returns the `Promise` to JS immediately, and the future is queued on
+the event loop. `core_runtime::event_loop::run_to_completion`, which
+`libstarling::run` drives for you, polls it and settles the `Promise` with the
+future's `Ok`/`Err`. Two other constructors cover the cases `new` doesn't:
+`JSPromise::new_void` for futures resolving to `()`, and `JSPromise::from_outcome`
+when settling needs the `JSContext` (as `fetch` does, to build its `Response`).
 
 ---
 
-## Building
+## Building and Testing
 
 **Prerequisites:**
 
-- Rust toolchain (edition 2021)
+- [Rust toolchain](./rust-toolchain.toml)
+- [just](https://github.com/casey/just)
+- [WASI-SDK 33](https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-33)
+- [Node.js](https://nodejs.org/), to run the WPT harness
 
-Note: Builds sometimes have to compile SpiderMonkey from source, which can take
-several minutes.
+Checking, building, and testing is done using a [`justfile`](justfile).
+Commands include:
 
 ```bash
-cargo build
+just build             # debug build
+just test              # all Rust tests, use `-p` for specific packages
+just wpt-test          # all Web Platform Tests, optionally filtered by a pattern
+just fmt               # format code
+just clippy            # run clippy
+just check             # fmt-check + clippy + tests
+just check-all         # more extensive tests, including GC checks
 ```
+
+`just test` invokes `cargo test` with the right feature set and passes
+`--workspace` by default. It accepts all additional arguments to `cargo test`,
+so to test specific packages, pass `-p [package name]`.
 
 **For WebAssembly (WASIp2):**
 
 ```bash
-WASI_SDK_PATH=/opt/wasi-sdk-25 cargo build --target wasm32-wasip2
-```
-
----
-
-## Running Tests
-
-```bash
-cargo test --workspace
-
-# With SpiderMonkey debug assertions (recommended — catches GC issues):
-cargo test --features debugmozjs --workspace
-```
-
-A [`justfile`](justfile) provides shortcuts (requires
-[just](https://github.com/casey/just)):
-
-```bash
-just test              # all Rust tests
-just test-debug        # with debugmozjs assertions
-just build             # debug build
-just fmt               # format code
-just clippy            # run clippy
-just check             # fmt-check + clippy + tests
-```
-
-To stress-test under all GC zeal modes:
-
-```bash
-bash scripts/test-gc-zeal.sh        # quick mode
-bash scripts/test-gc-zeal.sh full   # exhaustive
+just build-wasm        # debug build for wasm32-wasip2
+just test-wasm         # all Rust tests, on wasm32-wasip2
+just check-wasm        # fmt-check + clippy + wasm tests
 ```
 
 ---
@@ -537,59 +594,39 @@ skipping a whole file gives up the subtests that would have passed.
 
 ---
 
-## GC Rooting Linter (Crown)
+## GC Rooting Checks
 
-The workspace includes a [modified version](crown/) of Servo's
-[Crown](https://github.com/servo/servo/tree/main/support/crown) `rustc` plugin
-that statically verifies GC rooting safety — catching cases where raw GC
-pointers are used without proper rooting.
+StarlingMonkey's `js` API tries hard to provide everything needed to write code that's
+GC safe, i.e. doesn't run the risk of GC causing use-after-free, etc. The correctness
+of these APIs depends on annotations that are statically checked by a custom linter
+called [crown](./crown), adapted from [Servo's lint of the same name][crown].
+
+`crown` uses annotations that enable tracking of GC references, and enforces that wherever a
+GC reference is held or stored, it's properly rooted. All core types representing GC references
+are annotated with `#[js::must_root]`, which means they must be stored in `Stack`, `Handle`,
+`Heap`, or more advanced types such as `RootedTraceableBox`. Builtins created using one of the 
+macros such as `#[jsclass]` or `#[jsmodule]` are automatically annotated with `#[js::must_root]`.
+
+The analysis can be run using `just check-gc`, and is also part of `just check-all`.
+
+[crown]: https://github.com/servo/servo/tree/main/support/crown
+
+Usually that check should be sufficient when working on anything but the `js` and `core-runtime`
+crates, but to suss out rooting issues not caught by the static analysis, StarlingMonkey also uses
+SpiderMonkey's dynamic GC rooting checks:
 
 ```bash
-bash scripts/check-crown.sh                  # default package
-bash scripts/check-crown.sh -p core-runtime  # specific crate
-bash scripts/check-crown.sh --workspace      # entire workspace
+just gc-zeal                               # quick mode, covering the `js` and `core-runtime` crates
+just gc-zeal full                          # exhaustive checks for the same crates, takes a few minutes
+just gc-zeal full --workspace --examples   # check all the things. Please file a bug if this finds anything!
 ```
 
-The `crown` script enables the `js/crown` Cargo feature, activating
-
-`#[js::must_root]` and `#[js::allow_unrooted_interior]` annotations. Two lints
-are enforced:
-
-- **`js::must_root`** — values of types marked `#[js::must_root]` (e.g.
-  `Heap<T>`) must be stored inside `Trace`-implementing or `must_root` types.
-- **`crown::trace_in_no_trace`** — `#[no_trace]` fields must not contain
-  traceable types.
-
-Types generated by `#[jsclass]`, `#[jsmodule]`, etc. are annotated
-automatically. For manual types, use `#[js::must_root]` or
-`#[js::allow_unrooted_interior]` as appropriate.
+If the dynamic GC checks find anything outside of the `js` and `core-runtime` crates, that indicates a bug
+in either of those crates. Please file a bug report!
 
 ---
 
-## Architecture
-
-```
-starling/               # Binary crate — `starling` executable
-  src/main.rs
-crates/
-  libstarling/          # Public-facing re-export crate
-  core-runtime/         # Core: class system, module loader, event loop
-    src/
-      lib.rs            # run() entry point
-      runtime.rs        # Engine singleton, Runtime struct, GC lifecycle
-      module.rs         # NativeModule trait, file resolver, resolve hook
-      config.rs         # RuntimeConfig (clap CLI parsing)
-      event_loop.rs     # Task-based event loop (timers, promises)
-  builtins/
-    web-globals/        # btoa, atob, console, DOMException
-  starling-macro/       # Proc macros
-  js/                   # Safe SpiderMonkey wrapper (sole mozjs dependency)
-crown/                  # GC rooting linter (rustc plugin)
-scripts/                # check-crown.sh, test-gc-zeal.sh, clone-wpt.sh
-tests/wpt-harness/      # WPT runner and expectation files
-```
-
-### Key Design Points
+## Key Design Points
 
 **GC-safe value ownership**
 

@@ -2,8 +2,9 @@
 #
 # Run tests under various SpiderMonkey GC zeal configurations.
 #
-# GC zeal is controlled by the JS_GC_ZEAL environment variable:
+# SpiderMonkey's GC zeal is controlled by the JS_GC_ZEAL environment variable:
 #   JS_GC_ZEAL="mode,frequency" or "mode1;mode2,frequency"
+# This script sets that env var as follows.
 #
 # Productive zeal modes:
 #   1  - GC on roots change
@@ -17,11 +18,11 @@
 #  18  - Check gray marking
 #
 # Usage:
-#   ./scripts/test-gc-zeal.sh                         # Defaults: full zeal, core-runtime tests
-#   ./scripts/test-gc-zeal.sh --zeal quick             # Quick zeal subset
-#   ./scripts/test-gc-zeal.sh --zeal "2,1"             # Specific zeal setting
-#   ./scripts/test-gc-zeal.sh --zeal quick -p core-runtime
-#   ./scripts/test-gc-zeal.sh --zeal full --examples --workspace
+#   ./scripts/test-gc-zeal.sh                             # Defaults: quick zeal, js and core-runtime tests
+#   ./scripts/test-gc-zeal.sh quick -p js -p core-runtime # Same as above
+#   ./scripts/test-gc-zeal.sh full                        # Full set of zeal modes, quite slow indeed
+#   ./scripts/test-gc-zeal.sh "2,1"                       # Specific zeal setting
+#   ./scripts/test-gc-zeal.sh full --workspace --examples # All the modes, all the tests, none of the quickness
 set -euo pipefail
 
 # Zeal configurations, ordered from fastest to slowest.
@@ -45,10 +46,15 @@ FULL_CONFIGS=(
 )
 
 # --- Parse arguments ---
-# Extract --zeal <mode> from the argument list; everything else is
-# forwarded to `cargo test`.
-MODE="full"
+# Extract the zeal mode from the argument list; everything else is forwarded
+# to `cargo test`. The mode is recognized as `--zeal <mode>`, as a bare
+# `quick`/`full`, or as a bare JS_GC_ZEAL string such as "2,1" or "1;2;4,1".
+MODE="quick"
 CARGO_ARGS=()
+
+# A zeal string is `mode[;mode...],frequency`. Cargo test filters and flags
+# never look like this, so matching it as a bare argument is unambiguous.
+ZEAL_RE='^[0-9]+(;[0-9]+)*,[0-9]+$'
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -56,16 +62,35 @@ while [[ $# -gt 0 ]]; do
             MODE="${2:?--zeal requires a value (quick, full, or a JS_GC_ZEAL string)}"
             shift 2
             ;;
+        quick|full)
+            MODE="$1"
+            shift
+            ;;
         *)
-            CARGO_ARGS+=("$1")
+            if [[ "$1" =~ $ZEAL_RE ]]; then
+                MODE="$1"
+            else
+                CARGO_ARGS+=("$1")
+            fi
             shift
             ;;
     esac
 done
 
-# Default cargo test arguments when none are provided.
-if [[ ${#CARGO_ARGS[@]} -eq 0 ]]; then
-    CARGO_ARGS=(-p core-runtime)
+# Select the js and core-runtime packages unless the caller selected packages
+# themselves.
+PACKAGE_SELECTED=false
+for arg in ${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}; do
+    case "$arg" in
+        -p*|--package|--package=*|--workspace|--all)
+            PACKAGE_SELECTED=true
+            break
+            ;;
+    esac
+done
+
+if [[ "$PACKAGE_SELECTED" == false ]]; then
+    CARGO_ARGS=(-p js -p core-runtime ${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"})
 fi
 
 # Ensure debugmozjs is enabled for GC zeal testing

@@ -101,17 +101,18 @@ fn main() {
     // ====================================================================
     // Test 4: Constants available on global
     // ====================================================================
+    // Constants keep their declared Rust name — only functions are camelCased.
     println!("Test 4: Global constants");
-    let rval = evaluate_with_filename(&scope, "version", "test3.js", 1).expect("version failed");
+    let rval = evaluate_with_filename(&scope, "VERSION", "test3.js", 1).expect("VERSION failed");
     let version = String::from_jsval(&scope, rval, ()).expect("null string");
     assert_eq!(version, "1.0.0");
-    println!("  PASSED: version = '{}'", version);
+    println!("  PASSED: VERSION = '{}'", version);
 
     let rval =
-        evaluate_with_filename(&scope, "maxRetries", "test4.js", 1).expect("maxRetries failed");
+        evaluate_with_filename(&scope, "MAX_RETRIES", "test4.js", 1).expect("MAX_RETRIES failed");
     assert!(rval.is_int32());
     assert_eq!(rval.to_int32(), 3);
-    println!("  PASSED: maxRetries = {}", rval.to_int32());
+    println!("  PASSED: MAX_RETRIES = {}", rval.to_int32());
 
     // ====================================================================
     // Test 5: Error-returning function

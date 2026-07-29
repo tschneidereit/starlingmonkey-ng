@@ -34,9 +34,12 @@
 //! let scope = rt.default_global();
 //! unsafe {
 //!     register_module::<my_math::js_module>(&scope);
-//!     // JS can now: import { PI, add } from "my_math";
+//!     // JS can now: import { PI, add } from "myMath";
 //! }
 //! ```
+//!
+//! The specifier is the `mod` name camelCased, unless overridden with
+//! `#[jsmodule(name = "...")]`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -87,7 +90,7 @@ pub enum ModuleExport {
 /// functions and constants as ES module exports.
 pub trait NativeModule: 'static {
     /// The module specifier string used in JS `import` statements.
-    /// e.g. `"my_math"` for `import { add } from "my_math";`
+    /// e.g. `"myMath"` for `import { add } from "myMath";`
     const NAME: &'static str;
 
     /// Return the list of exports this module provides.

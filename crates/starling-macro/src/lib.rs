@@ -1031,29 +1031,10 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
 
             // Rewrite RestArgs<T> in the function signature to use the
             // fully-qualified type path so the impl block compiles.
-            if info.has_rest_args {
-                let inner_ty = info
-                    .rest_inner_type
-                    .clone()
-                    .unwrap_or_else(|| syn::parse_quote!(::js::native::Value));
-                // Disallow GC-unsafe `RestArgs<Value>`.
-                if last_segment_is(&inner_ty, "Value") {
-                    attr_error.get_or_insert(syn::Error::new_spanned(
-                        &fn_item.sig.ident,
-                        "`RestArgs<Value>` is not GC-safe. Use `RestArgs<HandleValue<'_>>` or \
-                         `&CallArgs` instead.",
-                    ));
-                    break;
-                }
-                for arg in fn_item.sig.inputs.iter_mut() {
-                    if let FnArg::Typed(pat_ty) = arg {
-                        if is_rest_args_type(&pat_ty.ty) {
-                            *pat_ty.ty = syn::parse_quote! {
-                                ::js::class::RestArgs<#inner_ty>
-                            };
-                        }
-                    }
-                }
+            let fn_name = fn_item.sig.ident.clone();
+            if let Err(e) = rewrite_rest_args_in_sig(&mut fn_item.sig, &fn_name) {
+                attr_error.get_or_insert(e);
+                break;
             }
 
             methods.push(info);
@@ -1607,16 +1588,22 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     }
                 }
             } else {
-                let param_decls: Vec<_> = method
+                let mut param_decls: Vec<_> = method
                     .params
                     .iter()
                     .map(|(name, ty)| quote! { #name: #ty })
                     .collect();
-                let param_names: Vec<_> = method
+                let mut param_names: Vec<_> = method
                     .params
                     .iter()
                     .map(|(name, _)| quote! { #name })
                     .collect();
+
+                if let Some(rest_name) = method.rest_arg_name.as_ref() {
+                    let inner_ty = rest_args_element_type(method.rest_inner_type.as_ref());
+                    param_decls.push(quote! { #rest_name: ::js::class::RestArgs<#inner_ty> });
+                    param_names.push(quote! { #rest_name });
+                }
 
                 let call = if method.has_cx {
                     quote! { #inner_name::#ctor_fn_name(scope, #(#param_names),*) }
@@ -2037,8 +2024,8 @@ fn is_rest_args_type(ty: &Type) -> bool {
         || s.contains("::RestArgs<")
 }
 
-/// Extract the inner type from `RestArgs<T>`. Returns `None` for bare `RestArgs`
-/// (which defaults to `Value`).
+/// Extract the inner type from `RestArgs<T>`. Returns `None` for a bare
+/// `RestArgs`.
 fn extract_rest_args_inner_type(ty: &Type) -> Option<Type> {
     if let Type::Path(type_path) = ty {
         let last_seg = type_path.path.segments.last()?;
@@ -2052,6 +2039,149 @@ fn extract_rest_args_inner_type(ty: &Type) -> Option<Type> {
         }
     }
     None
+}
+
+/// The element type a `RestArgs<T>` collects into.
+///
+/// [`rewrite_rest_args_in_sig`] rejects both a bare `RestArgs` and an owned
+/// `Value` element before any codegen runs, so every callable that reaches this
+/// point declared a usable element type. A `None` here would mean that check was
+/// bypassed, which is a bug in this macro rather than in the user's code.
+/// (Changing the callsites to unwrap the `Option` would create more noise than
+/// it's worth, so an unwrap here it is.)
+fn rest_args_element_type(declared: Option<&Type>) -> Type {
+    declared
+        .cloned()
+        .expect("bare `RestArgs` must be rejected by `rewrite_rest_args_in_sig` before codegen")
+}
+
+/// Rewrite every `RestArgs<T>` parameter in `sig` to the fully-qualified
+/// `::js::class::RestArgs<T>`, and reject the element types that can't work:
+/// a missing one (bare `RestArgs`) and the GC-unsafe owned `Value`.
+///
+/// Shared by `#[jsmethods]` and by the `mod`-block macros (`#[jsmodule]`,
+/// `#[jsglobals]`, `#[jsnamespace]`, `#[webidl_namespace]`).
+///
+/// Errors are spanned on the name of the function or method whose signature this
+/// is, because the parameter type itself has usually already been replaced by
+/// the time a caller reports one.
+fn rewrite_rest_args_in_sig(sig: &mut syn::Signature, name: &Ident) -> syn::Result<()> {
+    let declared = sig.inputs.iter().find_map(|arg| match arg {
+        FnArg::Typed(pat_ty) if is_rest_args_type(&pat_ty.ty) => {
+            Some(extract_rest_args_inner_type(&pat_ty.ty))
+        }
+        _ => None,
+    });
+    let Some(declared) = declared else {
+        return Ok(());
+    };
+
+    // `&CallArgs` already exposes every argument, including the ones a tail
+    // would collect, and the raw call path passes it instead of the extracted
+    // parameters, so a `RestArgs` alongside it would be silently dropped.
+    if sig
+        .inputs
+        .iter()
+        .any(|arg| matches!(arg, FnArg::Typed(pat_ty) if is_callargs_param_type(&pat_ty.ty)))
+    {
+        return Err(syn::Error::new_spanned(
+            name,
+            "`RestArgs` cannot be combined with `&CallArgs`: `&CallArgs` already \
+             provides every argument. Use one or the other.",
+        ));
+    }
+
+    let Some(inner_ty) = declared else {
+        return Err(syn::Error::new_spanned(
+            name,
+            "`RestArgs` needs an element type. Use `RestArgs<HandleValue<'_>>` to \
+             collect untyped arguments, or name a converted type such as \
+             `RestArgs<f64>`.",
+        ));
+    };
+
+    if last_segment_is(&inner_ty, "Value") {
+        return Err(syn::Error::new_spanned(
+            name,
+            "`RestArgs<Value>` is not GC-safe. Use `RestArgs<HandleValue<'_>>` or \
+             `&CallArgs` instead.",
+        ));
+    }
+
+    for arg in sig.inputs.iter_mut() {
+        if let FnArg::Typed(pat_ty) = arg {
+            if is_rest_args_type(&pat_ty.ty) {
+                *pat_ty.ty = syn::parse_quote! { ::js::class::RestArgs<#inner_ty> };
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Emit the statement that collects a variadic tail into the `RestArgs<T>` bound
+/// to `rest_name`, converting each argument from index `start_idx` onwards with
+/// `FromJSVal`. Returns an empty token stream when the callable doesn't use rest
+/// args.
+///
+/// Takes the same context parameters as [`gen_arg_extractions`], and with the
+/// same meaning: a JSNative trampoline names its argument vector `__args` and
+/// owns its `scope`, while a constructor registrar names it `args` and receives
+/// `scope` by reference; `use_question_mark` picks the early return that
+/// context needs (`Err(ExnThrown)` for the registrar, whose body is a `Result`,
+/// versus `false` for the trampoline, which returns `bool` to SpiderMonkey).
+fn gen_rest_setup(
+    rest_name: Option<&Ident>,
+    rest_inner_type: Option<&Type>,
+    start_idx: usize,
+    args_expr: &proc_macro2::TokenStream,
+    use_question_mark: bool,
+    scope_expr: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let Some(rest_name) = rest_name else {
+        return quote! {};
+    };
+    let start_idx = start_idx as u32;
+    let inner_ty = rest_args_element_type(rest_inner_type);
+    // Integer element types (and integer-element containers) convert with
+    // `ConversionBehavior`, everything else uses `()`. Mirrors the config
+    // selection in `gen_arg_extractions` for ordinary parameters.
+    let rest_config = if is_integer_type(&inner_ty) || is_int_container_type(&inner_ty) {
+        quote! { ::js::conversion::ConversionBehavior::Default }
+    } else {
+        quote! { () }
+    };
+    let fail = if use_question_mark {
+        quote! { return Err(::js::error::ExnThrown); }
+    } else {
+        quote! { return false; }
+    };
+    quote! {
+        let #rest_name = {
+            let __argc: u32 = #args_expr.argc_;
+            let mut __rest_vec = ::std::vec::Vec::with_capacity(
+                (__argc.saturating_sub(#start_idx)) as usize,
+            );
+            for __i in #start_idx..__argc {
+                let __handle = unsafe {
+                    ::js::native::Handle::from_raw(#args_expr.get(__i))
+                };
+                match <#inner_ty as ::js::conversion::FromJSVal<'_, '_>>::from_jsval(
+                    #scope_expr,
+                    __handle,
+                    #rest_config
+                ) {
+                    Ok(__v) => __rest_vec.push(__v),
+                    Err(e) => {
+                        if let ::js::conversion::ConversionError::Failure(reason) = e {
+                            ::js::error::throw_type_error(#scope_expr, &*reason);
+                        }
+                        #fail
+                    },
+                }
+            }
+            ::js::class::RestArgs::new(__rest_vec)
+        };
+    }
 }
 
 /// Walk a `UseTree` to find the leaf `Ident` (e.g., `super::Vec2` → `Vec2`).
@@ -2486,7 +2616,19 @@ fn gen_constructor_body(info: &MethodInfo, type_name: &Ident) -> proc_macro2::To
     let ctor_fn = &info.fn_item.sig.ident;
     let arg_extractions =
         gen_arg_extractions(&info.params, quote!(args), true, quote!(scope), info.nargs);
-    let arg_names: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
+    let mut arg_names: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
+
+    let rest_setup = gen_rest_setup(
+        info.rest_arg_name.as_ref(),
+        info.rest_inner_type.as_ref(),
+        info.params.len(),
+        &quote!(args),
+        true,
+        &quote!(scope),
+    );
+    if let Some(rest_name) = info.rest_arg_name.as_ref() {
+        arg_names.push(quote!(#rest_name));
+    }
 
     // Build the constructor call, passing scope and/or args if the Rust
     // constructor requested them via `scope: &Scope<'_>` or `args: &CallArgs`.
@@ -2520,6 +2662,7 @@ fn gen_constructor_body(info: &MethodInfo, type_name: &Ident) -> proc_macro2::To
 
     quote! {
         #(#arg_extractions)*
+        #rest_setup
         #wrapped
     }
 }
@@ -2543,7 +2686,9 @@ fn gen_constructor_body(info: &MethodInfo, type_name: &Ident) -> proc_macro2::To
 /// - `this_extraction` runs before the body for receiver-taking callables (empty
 ///   for free functions, and for `ResultPromise` where it moves into the closure).
 /// - `this_in_closure` is the `?`-style receiver extraction for `ResultPromise`.
-/// - `rest_setup` collects a variadic `RestArgs` parameter (empty otherwise).
+/// - `rest_arg` names the variadic tail's parameter and element type, if there is
+///   one. The collection is emitted here rather than by the caller so that it
+///   lands in the same place as the fixed-argument extractions.
 /// - `instance_type` is the class to mint for `InstanceValue`; `None` for free
 ///   functions, which `classify_return_style` never classifies as `InstanceValue`.
 #[allow(clippy::too_many_arguments)]
@@ -2556,16 +2701,33 @@ fn emit_native_fn(
     call: &proc_macro2::TokenStream,
     this_extraction: &proc_macro2::TokenStream,
     this_in_closure: &proc_macro2::TokenStream,
-    rest_setup: &proc_macro2::TokenStream,
+    rest_arg: Option<(&Ident, Option<&Type>)>,
     instance_type: Option<&Ident>,
 ) -> proc_macro2::TokenStream {
+    let gen_rest = |use_question_mark: bool| {
+        gen_rest_setup(
+            rest_arg.map(|(name, _)| name),
+            rest_arg.and_then(|(_, ty)| ty),
+            params.len(),
+            &quote!(__args),
+            use_question_mark,
+            &quote!(&scope),
+        )
+    };
+
     // For `ResultPromise` the argument extractions live inside the rejecting
     // closure built in the body (so a conversion failure becomes a rejected
     // promise, not a synchronous throw); nothing is emitted here.
-    let arg_extractions = if matches!(return_style, ReturnStyle::ResultPromise) {
+    let is_result_promise = matches!(return_style, ReturnStyle::ResultPromise);
+    let arg_extractions = if is_result_promise {
         Vec::new()
     } else {
         gen_arg_extractions(params, quote!(&__args), false, quote!(&scope), nargs)
+    };
+    let rest_setup = if is_result_promise {
+        quote! {}
+    } else {
+        gen_rest(false)
     };
 
     let body = match return_style {
@@ -2618,10 +2780,12 @@ fn emit_native_fn(
             // `?`-propagating variant; `#call` returns the `Result`.
             let extractions =
                 gen_arg_extractions(params, quote!(&__args), true, quote!(&scope), nargs);
+            let rest_setup = gen_rest(true);
             quote! {
                 let __result = (|| -> ::core::result::Result<_, ::js::error::ExnThrown> {
                     #this_in_closure
                     #(#extractions)*
+                    #rest_setup
                     #call
                 })();
                 match __result {
@@ -2763,52 +2927,10 @@ fn gen_method_native(
     };
 
     let call_args: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
-
-    // Generate rest args collection using FromJSVal conversion
-    let rest_setup = if info.has_rest_args {
-        let rest_name = info.rest_arg_name.as_ref().unwrap();
-        let start_idx = info.params.len() as u32;
-        let inner_ty = info
-            .rest_inner_type
-            .clone()
-            .unwrap_or_else(|| syn::parse_quote!(::js::native::Value));
-        // Integer element types (and integer-element containers) convert with
-        // `ConversionBehavior`, everything else uses `()`. Mirrors the config
-        // selection in `gen_arg_extractions` for ordinary parameters.
-        let rest_config = if is_integer_type(&inner_ty) || is_int_container_type(&inner_ty) {
-            quote! { ::js::conversion::ConversionBehavior::Default }
-        } else {
-            quote! { () }
-        };
-        quote! {
-            let #rest_name = {
-                let mut __rest_vec = ::std::vec::Vec::with_capacity(
-                    (argc.saturating_sub(#start_idx)) as usize,
-                );
-                for __i in #start_idx..argc {
-                    let __handle = unsafe {
-                        ::js::native::Handle::from_raw(__args.get(__i))
-                    };
-                    match <#inner_ty as ::js::conversion::FromJSVal<'_, '_>>::from_jsval(
-                        &scope,
-                        __handle,
-                        #rest_config
-                    ) {
-                        Ok(__v) => __rest_vec.push(__v),
-                        Err(e) => {
-                            if let ::js::conversion::ConversionError::Failure(reason) = e {
-                                ::js::error::throw_type_error(&scope, &*reason);
-                            }
-                            return false;
-                        },
-                    }
-                }
-                ::js::class::RestArgs::new(__rest_vec)
-            };
-        }
-    } else {
-        quote! {}
-    };
+    let rest_arg = info
+        .rest_arg_name
+        .as_ref()
+        .map(|name| (name, info.rest_inner_type.as_ref()));
 
     // Build rest arg value for method call
     let rest_arg_expr: Vec<proc_macro2::TokenStream> = if info.has_rest_args {
@@ -2864,7 +2986,7 @@ fn gen_method_native(
         &call,
         &this_extraction,
         &this_in_closure,
-        &rest_setup,
+        rest_arg,
         Some(type_name),
     );
 
@@ -3585,7 +3707,10 @@ pub fn derive_scope_root(input: TokenStream) -> TokenStream {
 
 /// Collect a public free function into a `ModuleFnExport`, filtering out the
 /// optional `scope: &Scope` and `args: &CallArgs` parameters (which are passed
-/// through rather than extracted from JS arguments).
+/// through rather than extracted from JS arguments) and a trailing
+/// `RestArgs<T>` (which is collected from the arguments past the fixed ones).
+///
+/// The function name is camelCased.
 fn parse_free_fn_export(fn_item: &syn::ItemFn) -> ModuleFnExport {
     let fn_name = &fn_item.sig.ident;
     let js_name = unraw(fn_name).to_lower_camel_case();
@@ -3593,6 +3718,8 @@ fn parse_free_fn_export(fn_item: &syn::ItemFn) -> ModuleFnExport {
     let mut params: Vec<(Ident, Type)> = Vec::new();
     let mut has_cx = false;
     let mut is_raw = false;
+    let mut rest_arg_name = None;
+    let mut rest_inner_type = None;
     for arg in &fn_item.sig.inputs {
         if let FnArg::Typed(pat_ty) = arg {
             if is_cx_param_type(&pat_ty.ty) {
@@ -3601,6 +3728,16 @@ fn parse_free_fn_export(fn_item: &syn::ItemFn) -> ModuleFnExport {
             }
             if is_callargs_param_type(&pat_ty.ty) {
                 is_raw = true;
+                continue;
+            }
+            // A variadic tail is not an ordinary parameter: it is collected from
+            // whatever arguments follow the fixed ones, so it must stay out of
+            // `params` for the index arithmetic in `gen_rest_setup` to line up.
+            if is_rest_args_type(&pat_ty.ty) {
+                if let Pat::Ident(pat_ident) = pat_ty.pat.as_ref() {
+                    rest_arg_name = Some(pat_ident.ident.clone());
+                    rest_inner_type = extract_rest_args_inner_type(&pat_ty.ty);
+                }
                 continue;
             }
             if let Pat::Ident(pat_ident) = pat_ty.pat.as_ref() {
@@ -3618,20 +3755,18 @@ fn parse_free_fn_export(fn_item: &syn::ItemFn) -> ModuleFnExport {
         return_style,
         has_cx,
         is_raw,
+        rest_arg_name,
+        rest_inner_type,
     }
 }
 
-/// Collect a public const into a `ModuleConstExport`. `camel_case` controls the
-/// JS name: module and global consts are lower-camelCased, while namespace
-/// (WebIDL) consts keep their declared Rust name.
-fn parse_const_export(const_item: &syn::ItemConst, camel_case: bool) -> ModuleConstExport {
+/// Collect a public const into a `ModuleConstExport`.
+///
+/// Constants keep their declared Rust name, because JS and Rust conventions
+/// match on their naming.
+fn parse_const_export(const_item: &syn::ItemConst) -> ModuleConstExport {
     let const_name = &const_item.ident;
-    let rust_name = unraw(const_name);
-    let js_name = if camel_case {
-        rust_name.to_lower_camel_case()
-    } else {
-        rust_name
-    };
+    let js_name = unraw(const_name);
     let is_ref_type = matches!(&*const_item.ty, Type::Reference(_));
     ModuleConstExport {
         const_name: const_name.clone(),
@@ -3640,13 +3775,84 @@ fn parse_const_export(const_item: &syn::ItemConst, camel_case: bool) -> ModuleCo
     }
 }
 
+/// What a `mod`-block macro found to expose, plus the module body to re-emit.
+#[derive(Default)]
+struct ModExports {
+    fns: Vec<ModuleFnExport>,
+    consts: Vec<ModuleConstExport>,
+    /// Classes named by `pub use`, collected only when the caller asks for them.
+    class_reexports: Vec<Ident>,
+    /// Every item of the original `mod`, re-emitted as written apart from the
+    /// `RestArgs` signature rewrite applied to public functions.
+    items: Vec<proc_macro2::TokenStream>,
+}
+
+/// Walk a `mod` block and collect the public items it exposes to JS.
+///
+/// `#[jsmodule]`, `#[jsglobals]`, `#[jsnamespace]`, and `#[webidl_namespace]`
+/// differ in *where* they install what they find, not in what counts as an
+/// export or how its JS name and signature are derived, so they share this
+/// walk.
+///
+/// `collect_classes` enables the `pub use Foo;` arm, which only `#[jsglobals]`
+/// acts on; elsewhere a `use` is passed through as an ordinary item.
+/// `macro_name` is the spelling used in diagnostics, e.g. `"#[jsmodule]"`.
+fn collect_mod_exports(
+    input: &syn::ItemMod,
+    macro_name: &str,
+    collect_classes: bool,
+) -> syn::Result<ModExports> {
+    let Some((_, items)) = &input.content else {
+        return Err(syn::Error::new_spanned(
+            input,
+            format!("{macro_name} requires an inline mod block"),
+        ));
+    };
+
+    let mut out = ModExports::default();
+    for item in items {
+        match item {
+            // `pub use SomeClass;` / `pub use super::{A, B};` / `pub use X as Y;`
+            // — register the named classes on the global.
+            syn::Item::Use(use_item)
+                if collect_classes && matches!(use_item.vis, syn::Visibility::Public(_)) =>
+            {
+                collect_use_class_idents(&use_item.tree, &mut out.class_reexports).map_err(
+                    |span| {
+                        syn::Error::new(
+                            span,
+                            format!(
+                                "{macro_name} cannot register classes from a glob \
+                                 `use ...::*`; name each class explicitly"
+                            ),
+                        )
+                    },
+                )?;
+                // Keep the use item in the module output for Rust visibility.
+                out.items.push(quote! { #use_item });
+            }
+            syn::Item::Fn(fn_item) if matches!(fn_item.vis, syn::Visibility::Public(_)) => {
+                let mut fn_item = fn_item.clone();
+                let fn_name = fn_item.sig.ident.clone();
+                rewrite_rest_args_in_sig(&mut fn_item.sig, &fn_name)?;
+                out.fns.push(parse_free_fn_export(&fn_item));
+                out.items.push(quote! { #fn_item });
+            }
+            syn::Item::Const(const_item)
+                if matches!(const_item.vis, syn::Visibility::Public(_)) =>
+            {
+                out.consts.push(parse_const_export(const_item));
+                out.items.push(quote! { #const_item });
+            }
+            other => out.items.push(quote! { #other }),
+        }
+    }
+    Ok(out)
+}
+
 /// Generate the JSNative trampoline for a free function exported by a module,
 /// the global object, or a namespace. `call_path` is the path to the user's
 /// function's containing module (e.g. `super::my_mod`).
-///
-/// Free functions have no receiver and no `RestArgs`, so this delegates straight
-/// to [`emit_native_fn`] with empty `this`/rest snippets — giving them exactly
-/// the same return-style handling and exception checking as methods.
 fn gen_free_fn_native(
     exp: &ModuleFnExport,
     native_name: &Ident,
@@ -3655,7 +3861,14 @@ fn gen_free_fn_native(
 ) -> proc_macro2::TokenStream {
     let fn_name = &exp.fn_name;
     let name_str = fn_name.to_string();
-    let call_args: Vec<_> = exp.params.iter().map(|(name, _)| quote!(#name)).collect();
+    let mut call_args: Vec<_> = exp.params.iter().map(|(name, _)| quote!(#name)).collect();
+    let rest_arg = exp
+        .rest_arg_name
+        .as_ref()
+        .map(|name| (name, exp.rest_inner_type.as_ref()));
+    if let Some(rest_name) = exp.rest_arg_name.as_ref() {
+        call_args.push(quote!(#rest_name));
+    }
 
     let call = if exp.is_raw {
         quote! { #call_path::#fn_name(&scope, &__args) }
@@ -3672,9 +3885,10 @@ fn gen_free_fn_native(
         &exp.params,
         nargs,
         &call,
+        // Free functions don't have a receiver, so `this` extraction is empty
         &quote! {},
         &quote! {},
-        &quote! {},
+        rest_arg,
         None,
     )
 }
@@ -3685,8 +3899,13 @@ fn gen_free_fn_native(
 
 /// Attribute macro that transforms a `mod` block into a native ES module.
 ///
-/// Public functions become callable JS exports (and remain callable from Rust).
-/// Public `const` items become value exports.
+/// Public functions become callable JS exports renamed to camelCase while
+/// remaining callable from Rust under their original name.
+/// Public `const` items become value exports without camelCasing:
+/// `PI` is exported as `PI`, not `pi`.
+///
+/// The import specifier is the `mod` name camelCased, unless overridden with
+/// `#[jsmodule(name = "...")]`.
 ///
 /// # Usage
 ///
@@ -3701,7 +3920,13 @@ fn gen_free_fn_native(
 /// unsafe { core_runtime::module::register_module::<my_math::js_module>(scope) };
 ///
 /// // Call from Rust:
-/// assert_eq!(my_math::add(1.0, 2.0), 3.0);
+/// assert_eq!(my_math::add(1.0, my_math::PI), 4.14159);
+/// ```
+///
+/// // Call from JS:
+/// ```js
+/// import { PI, add } from "myMath";
+/// console.log(add(1, PI)); // prints 4.14159
 /// ```
 #[proc_macro_attribute]
 pub fn jsmodule(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -3710,39 +3935,19 @@ pub fn jsmodule(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let mod_name = &input.ident;
     let mod_vis = &input.vis;
-    let js_module_name = opts.name.unwrap_or_else(|| mod_name.to_string());
+    let js_module_name = opts
+        .name
+        .unwrap_or_else(|| mod_name.to_string().to_lower_camel_case());
 
-    let items = match &input.content {
-        Some((_, items)) => items,
-        None => {
-            return syn::Error::new_spanned(&input, "#[jsmodule] requires an inline mod block")
-                .to_compile_error()
-                .into();
-        }
+    let ModExports {
+        fns: fn_exports,
+        consts: const_exports,
+        items: original_items,
+        ..
+    } = match collect_mod_exports(&input, "#[jsmodule]", false) {
+        Ok(exports) => exports,
+        Err(e) => return e.to_compile_error().into(),
     };
-
-    // Collect public functions and constants
-    let mut fn_exports: Vec<ModuleFnExport> = Vec::new();
-    let mut const_exports: Vec<ModuleConstExport> = Vec::new();
-    let mut original_items: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    for item in items {
-        match item {
-            syn::Item::Fn(fn_item) if matches!(fn_item.vis, syn::Visibility::Public(_)) => {
-                fn_exports.push(parse_free_fn_export(fn_item));
-                original_items.push(quote! { #fn_item });
-            }
-            syn::Item::Const(const_item)
-                if matches!(const_item.vis, syn::Visibility::Public(_)) =>
-            {
-                const_exports.push(parse_const_export(const_item, true));
-                original_items.push(quote! { #const_item });
-            }
-            other => {
-                original_items.push(quote! { #other });
-            }
-        }
-    }
 
     // Generate JSNative wrappers for each function export
     let mut native_fns: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -3849,6 +4054,10 @@ struct ModuleFnExport {
     return_style: ReturnStyle,
     has_cx: bool,
     is_raw: bool,
+    /// The variadic tail's parameter name and `RestArgs<T>` element type, if the
+    /// function declared one.
+    rest_arg_name: Option<Ident>,
+    rest_inner_type: Option<Type>,
 }
 
 struct ModuleConstExport {
@@ -3863,22 +4072,32 @@ struct ModuleConstExport {
 
 /// Attribute macro that transforms a `mod` block into a set of global JS definitions.
 ///
-/// Public functions become callable JS functions on the global object.
-/// Public `const` items become properties on the global object.
+/// Public functions become callable JS functions on the global object, renamed
+/// to camelCase. Public `const` items become properties on the global object
+/// under their declared name: `PI` stays `PI`, not `pi`.
 /// `pub use ClassName;` items register `#[jsclass]` classes on the global.
 ///
 /// # Usage
 ///
 /// ```rust,ignore
-/// #[::core_runtime::jsglobals]
-/// mod my_globals {
-///     pub use super::MyClass; // registers MyClass on the global
+/// #[jsglobals]
+/// mod my_math {
+///     pub use super::MyExtendedMath; // registers MyExtendedMath on the global
 ///     pub const PI: f64 = 3.14159;
-///     pub fn greet(name: String) -> String { format!("Hello, {name}!") }
+///     pub fn add(a: f64, b: f64) -> f64 { a + b }
 /// }
 ///
 /// // Install on global:
-/// my_globals::add_to_global(&scope, global);
+/// my_math::add_to_global(&scope, global);
+///
+/// // Call from Rust:
+/// assert_eq!(my_math::add(1.0, my_math::PI), 4.14159);
+/// ```
+///
+/// // Call from JS:
+/// ```js
+/// console.log(add(1, PI)); // prints 4.14159
+/// ```
 /// ```
 #[proc_macro_attribute]
 pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -3889,53 +4108,15 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mod_name = &input.ident;
     let mod_vis = &input.vis;
 
-    let items = match &input.content {
-        Some((_, items)) => items,
-        None => {
-            return syn::Error::new_spanned(&input, "#[jsglobals] requires an inline mod block")
-                .to_compile_error()
-                .into();
-        }
+    let ModExports {
+        fns: fn_exports,
+        consts: const_exports,
+        class_reexports,
+        items: original_items,
+    } = match collect_mod_exports(&input, "#[jsglobals]", true) {
+        Ok(exports) => exports,
+        Err(e) => return e.to_compile_error().into(),
     };
-
-    // Collect public functions, constants, and class re-exports
-    let mut fn_exports: Vec<ModuleFnExport> = Vec::new();
-    let mut const_exports: Vec<ModuleConstExport> = Vec::new();
-    let mut class_reexports: Vec<Ident> = Vec::new();
-    let mut original_items: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    for item in items {
-        match item {
-            // `pub use SomeClass;` / `pub use super::{A, B};` / `pub use X as Y;`
-            // — register the named classes on the global.
-            syn::Item::Use(use_item) if matches!(use_item.vis, syn::Visibility::Public(_)) => {
-                if let Err(span) = collect_use_class_idents(&use_item.tree, &mut class_reexports) {
-                    return syn::Error::new(
-                        span,
-                        "#[jsglobals] cannot register classes from a glob `use ...::*`; \
-                         name each class explicitly",
-                    )
-                    .to_compile_error()
-                    .into();
-                }
-                // Keep the use item in the module output for Rust visibility
-                original_items.push(quote! { #use_item });
-            }
-            syn::Item::Fn(fn_item) if matches!(fn_item.vis, syn::Visibility::Public(_)) => {
-                fn_exports.push(parse_free_fn_export(fn_item));
-                original_items.push(quote! { #fn_item });
-            }
-            syn::Item::Const(const_item)
-                if matches!(const_item.vis, syn::Visibility::Public(_)) =>
-            {
-                const_exports.push(parse_const_export(const_item, true));
-                original_items.push(quote! { #const_item });
-            }
-            other => {
-                original_items.push(quote! { #other });
-            }
-        }
-    }
 
     // Generate JSNative wrappers for each function export
     let mut native_fns: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -4101,39 +4282,15 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
         .name
         .unwrap_or_else(|| mod_name.to_string().to_lower_camel_case());
 
-    let items = match &input.content {
-        Some((_, items)) => items,
-        None => {
-            return syn::Error::new_spanned(&input, "#[jsnamespace] requires an inline mod block")
-                .to_compile_error()
-                .into();
-        }
+    let ModExports {
+        fns: fn_exports,
+        consts: const_exports,
+        items: original_items,
+        ..
+    } = match collect_mod_exports(&input, "#[jsnamespace]", false) {
+        Ok(exports) => exports,
+        Err(e) => return e.to_compile_error().into(),
     };
-
-    // Collect public functions and constants
-    let mut fn_exports: Vec<ModuleFnExport> = Vec::new();
-    let mut const_exports: Vec<ModuleConstExport> = Vec::new();
-    let mut original_items: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    for item in items {
-        match item {
-            syn::Item::Fn(fn_item) if matches!(fn_item.vis, syn::Visibility::Public(_)) => {
-                fn_exports.push(parse_free_fn_export(fn_item));
-                original_items.push(quote! { #fn_item });
-            }
-            syn::Item::Const(const_item)
-                if matches!(const_item.vis, syn::Visibility::Public(_)) =>
-            {
-                // WebIDL constants follow Rust's naming convention and keep
-                // their declared name, so they are not camelCased.
-                const_exports.push(parse_const_export(const_item, false));
-                original_items.push(quote! { #const_item });
-            }
-            other => {
-                original_items.push(quote! { #other });
-            }
-        }
-    }
 
     // Generate JSNative wrappers and install calls for each function
     let mut native_fns: Vec<proc_macro2::TokenStream> = Vec::new();

@@ -71,9 +71,9 @@ fn main() {
         evaluate_module(
             &scope,
             r#"
-                import { pi, maxValue } from "math_utils";
-                globalThis._testPI = pi;
-                globalThis._testMaxValue = maxValue;
+                import { PI, MAX_VALUE } from "mathUtils";
+                globalThis._testPI = PI;
+                globalThis._testMaxValue = MAX_VALUE;
             "#,
             "test_constants.mjs",
         )
@@ -105,7 +105,7 @@ fn main() {
         evaluate_module(
             &scope,
             r#"
-                import { add, multiply } from "math_utils";
+                import { add, multiply } from "mathUtils";
                 globalThis._testAdd = add(10, 20);
                 globalThis._testMul = multiply(6, 7);
             "#,
@@ -131,7 +131,7 @@ fn main() {
         evaluate_module(
             &scope,
             r#"
-                import { greet } from "math_utils";
+                import { greet } from "mathUtils";
                 globalThis._testGreet = greet("SpiderMonkey");
             "#,
             "test_greet.mjs",
@@ -152,7 +152,7 @@ fn main() {
         evaluate_module(
             &scope,
             r#"
-                import { safeDivide } from "math_utils";
+                import { safeDivide } from "mathUtils";
                 globalThis._testDiv = safeDivide(100, 4);
             "#,
             "test_divide.mjs",
@@ -173,7 +173,7 @@ fn main() {
         evaluate_module(
             &scope,
             r#"
-                import { safeDivide } from "math_utils";
+                import { safeDivide } from "mathUtils";
                 try {
                     safeDivide(1, 0);
                     globalThis._testDivErr = "no error";
@@ -192,12 +192,13 @@ fn main() {
     println!("  PASSED: Fallible function throws on error");
 
     // ====================================================================
-    // Test 7: rename_all camelCase
+    // Test 7: camelCase renaming of functions
     // ====================================================================
-    println!("Test 7: rename_all camelCase applied");
-    // safe_divide was renamed to safeDivide, max_value to maxValue
-    // If these imports work above, rename_all is correct
-    println!("  PASSED: camelCase renaming verified by tests 2, 5, 6");
+    println!("Test 7: camelCase renaming applied to functions only");
+    // safe_divide was renamed to safeDivide, while the PI and MAX_VALUE
+    // constants kept their declared names. If the imports above work, both
+    // halves of the rule hold.
+    println!("  PASSED: verified by tests 2, 5, 6");
 
     println!("\nAll 7 tests passed!");
 }
