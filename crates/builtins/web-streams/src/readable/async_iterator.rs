@@ -94,7 +94,7 @@ impl ReadableStreamAsyncIterator {
         scope: &'r Scope<'_>,
         value: Option<HandleValue<'r>>,
     ) -> Result<Promise<'r>, ExnThrown> {
-        let value = value.unwrap_or_else(|| HandleValue::undefined());
+        let value = value.unwrap_or(HandleValue::undefined());
         let prev = self.data().ongoing_promise.get(scope);
         let ongoing = match prev {
             Some(prev) => {

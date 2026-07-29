@@ -11,9 +11,7 @@ debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs"]
 
 [dependencies]
 core-runtime.workspace = true
-futures-lite.workspace = true
 js.workspace = true
-simple-http.workspace = true
 url.workspace = true
 web-globals.workspace = true
 web-streams.workspace = true

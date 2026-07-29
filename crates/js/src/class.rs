@@ -17,6 +17,10 @@ use std::ptr::{self, NonNull};
 
 pub use crate::builtins::is_derived_from_type;
 use crate::builtins::{get_class_tag, CastError, CastTarget, JSType};
+use crate::class_spec::{
+    JS_EnumerateStandardClasses, JS_GlobalObjectTraceHook, JS_MayResolveStandardClass,
+    JS_ResolveStandardClass,
+};
 use crate::conversion::{ConversionBehavior, ConversionError, FromJSVal, ToJSVal};
 use crate::error::{capture_stack_from_error, ExnThrown};
 use crate::gc::handle::Stack;
@@ -35,11 +39,7 @@ use mozjs::jsapi::{
 };
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
-
-use crate::class_spec::{
-    JS_EnumerateStandardClasses, JS_GlobalObjectTraceHook, JS_MayResolveStandardClass,
-    JS_ResolveStandardClass,
-};
+use starling_macro::must_root;
 
 /// Initialize a class on a global object.
 ///
@@ -423,7 +423,7 @@ pub trait StackType<'s>: Sized + Copy {
     /// class macros mark every generated `FooImpl`); crown requires the
     /// declaration to carry the same marker once an implementation lives in
     /// this crate, as `iteration::AsyncIteratorRecordImpl` does.
-    #[cfg_attr(crown, crown::unrooted_must_root_lint::allow_unrooted_interior)]
+    #[must_root]
     type Inner: ClassDef;
 
     /// Construct from a handle without checking the type tag.
@@ -555,6 +555,7 @@ fn acquire_mut(flag: &Cell<BorrowFlag>) {
 /// Returned by [`Stack::data`] and [`get_this_data`]. Dereferences to `&T`;
 /// holding it keeps a shared borrow live, so a reentrant mutable borrow of the
 /// same object panics.
+#[crate::allow_unrooted_interior]
 pub struct Ref<'a, T: ?Sized> {
     value: &'a T,
     flag: &'a Cell<BorrowFlag>,
@@ -580,6 +581,7 @@ impl<T: ?Sized> Drop for Ref<'_, T> {
 /// Returned by [`Stack::data_mut`] and [`get_this_data_mut`]. Dereferences to
 /// `&mut T`; holding it keeps the object's data exclusively borrowed, so any
 /// reentrant borrow of the same object panics.
+#[crate::allow_unrooted_interior]
 pub struct RefMut<'a, T: ?Sized> {
     value: &'a mut T,
     flag: &'a Cell<BorrowFlag>,
@@ -1427,10 +1429,11 @@ pub trait ClassDef: Sized + Trace + 'static {
 ///
 /// Use this in your [`ClassDef::register_class_methods`] implementation to
 /// add methods to the class prototype.
+#[crate::allow_unrooted_interior]
 pub struct ClassBuilder<T: ClassDef> {
     methods: Vec<JSFunctionSpec>,
     properties: Vec<JSPropertySpec>,
-    constants: Vec<(&'static std::ffi::CStr, i32)>,
+    constants: Vec<(&'static CStr, i32)>,
     _phantom: PhantomData<T>,
 }
 

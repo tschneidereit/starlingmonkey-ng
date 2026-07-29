@@ -72,11 +72,14 @@ impl DefaultReader {
         //         "``done``" → false ]». `close steps` `Resolve` _promise_ with «[ "``value``"
         //         → undefined, "``done``" → true ]». `error steps`, given _e_ `Reject`
         //         _promise_ with _e_. (See `ReadRequest::Read` and its step methods.)
-        let read_request = ReadRequest::Read {
-            promise: Heap::from(promise),
-        };
         // Step 4: Perform ! `DefaultReaderRead`(`this`, _readRequest_).
-        algorithms::readable_stream_default_reader_read(scope, *self, read_request);
+        algorithms::readable_stream_default_reader_read(
+            scope,
+            *self,
+            ReadRequest::Read {
+                promise: Heap::from(promise),
+            },
+        );
         // Step 5: Return _promise_.
         Ok(promise)
     }
@@ -109,7 +112,7 @@ impl DefaultReader {
             return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Return ! `ReadableStreamReaderGenericCancel`(`this`, _reason_).
-        let reason = reason.unwrap_or_else(|| HandleValue::undefined());
+        let reason = reason.unwrap_or(HandleValue::undefined());
         Ok(algorithms::readable_stream_reader_generic_cancel(
             scope, self, reason,
         ))

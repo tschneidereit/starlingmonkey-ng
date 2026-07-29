@@ -74,7 +74,7 @@ gc-zeal *ARGS:
 
 # Run crown static GC analysis.
 check-gc:
-    ./scripts/check-crown.sh --workspace --examples
+    ./scripts/check-crown.sh --workspace --all
 
 # Run basic checks: formatting, clippy, tests.
 check:

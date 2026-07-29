@@ -79,11 +79,11 @@ impl WritableStreamDefaultController {
     /// Not exposed to JS (`no_ctor`); produces default data for the internal
     /// factory, populated by `SetUpWritableStreamDefaultController`.
     #[constructor]
-    fn new(scope: &Scope<'_>) -> Self {
-        let data = WritableStreamDefaultControllerImpl::default();
-        data.abort_controller
+    fn new(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
+        self.data_mut()
+            .abort_controller
             .set(AbortController::new(scope).expect("AbortController can only fail due to OOM"));
-        data
+        Ok(())
     }
 
     /// <https://streams.spec.whatwg.org/#ws-default-controller-signal>

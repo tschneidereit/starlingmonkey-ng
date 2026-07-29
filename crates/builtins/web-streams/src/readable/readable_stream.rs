@@ -302,7 +302,7 @@ impl ReadableStream {
             return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Return ! `ReadableStreamCancel`(`this`, _reason_).
-        let reason = reason.unwrap_or_else(|| HandleValue::undefined());
+        let reason = reason.unwrap_or(HandleValue::undefined());
         Ok(algorithms::readable_stream_cancel(scope, self, reason))
     }
 
@@ -499,7 +499,7 @@ impl ReadableStream {
         self.data().disturbed
     }
 
-    pub fn error<'r>(&self, scope: &'r Scope<'_>, reason: HandleValue<'_>) {
+    pub fn error(&self, scope: &Scope<'_>, reason: HandleValue<'_>) {
         if let Some(controller) = self.default_controller(scope) {
             readable_stream_default_controller_error(scope, &controller, reason);
         } else {

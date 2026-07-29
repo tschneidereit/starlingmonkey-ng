@@ -136,12 +136,17 @@ impl BYOBReader {
         //         _promise_ with «[ "``value``" → _chunk_, "``done``" → true ]». `error
         //         steps`, given _e_ `Reject` _promise_ with _e_.
         //         (The steps settle `promise`; see `ReadIntoRequest::Read`.)
-        let read_into_request = ReadIntoRequest::Read {
-            promise: Heap::from(promise),
-        };
         // Step 10: Perform ! `BYOBReaderRead`(`this`, _view_, _options_["``min``"],
         //          _readIntoRequest_).
-        algorithms::readable_stream_byob_reader_read(scope, self, view, min, read_into_request);
+        algorithms::readable_stream_byob_reader_read(
+            scope,
+            self,
+            view,
+            min,
+            ReadIntoRequest::Read {
+                promise: Heap::from(promise),
+            },
+        );
         // Step 11: Return _promise_.
         Ok(promise)
     }
