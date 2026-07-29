@@ -278,6 +278,27 @@ pub fn add_abort_algorithm(signal: &AbortSignal<'_>, callback: &js::Function<'_>
         .push(AbortAlgorithm::RunSteps(Heap::from(*callback)));
 }
 
+/// How many abort algorithms are registered on `signal` and, transitively, on
+/// the dependent signals derived from it.
+///
+/// Mainly useful in tests that check that abort algorithms don't accumulate over time.
+pub fn abort_algorithm_count_including_dependents(
+    scope: &Scope<'_>,
+    signal: &AbortSignal<'_>,
+) -> usize {
+    let dependents: Vec<AbortSignal<'_>> = signal
+        .data()
+        .dependent_signals
+        .iter()
+        .map(|dependent| dependent.get(scope))
+        .collect();
+    let own = signal.data().abort_algorithms.len();
+    own + dependents
+        .iter()
+        .map(|dependent| abort_algorithm_count_including_dependents(scope, dependent))
+        .sum::<usize>()
+}
+
 /// <https://dom.spec.whatwg.org/#abortsignal-remove>
 ///
 /// Remove the run-steps abort algorithm registered for `callback` (matched by

@@ -35,6 +35,7 @@
 //! `TypedArray<T, S>` wrapper are an internal implementation detail of this
 //! module and are not part of the public surface.
 
+use std::os::raw::c_void;
 use std::ptr::NonNull;
 
 use mozjs::gc::{HandleObject, HandleValue};
@@ -57,6 +58,40 @@ use super::error::ExnThrown;
 // ---------------------------------------------------------------------------
 // ArrayBuffer
 // ---------------------------------------------------------------------------
+
+/// Byte storage that can back an external (engine-owned, JS-writable)
+/// `ArrayBuffer` — see [`ArrayBuffer::from_external`](crate::ArrayBuffer).
+///
+/// # Safety
+///
+/// Implementors must guarantee, for as long as the value is owned by the
+/// buffer:
+///
+/// - **Exclusive ownership** of the bytes `as_mut_slice` exposes: no other
+///   handle (a `Bytes`/`Arc` clone, a cached copy) can read or write them. JS
+///   gets full write access to the buffer, so shared storage would let script
+///   mutate memory other owners see as immutable.
+/// - **Heap-backed, address-stable** bytes: the slice must live behind the
+///   (boxed, so itself immovable) value, not inline in it, so the pointer
+///   handed to the engine stays valid.
+pub unsafe trait ExternalBytes: 'static {
+    /// Exclusive access to the backing bytes.
+    fn as_mut_slice(&mut self) -> &mut [u8];
+}
+
+// SAFETY: a `Vec` exclusively owns its heap allocation.
+unsafe impl ExternalBytes for Vec<u8> {
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        self
+    }
+}
+
+// SAFETY: a `Box<[u8]>` exclusively owns its heap allocation.
+unsafe impl ExternalBytes for Box<[u8]> {
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        self
+    }
+}
 
 /// Marker type for JavaScript `ArrayBuffer` objects.
 ///
@@ -113,9 +148,66 @@ impl<'s> Stack<'s, ArrayBuffer> {
         let obj = wrappers2::NewArrayBufferWithUserOwnedContents(
             scope.cx_mut(),
             data.len(),
-            data.as_ptr() as *mut std::os::raw::c_void,
+            data.as_ptr() as *mut c_void,
         );
         root_or_throw(scope, obj)
+    }
+
+    /// Create a new `ArrayBuffer` from `data`, without copying where possible.
+    ///
+    /// `data` is used as-is if its alignment meets the engine's ArrayBuffer alignment
+    /// requirements (8). Otherwise, the contents are copied into a new buffer, and
+    /// `data` is dropped immediately.
+    ///
+    /// In either case, when `data` is dropped (either immediately or once the resulting
+    /// `ArrayBuffer`'s destructor runs), `data`'s free callback is run to drop `data`.
+    pub fn from_external<D>(scope: &'s Scope<'_>, data: D) -> Result<Self, ExnThrown>
+    where
+        D: ExternalBytes,
+    {
+        // Drops the boxed `D` behind `user_data`.
+        unsafe extern "C" fn free_external<D>(
+            _contents: *mut c_void,
+            user_data: *mut c_void,
+        ) {
+            drop(Box::from_raw(user_data as *mut D));
+        }
+
+        // External ArrayBuffer contents must be aligned to the engine's `ARRAY_BUFFER_ALIGNMENT`.
+        const ARRAY_BUFFER_ALIGNMENT: usize = 8;
+        let mut boxed = Box::new(data);
+        // The contents pointer is read off the *boxed* value — the address the free
+        // callback's box will own — never the pre-move one.
+        let slice = boxed.as_mut_slice();
+        let len = slice.len();
+        // An external buffer needs non-null contents; an empty body is a plain empty buffer.
+        if len == 0 {
+            return Self::new(scope, 0);
+        }
+        // Unaligned data cannot back an external buffer; copy it into a normal one.
+        if !(slice.as_ptr() as usize).is_multiple_of(ARRAY_BUFFER_ALIGNMENT) {
+            return Self::with_data(scope, slice);
+        }
+        let ptr = slice.as_mut_ptr() as *mut c_void;
+        let user_data = Box::into_raw(boxed) as *mut c_void;
+        let obj = unsafe {
+            wrappers2::NewExternalArrayBuffer(
+                scope.cx_mut(),
+                len,
+                ptr,
+                Some(free_external::<D>),
+                user_data,
+            )
+        };
+        match NonNull::new(obj) {
+            // SAFETY: `obj` is a freshly created, rooted ArrayBuffer.
+            Some(nn) => Ok(unsafe { Self::from_handle_unchecked(scope.root_object(nn)) }),
+            None => {
+                // The engine did not take ownership; reclaim and drop the data ourselves.
+                unsafe { drop(Box::from_raw(user_data as *mut D)) };
+                Err(ExnThrown)
+            }
+        }
     }
 
     /// Copy an existing `ArrayBuffer`, returning a new independent buffer.

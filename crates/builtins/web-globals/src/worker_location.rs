@@ -34,6 +34,14 @@ pub fn clear_init_location() {
     LOCATION_URL.with(|cell| cell.borrow_mut().take());
 }
 
+/// The configured `globalThis.location` URL, if any.
+///
+/// This is the runtime's API base URL, used to resolve relative URLs — e.g. by
+/// the Fetch `Request` constructor.
+pub fn current_location_url() -> Option<url::Url> {
+    LOCATION_URL.with(|cell| cell.borrow().clone())
+}
+
 /// Run `f` against the configured URL, or yield a `TypeError` if no URL is set.
 ///
 /// `field` is the accessor name; it appears in the error message so JS callers
