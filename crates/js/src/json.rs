@@ -6,11 +6,10 @@
 //! `JSON.parse` and `JSON.stringify` operations.
 
 use crate::gc::scope::Scope;
-use mozjs::gc::{HandleObject, HandleString, HandleValue, MutableHandleValue};
-use mozjs::jsapi::JSONWriteCallback;
+use mozjs::gc::{HandleObject, HandleString, HandleValue};
 use mozjs::jsval::UndefinedValue;
 use mozjs::rust::wrappers2;
-
+use js::Object;
 use super::error::ExnThrown;
 
 /// Parse a JSON string into a JS value.
@@ -97,23 +96,54 @@ pub fn parse_js_string_with_reviver<'r>(
     Ok(rval.handle())
 }
 
-/// Stringify a JS value to JSON using a callback to receive the output.
+/// Performs the [`JSON.stringify`][stringify] operation, as specified by ECMAScript.
 ///
-/// `replacer` can be null for no replacer, or a function/array object.
-/// `space` controls indentation (number or string value, or undefined for none).
+/// [stringify]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify
 ///
-/// # Safety
-///
-/// `callback` must be a valid function pointer. `data` is passed through
-/// to the callback and must remain valid for the duration.
-pub unsafe fn stringify(
+/// Returns `None` where `JSON.stringify` returns `undefined`.
+// TODO: consider turning `replacer` and `space` into enums.
+pub fn stringify(
     scope: &Scope<'_>,
-    value: MutableHandleValue,
-    replacer: HandleObject,
-    space: HandleValue,
-    callback: JSONWriteCallback,
-    data: *mut std::os::raw::c_void,
-) -> Result<(), ExnThrown> {
-    let ok = wrappers2::JS_Stringify(scope.cx_mut(), value, replacer, space, callback, data);
-    ExnThrown::check(ok)
+    value: HandleValue,
+    replacer: Option<Object<'_>>,
+    space: Option<HandleValue>,
+) -> Result<Option<String>, ExnThrown> {
+    let mut output = StringifyOutput { text: None };
+    let replacer = if let Some(obj) = replacer {
+        obj.handle()
+    } else {
+        HandleObject::null()
+    };
+
+    struct StringifyOutput {
+        /// Populated by [`callback`], stays `None` if stringification doesn't yield a string.
+        text: Option<String>,
+    }
+
+    // SAFETY: `data` must only be called by SpiderMonkey's `ToJSON`, which happens below.
+    unsafe extern "C" fn callback(
+        buf: *const u16,
+        len: u32,
+        data: *mut std::os::raw::c_void,
+    ) -> bool {
+        let output = &mut *(data as *mut StringifyOutput);
+        let units = std::slice::from_raw_parts(buf, len as usize);
+        output.text = Some(String::from_utf16_lossy(units));
+        true
+    }
+
+    // SAFETY: `callback` matches `JSONWriteCallback`, and `output` outlives the call.
+    let ok = unsafe {
+        wrappers2::ToJSON(
+            scope.cx_mut(),
+            value,
+            replacer,
+            space.unwrap_or(HandleValue::undefined()),
+            Some(callback),
+            &raw mut output as *mut std::os::raw::c_void,
+        )
+    };
+
+    ExnThrown::check(ok)?;
+    Ok(output.text)
 }

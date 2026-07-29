@@ -20,8 +20,11 @@ use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::Object;
 
+use js::Promise;
+
 use super::algorithms::{
     acquire_readable_stream_default_reader, readable_stream_default_reader_read,
+    readable_stream_reader_generic_cancel,
 };
 use super::default_reader::DefaultReader;
 use super::read_request::ReadRequest;
@@ -67,4 +70,16 @@ pub fn native_reader_read(
         },
     );
     Ok(())
+}
+
+/// Cancel the stream a reader from [`acquire_native_reader`] is locked to, with
+/// `reason`. A native consumer that stops reading early must call this, so the
+/// source it was draining is cancelled rather than left running with a reader
+/// that will never read again.
+pub fn native_reader_cancel<'r>(
+    scope: &'r Scope<'_>,
+    reader: DefaultReader<'_>,
+    reason: HandleValue<'r>,
+) -> Promise<'r> {
+    readable_stream_reader_generic_cancel(scope, &reader, reason)
 }

@@ -499,6 +499,12 @@ impl ReadableStream {
         self.data().disturbed
     }
 
+    /// Whether the stream is still readable — neither closed nor errored, so
+    /// closing or erroring it would still have an observable effect.
+    pub fn is_readable(&self) -> bool {
+        self.data().state == ReadableStreamState::Readable
+    }
+
     pub fn error(&self, scope: &Scope<'_>, reason: HandleValue<'_>) {
         if let Some(controller) = self.default_controller(scope) {
             readable_stream_default_controller_error(scope, &controller, reason);
