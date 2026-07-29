@@ -271,12 +271,13 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
     input.attrs.push(syn::parse_quote! { #[doc(hidden)] });
     // The inner struct is stored in SpiderMonkey reserved slots and traced
     // via `generic_class_trace`, so its fields don't need independent rooting.
-    // The temporal GC hazard (Heap<T> existing untraced on the stack during JS
-    // object allocation) is prevented by using `create_instance_with`, which
-    // runs the user constructor AFTER allocating the JS shell object.
+    // The struct itself must still be rooted properly.
+    // `allow_self_return`: associated fns may return the bare Impl (`-> Self`
+    // constructors and factory methods). The generated trampolines immediately
+    // wrap such returns in a new JS object.
     input
         .attrs
-        .push(syn::parse_quote! { #[::js::allow_unrooted_interior] });
+        .push(syn::parse_quote! { #[::js::must_root(allow_self_return)] });
 
     // Generate parent_prototype / register_inheritance / ensure_parent_registered
     // methods if extends or js_proto is set.
@@ -287,6 +288,9 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             // [[Prototype]] chains to the parent interface object.
             const INHERITS_INTERFACE: bool = true;
 
+            // Returns a raw prototype pointer that the caller passes straight
+            // to SpiderMonkey; it is never held across an allocation.
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             fn parent_prototype(scope: &::js::gc::scope::Scope<'_>) -> *mut ::js::native::JSObject {
                 ::js::class::get_prototype_for::<#inner_parent_name>(scope)
                     .unwrap_or(::std::ptr::null_mut())
@@ -310,6 +314,9 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         // js_proto = "Error" → use the built-in JS prototype via JSProtoKey.
         let proto_key = format_ident!("JSProto_{}", proto_name);
         quote! {
+            // Returns a raw prototype pointer that the caller passes straight
+            // to SpiderMonkey; it is never held across an allocation.
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             fn parent_prototype(scope: &::js::gc::scope::Scope<'_>) -> *mut ::js::native::JSObject {
                 ::js::class::get_class_prototype(scope, ::js::class_spec::JSProtoKey::#proto_key)
                     .map(|h| h.get())
@@ -495,7 +502,7 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         // Generated ClassDef impl using autoref specialization.
         // The constructor and method registration delegate to companion types
         // that are populated by #[jsmethods].
-        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+        #[::js::must_root]
         impl ::js::class::ClassDef for #inner_name {
             type Rooted<'s> = #struct_name<'s>;
             const NAME: &'static str = #js_name;
@@ -582,7 +589,6 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         #[derive(Copy, Clone)]
         pub struct #struct_name<'s>(::js::gc::handle::Stack<'s, #inner_name>);
 
-        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s> ::js::class::StackType<'s> for #struct_name<'s> {
             type Inner = #inner_name;
 
@@ -597,12 +603,14 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             }
         }
 
-        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s> ::js::builtins::CastTarget<'s> for #struct_name<'s> {
             type Output = #struct_name<'s>;
 
             const TARGET_NAME: &'static str = <#inner_name as ::js::class::ClassDef>::NAME;
 
+            // The raw pointer is only inspected, never held across an
+            // allocation.
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             #[inline]
             unsafe fn is_instance(obj: *mut ::js::native::JSObject) -> bool {
                 unsafe { <#inner_name as ::js::builtins::JSType>::is_instance(obj) }
@@ -615,15 +623,12 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             }
         }
 
-        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s> #struct_name<'s> {
-            // /// Type-checked construction from an untyped `Object`.
-            // pub fn from_object(obj: ::js::Object<'s>) -> ::std::result::Result<Self, ::js::class::CastError> {
-            //     ::js::gc::handle::Stack::<#inner_name>::from_object(obj).map(#struct_name)
-            // }
-
             /// Get the raw `*mut JSObject` pointer.
-            pub fn as_raw(self) -> *mut ::js::native::JSObject {
+            // Raw-pointer escape hatch: the caller takes responsibility for
+            // not holding the pointer across an allocation.
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+            pub unsafe fn as_raw(self) -> *mut ::js::native::JSObject {
                 self.0.as_raw()
             }
 
@@ -660,7 +665,6 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             }
         }
 
-        // #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s, 'v> ::js::conversion::FromJSVal<'s, 'v> for #struct_name<'s> {
             type Config = ();
 
@@ -674,14 +678,12 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             }
         }
 
-        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s> ::std::convert::From<::js::gc::handle::Stack<'s, #inner_name>> for #struct_name<'s> {
             fn from(stack: ::js::gc::handle::Stack<'s, #inner_name>) -> Self {
                 #struct_name(stack)
             }
         }
 
-        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
         impl<'s> ::std::convert::From<#struct_name<'s>> for ::js::gc::handle::Stack<'s, #inner_name> {
             fn from(val: #struct_name<'s>) -> Self {
                 val.0
@@ -1409,7 +1411,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
 
         quote! {
             #[allow(clippy::not_unsafe_ptr_arg_deref)]
-            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             impl ::js::class::__PostInitRegistrar<#inner_name> for ::js::class::__PostInitReg<#inner_name> {
                 fn post_init(
                     &self,
@@ -1525,7 +1526,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         };
 
         quote! {
-            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             impl<'s> #type_name<'s> {
                 /// Construct a new instance and return the stack newtype.
                 pub fn new(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
@@ -1581,7 +1581,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     .unwrap_or_else(|| quote! {});
 
                 quote! {
-                    #[cfg_attr(crown, allow(crown::unrooted_must_root))]
                     impl<'s> #type_name<'s> {
                         #add_to_global_fn
                         #pi_fn_tokens
@@ -1616,6 +1615,9 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                         /// Construct the inner data for this class without creating
                         /// a JS object. Used by subclass constructors to initialize
                         /// their `parent` field.
+                        // Constructor-shaped: the returned `#[must_root]` value is
+                        // embedded in the subclass Impl before any allocation.
+                        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
                         #[doc(hidden)]
                         pub fn init(scope: &::js::gc::scope::Scope<'_>, #(#param_decls),*) -> #inner_name {
                             #call
@@ -1626,6 +1628,9 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                         /// Construct the inner data for this class without creating
                         /// a JS object. Used by subclass constructors to initialize
                         /// their `parent` field.
+                        // Constructor-shaped: the returned `#[must_root]` value is
+                        // embedded in the subclass Impl before any allocation.
+                        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
                         #[doc(hidden)]
                         pub fn init(#(#param_decls),*) -> #inner_name {
                             #call
@@ -1647,7 +1652,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     .unwrap_or_else(|| quote! {});
 
                 quote! {
-                    #[cfg_attr(crown, allow(crown::unrooted_must_root))]
                     impl<'s> #type_name<'s> {
                         /// Construct a new instance and return the stack newtype.
                         pub fn new(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
@@ -1791,7 +1795,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
     let newtype_impl = if !newtype_items.is_empty() || !forwarding_methods.is_empty() {
         quote! {
             #[allow(clippy::inherent_to_string)]
-            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             impl<'s> #type_name<'s> {
                 #(#newtype_items)*
                 #(#forwarding_methods)*
@@ -1799,7 +1802,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         }
     } else if !forwarding_methods.is_empty() {
         quote! {
-            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             impl<'s> #type_name<'s> {
                 #(#forwarding_methods)*
             }
@@ -4740,11 +4742,23 @@ fn gen_dict_member_extraction(member: &DictMember) -> proc_macro2::TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn must_root(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn must_root(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr: proc_macro2::TokenStream = attr.into();
     let item: proc_macro2::TokenStream = item.into();
-    quote! {
-        #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
-        #item
+    if attr.is_empty() {
+        quote! {
+            #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+            #item
+        }
+    } else {
+        // Forward parameters to crown, e.g. `must_root(allow_self_return)`
+        // permits associated fns of the marked type to return it bare (the
+        // class macros' trampolines immediately wrap such returns in a new
+        // JS object).
+        quote! {
+            #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root(#attr))]
+            #item
+        }
     }
     .into()
 }

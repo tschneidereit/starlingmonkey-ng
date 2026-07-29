@@ -131,7 +131,7 @@ impl ReadableStreamDefaultController {
             ));
         }
         // Step 2: Perform ? `DefaultControllerEnqueue`(`this`, _chunk_).
-        let chunk = chunk.unwrap_or_else(|| HandleValue::undefined());
+        let chunk = chunk.unwrap_or(HandleValue::undefined());
         algorithms::readable_stream_default_controller_enqueue(scope, self, chunk)
     }
 
@@ -139,7 +139,7 @@ impl ReadableStreamDefaultController {
     #[method]
     pub fn error(&self, scope: &Scope<'_>, e: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
         // Step 1: Perform ! `DefaultControllerError`(`this`, _e_).
-        let e = e.unwrap_or_else(|| HandleValue::undefined());
+        let e = e.unwrap_or(HandleValue::undefined());
         algorithms::readable_stream_default_controller_error(scope, self, e);
         Ok(())
     }

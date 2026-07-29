@@ -13,14 +13,12 @@ profilemozjs = ['js/profilemozjs']
 
 [dependencies]
 clap.workspace = true
-# cpp-support.workspace = true
 event-listener = "5"
 futures-lite = "2"
 js.workspace = true
 oxc_resolver.workspace = true
 shlex = "2"
 tempfile = "3"
-wasip3.workspace = true
 
 [lints]
 workspace = true

@@ -70,7 +70,7 @@ impl TransformStreamDefaultController {
     #[method]
     fn enqueue(&self, scope: &Scope<'_>, chunk: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
         // Step 1: Perform ? `TransformStreamDefaultControllerEnqueue`(`this`, _chunk_).
-        let chunk = chunk.unwrap_or_else(|| HandleValue::undefined());
+        let chunk = chunk.unwrap_or(HandleValue::undefined());
         algorithms::transform_stream_default_controller_enqueue(scope, self, chunk)
     }
 
@@ -78,7 +78,7 @@ impl TransformStreamDefaultController {
     #[method]
     fn error(&self, scope: &Scope<'_>, reason: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
         // Step 1: Perform ? `TransformStreamDefaultControllerError`(`this`, _e_).
-        let reason = reason.unwrap_or_else(|| HandleValue::undefined());
+        let reason = reason.unwrap_or(HandleValue::undefined());
         algorithms::transform_stream_default_controller_error(scope, self, reason);
         Ok(())
     }

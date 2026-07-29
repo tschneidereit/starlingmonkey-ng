@@ -94,6 +94,25 @@ fn associated_type_has_attr<'tcx>(
     false
 }
 
+/// Checks whether `did`'s `#[js::must_root]` attribute carries the
+/// `allow_self_return` parameter, i.e. was written as
+/// `#[js::must_root(allow_self_return)]`.
+///
+/// The parameter permits associated fns of the marked type (inherent or
+/// trait-impl) to return the bare type: such fns are constructor-shaped, and
+/// their callers are still checked (bindings of the returned value are
+/// flagged as usual).
+fn must_root_allows_self_return(sym: &Symbols, cx: &LateContext, did: DefId) -> bool {
+    cx.tcx
+        .get_attrs_by_path(did, &[sym.crown, sym.unrooted_must_root_lint, sym.must_root])
+        .any(|attr| {
+            attr.meta_item_list().is_some_and(|list| {
+                list.iter()
+                    .any(|item| item.ident().map(|i| i.name) == Some(sym.allow_self_return))
+            })
+        })
+}
+
 /// Checks if a type is unrooted or contains any owned unrooted types
 fn is_unrooted_ty<'tcx>(
     sym: &'_ Symbols,
@@ -158,6 +177,7 @@ fn is_unrooted_ty<'tcx>(
                     || match_def_path(cx, did.did(), &[sym.accountable_refcell, sym.Ref])
                     || match_def_path(cx, did.did(), &[sym.accountable_refcell, sym.RefMut])
                     || match_def_path(cx, did.did(), &[sym.mozjs, sym.gc, sym.root, sym.Handle])
+                    || match_def_path(cx, did.did(), &[sym.js, sym.gc, sym.handle, sym.Stack])
                     || match_def_path(
                         cx,
                         did.did(),
@@ -464,6 +484,7 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
                     || n.as_str() == "default"
                     || n.as_str() == "Wrap"
                     || n.as_str() == "constructor"
+                    || n.as_str() == "construct"
             },
             visit::FnKind::Closure => false,
         };
@@ -480,7 +501,25 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
                 }
             }
 
+            // An associated fn returning its own `must_root(allow_self_return)`
+            // type is constructor-shaped and exempt from the return check;
+            // callers holding the returned value are still flagged.
+            let exempt_self_return = match sig.output().skip_binder().kind() {
+                ty::Adt(ret_def, _) => {
+                    must_root_allows_self_return(&self.symbols, cx, ret_def.did())
+                        && cx
+                            .tcx
+                            .impl_of_assoc(def_id.to_def_id())
+                            .map(|impl_did| cx.tcx.type_of(impl_did).skip_binder())
+                            .is_some_and(|self_ty| {
+                                matches!(self_ty.kind(), ty::Adt(self_def, _) if self_def.did() == ret_def.did())
+                            })
+                },
+                _ => false,
+            };
+
             if !in_new_function
+                && !exempt_self_return
                 && is_unrooted_ty(&self.symbols, cx, sig.output().skip_binder(), false, false)
             {
                 cx.lint(UNROOTED_MUST_ROOT, |lint| {
@@ -557,6 +596,16 @@ impl<'a, 'tcx> visit::Visitor<'tcx> for FnDefVisitor<'a, 'tcx> {
         // When "default binding modes" https://github.com/rust-lang/rust/issues/42640
         // are implemented, the `Unannotated` case could cause false-positives.
         // These should be fixable by adding an explicit `ref`.
+        // Skip the compiler-generated binding of the `?` desugaring: the Ok
+        // value is bound only to be immediately returned or passed on, with no
+        // window for an allocation. Users cannot restructure it away.
+        if matches!(
+            pat.span.desugaring_kind(),
+            Some(rustc_span::DesugaringKind::QuestionMark)
+        ) {
+            return;
+        }
+
         match pat.kind {
             hir::PatKind::Binding(hir::BindingMode::NONE, ..)
             | hir::PatKind::Binding(hir::BindingMode::MUT, ..) => {
@@ -611,4 +660,8 @@ symbols! {
     Handle
     JS
     generated
+    js
+    handle
+    Stack
+    allow_self_return
 }

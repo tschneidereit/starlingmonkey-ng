@@ -1151,7 +1151,7 @@ pub(crate) fn writable_stream_default_writer_write<'r>(
         .data()
         .stream
         .as_ref()
-        .is_some_and(|s| unsafe { s.as_ptr() } == stream.as_raw());
+        .is_some_and(|s| unsafe { s.as_ptr() == stream.as_raw() });
     if !still_owned {
         js::error::throw_type_error(scope, c"Cannot write to a stream using a released writer");
         return Promise::new_rejected_with_pending_error(scope).expect("rejected promise");

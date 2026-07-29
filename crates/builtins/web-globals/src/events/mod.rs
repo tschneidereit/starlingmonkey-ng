@@ -24,7 +24,8 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
 
     // For now, the main global simply *is* an `EventTarget`.
     // We might introduce a dedicated class extending `EventTarget` later.
-    let target = event_target::EventTargetImpl::new();
     let proto = get_prototype_object_for::<event_target::EventTargetImpl>(scope).unwrap();
-    unsafe { set_global_private_and_proto(scope, global, target, proto) };
+    unsafe {
+        set_global_private_and_proto(scope, global, event_target::EventTargetImpl::new(), proto)
+    };
 }
