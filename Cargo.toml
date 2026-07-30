@@ -19,6 +19,7 @@ resolver = "2"
 bitflags = "2"
 clap = { version = "4.5.60", features = ["derive"] }
 core-runtime = { path = "crates/core-runtime" }
+data-url = "0.3"
 encoding_rs = "0.8"
 form_urlencoded = "1.2"
 futures-lite = "2"
