@@ -5,12 +5,12 @@
 //! This module wraps SpiderMonkey's JSON API, providing safe access to
 //! `JSON.parse` and `JSON.stringify` operations.
 
+use super::error::ExnThrown;
 use crate::gc::scope::Scope;
+use js::Object;
 use mozjs::gc::{HandleObject, HandleString, HandleValue};
 use mozjs::jsval::UndefinedValue;
 use mozjs::rust::wrappers2;
-use js::Object;
-use super::error::ExnThrown;
 
 /// Parse a JSON string into a JS value.
 ///
