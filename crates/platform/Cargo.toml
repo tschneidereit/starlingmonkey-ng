@@ -1,0 +1,27 @@
+[package]
+name = "platform"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+# No unit tests; skip building the (SpiderMonkey-sized) lib test harness binary.
+test = false
+
+[dependencies]
+bytes.workspace = true
+futures-channel.workspace = true
+futures-lite.workspace = true
+url.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip3.workspace = true
+wit-bindgen.workspace = true
+
+[lints]
+workspace = true

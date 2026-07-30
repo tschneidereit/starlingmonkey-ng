@@ -166,10 +166,7 @@ impl<'s> Stack<'s, ArrayBuffer> {
         D: ExternalBytes,
     {
         // Drops the boxed `D` behind `user_data`.
-        unsafe extern "C" fn free_external<D>(
-            _contents: *mut c_void,
-            user_data: *mut c_void,
-        ) {
+        unsafe extern "C" fn free_external<D>(_contents: *mut c_void, user_data: *mut c_void) {
             drop(Box::from_raw(user_data as *mut D));
         }
 
