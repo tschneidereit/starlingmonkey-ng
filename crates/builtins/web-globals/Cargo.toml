@@ -9,6 +9,7 @@ edition.workspace = true
 [dependencies]
 bitflags.workspace = true
 core-runtime.workspace = true
+data-url.workspace = true
 encoding_rs.workspace = true
 js.workspace = true
 url.workspace = true

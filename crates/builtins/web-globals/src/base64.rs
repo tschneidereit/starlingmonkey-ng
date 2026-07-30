@@ -37,19 +37,6 @@ pub mod base64_globals {
 
 const BASE64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/// Decode table: maps ASCII byte → 6-bit value, or 0xFF for invalid.
-const fn make_decode_table() -> [u8; 128] {
-    let mut table = [0xFFu8; 128];
-    let mut i = 0u8;
-    while i < 64 {
-        table[BASE64_CHARS[i as usize] as usize] = i;
-        i += 1;
-    }
-    table
-}
-
-const DECODE_TABLE: [u8; 128] = make_decode_table();
-
 // ---------------------------------------------------------------------------
 // btoa implementation
 // ---------------------------------------------------------------------------
@@ -123,67 +110,15 @@ pub(crate) fn atob(data: &str) -> Result<String, String> {
 
 /// WHATWG [forgiving-base64 decode]: decode `data` to its byte sequence.
 ///
-/// Strips ASCII whitespace (U+0009, U+000A, U+000C, U+000D, U+0020), validates
-/// the base64 alphabet, handles padding, and returns the decoded bytes, or an
-/// error message on invalid input.
+/// Delegates to the `data-url` crate's implementation of the algorithm. Its
+/// input is bytes rather than code points, but the outcome is the same: any
+/// non-ASCII code point is outside the base64 alphabet and its UTF-8 bytes are
+/// too, so both fail on the same inputs.
 ///
 /// [forgiving-base64 decode]: https://infra.spec.whatwg.org/#forgiving-base64-decode
 pub fn forgiving_base64_decode(data: &str) -> Result<Vec<u8>, String> {
-    // Step 1: Remove ASCII whitespace.
-    let stripped: String = data
-        .chars()
-        .filter(|&ch| !matches!(ch, '\t' | '\n' | '\x0C' | '\r' | ' '))
-        .collect();
-
-    // Step 2: If length % 4 == 0, remove 1 or 2 trailing '='.
-    let stripped = if stripped.len().is_multiple_of(4) {
-        let s = stripped
-            .strip_suffix("==")
-            .unwrap_or_else(|| stripped.strip_suffix('=').unwrap_or(&stripped));
-        s
-    } else {
-        &stripped
-    };
-
-    // Step 3: If length % 4 == 1, this is an error.
-    if stripped.len() % 4 == 1 {
-        return Err("The string to be decoded is not correctly encoded.".to_string());
-    }
-
-    // Step 4: Validate that all remaining characters are in the base64 alphabet.
-    for ch in stripped.chars() {
-        let cp = ch as u32;
-        if cp >= 128 || DECODE_TABLE[cp as usize] == 0xFF {
-            return Err("The string to be decoded is not correctly encoded.".to_string());
-        }
-    }
-
-    // Step 5: Decode.
-    let bytes = stripped.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len() * 3 / 4);
-
-    let mut i = 0;
-    while i < bytes.len() {
-        let a = DECODE_TABLE[bytes[i] as usize] as u32;
-        let b = DECODE_TABLE[bytes[i + 1] as usize] as u32;
-
-        // First byte is always produced.
-        output.push(((a << 2) | (b >> 4)) as u8);
-
-        if i + 2 < bytes.len() {
-            let c = DECODE_TABLE[bytes[i + 2] as usize] as u32;
-            output.push((((b & 0x0F) << 4) | (c >> 2)) as u8);
-
-            if i + 3 < bytes.len() {
-                let d = DECODE_TABLE[bytes[i + 3] as usize] as u32;
-                output.push((((c & 0x03) << 6) | d) as u8);
-            }
-        }
-
-        i += 4;
-    }
-
-    Ok(output)
+    data_url::forgiving_base64::decode_to_vec(data.as_bytes())
+        .map_err(|_| "The string to be decoded is not correctly encoded.".to_string())
 }
 
 // Nothing platform-specific in these tests, so skip them on wasm32.
