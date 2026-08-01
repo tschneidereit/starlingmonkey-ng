@@ -18,10 +18,7 @@ use web_globals::signals::abort_controller::{AbortController, AbortControllerImp
 use web_globals::signals::AbortSignal;
 
 /// <https://streams.spec.whatwg.org/#ws-default-controller-class>
-///
-/// `no_ctor`: not constructible from JS; created internally and populated by
-/// `SetUpWritableStreamDefaultController`.
-#[webidl_interface(no_ctor)]
+#[webidl_interface]
 pub struct WritableStreamDefaultController {
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-abortalgorithm>
     /// A promise-returning algorithm, taking one argument (the abort reason), which communicates a
@@ -74,11 +71,6 @@ pub struct WritableStreamDefaultController {
 
 #[webidl_methods]
 impl WritableStreamDefaultController {
-    /// <https://streams.spec.whatwg.org/#dom-writablestreamdefaultcontroller-constructor>
-    ///
-    /// Not exposed to JS (`no_ctor`); produces default data for the internal
-    /// factory, populated by `SetUpWritableStreamDefaultController`.
-    #[constructor]
     fn new(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
         self.data_mut()
             .abort_controller

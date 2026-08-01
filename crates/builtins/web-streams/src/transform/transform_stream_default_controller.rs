@@ -12,7 +12,7 @@ use js::native::Value;
 use js::prelude::HandleValue;
 
 /// <https://streams.spec.whatwg.org/#ts-default-controller-class>
-#[webidl_interface(no_ctor)]
+#[webidl_interface]
 pub struct TransformStreamDefaultController {
     /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-cancelalgorithm>
     /// A promise-returning algorithm, taking one argument (the reason for cancellation), which
@@ -52,8 +52,6 @@ pub struct TransformStreamDefaultController {
 
 #[webidl_methods]
 impl TransformStreamDefaultController {
-    /// <https://streams.spec.whatwg.org/#dom-transformstreamdefaultcontroller-constructor>
-    #[constructor]
     fn new() -> Self {
         TransformStreamDefaultControllerImpl::default()
     }

@@ -108,7 +108,7 @@ pub(crate) struct PullIntoDescriptor {
 }
 
 /// <https://streams.spec.whatwg.org/#rbs-controller-class>
-#[webidl_interface(no_ctor)]
+#[webidl_interface]
 pub struct ReadableByteStreamController {
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-autoallocatechunksize>
     /// A positive integer, when the automatic buffer allocation feature is enabled. In that case,
@@ -173,7 +173,6 @@ pub struct ReadableByteStreamController {
 #[webidl_methods]
 impl ReadableByteStreamController {
     /// <https://streams.spec.whatwg.org/#dom-ReadableByteStreamController-constructor>
-    #[constructor]
     fn new() -> Self {
         ReadableByteStreamControllerImpl::default()
     }

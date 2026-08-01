@@ -44,11 +44,11 @@ struct AttrOpts {
     /// `@@toStringTag` property to the given string value (non-writable,
     /// non-enumerable, configurable — per WebIDL §3.7.6).
     to_string_tag: Option<String>,
-    /// Bare flag: `#[webidl_interface(no_ctor)]` marks an interface
-    /// with no exposed `constructor` operation, so `new Foo()` throws TypeError.
-    no_ctor: bool,
     /// Bare flag: `#[webidl_interface(hidden)]` marks an interface
-    /// that's not installed as a property on the global object. Implies `no_ctor`.
+    /// that's not installed as a property on the global object. It remains
+    /// reachable through the `constructor` property on instances' prototype,
+    /// so a hidden interface that declares a `#[constructor]` is still
+    /// constructible that way; omit the `#[constructor]` to prevent it.
     hidden: bool,
     /// Bare flag: `#[getter(unforgeable)]` marks a `[LegacyUnforgeable]`
     /// accessor — installed per-instance as an own property, not on the prototype.
@@ -61,16 +61,8 @@ impl Parse for AttrOpts {
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             // Bare flags take no `= value`.
-            if key == "no_ctor" {
-                opts.no_ctor = true;
-                if !input.is_empty() {
-                    let _: Token![,] = input.parse()?;
-                }
-                continue;
-            }
             if key == "hidden" {
                 opts.hidden = true;
-                opts.no_ctor = true;
                 if !input.is_empty() {
                     let _: Token![,] = input.parse()?;
                 }
@@ -83,7 +75,10 @@ impl Parse for AttrOpts {
                 }
                 continue;
             }
-            let _: Token![=] = input.parse()?;
+            if input.parse::<Token![=]>().is_err() {
+                return Err(syn::Error::new(key.span(), "unknown option"));
+            }
+
             match key.to_string().as_str() {
                 "name" => opts.name = Some(input.parse::<LitStr>()?.value()),
                 "length" => opts.length = Some(input.parse::<LitInt>()?.base10_parse()?),
@@ -141,7 +136,6 @@ fn parse_marker_opts(attr: &syn::Attribute, allowed: &[&str]) -> syn::Result<Att
     reject(opts.extends.is_some(), "extends")?;
     reject(opts.js_proto.is_some(), "js_proto")?;
     reject(opts.to_string_tag.is_some(), "to_string_tag")?;
-    reject(opts.no_ctor, "no_ctor")?;
     reject(opts.hidden, "hidden")?;
     reject(opts.unforgeable, "unforgeable")?;
     Ok(opts)
@@ -368,15 +362,6 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         quote! {}
     };
 
-    // Generate CONSTRUCTIBLE override when `no_ctor` is set.
-    let constructible_const = if opts.no_ctor {
-        quote! {
-            const CONSTRUCTIBLE: bool = false;
-        }
-    } else {
-        quote! {}
-    };
-
     // Generate HIDDEN override when `hidden` is set.
     let hidden_const = if opts.hidden {
         quote! {
@@ -529,6 +514,12 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
                 (&reg).nargs()
             }
 
+            fn has_js_constructor() -> bool {
+                use ::js::class::__ConstructorRegistrar;
+                let reg = ::js::class::__CtorReg::<Self>::new();
+                (&reg).defined()
+            }
+
             fn register_class_methods(
                 builder: ::js::class::ClassBuilder<Self>,
             ) -> ::js::class::ClassBuilder<Self> {
@@ -573,7 +564,6 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             #to_string_tag_const
             #has_error_data_const
             #constants_on_prototype_const
-            #constructible_const
             #hidden_const
             #install_unforgeable_method
             #debug_assert_method
@@ -828,6 +818,37 @@ struct MethodInfo {
 /// Forwarding methods and constructors are generated on the stack newtype
 /// `Foo<'s>`.
 ///
+/// # Instantiation
+///
+/// To make a class constructible from JS, at most one function can be
+/// annotated with `#[constructor]`. Otherwise, attempting to instantiate the
+/// class will throw a `TypeError`.
+///
+/// Independently of that, every constructor-shaped fn in the `impl` block is
+/// added to the stack newtype as a constructor, with the return type
+/// `Result<Foo<'s>, ExnThrown>`, that creates the instance's JS object
+/// and runs the fn to initialize it.
+///
+/// Constructor-shaped means either of the two constructor forms:
+///
+/// ```rust,ignore
+/// fn anything() -> Self                          // no receiver, returns the class
+/// fn new(&self, ...) -> Result<(), E>            // setup-style, recognized by name
+/// ```
+///
+/// Examples:
+///
+/// ```rust,ignore
+/// #[jsmethods]
+/// impl Foo {
+///     #[constructor]
+///     fn new(n: i32) -> Self { Self { n } }   // Foo::new(scope, n)  + `new Foo(n)` in JS
+///     fn doubled(n: i32) -> Self { Self { n: n * 2 } }  // Foo::doubled(scope, n), Rust only
+/// }
+/// ```
+///
+/// See [`is_implicit_constructor`].
+///
 /// # Usage
 ///
 /// ```rust,ignore
@@ -877,12 +898,41 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
     // Compute the inner data struct name
     let inner_name = format_ident!("{}Impl", type_name);
 
+    // Find the `#[constructor]`-annotated function to use as the JS constructor.
+    // Finding more than one such function results in an error.
+    let js_ctor_names: Vec<Ident> = input
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ImplItem::Fn(f) if f.attrs.iter().any(|a| a.path().is_ident("constructor")) => {
+                Some(f.sig.ident.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    if let [first, second, ..] = js_ctor_names.as_slice() {
+        return syn::Error::new_spanned(
+            second,
+            format!(
+                "a class can have at most one `#[constructor]`, but `{first}` and `{second}` are \
+                 both marked; JS exposes a single constructor. Drop the attribute from one — an \
+                 unannotated fn returning `Self` is still a Rust-side factory."
+            ),
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let js_ctor_name = js_ctor_names.first();
+    let mut js_ctor_index = None;
+
     let mut methods: Vec<MethodInfo> = Vec::new();
+    let mut ctor_indices = Vec::new();
+
     // Set when a method-marker attribute has malformed or out-of-context
     // arguments. Collected during the per-item scan and turned into a spanned
     // compile error after the loop, rather than silently dropping the options.
     let mut attr_error: Option<syn::Error> = None;
-    let mut ctor_original_name: Option<Ident> = None;
     let mut constant_builder_calls: Vec<proc_macro2::TokenStream> = Vec::new();
     // Names of unannotated `fn`s in the impl block. These are plain Rust
     // helpers (not JS-exposed), but like `#[method]`s they operate on the
@@ -936,6 +986,9 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
             fn_item.attrs.retain(|attr| {
                 if attr.path().is_ident("constructor") {
                     kind = Some(MethodKind::Constructor);
+                    assert_eq!(&fn_item.sig.ident, js_ctor_name.unwrap());
+                    ctor_indices.push(methods.len());
+                    js_ctor_index = Some(methods.len());
                     false
                 } else if attr.path().is_ident("method") {
                     match parse_marker_opts(attr, &["name", "length"]) {
@@ -1013,6 +1066,13 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
 
             let kind = match kind {
                 Some(k) => k,
+                // An unannotated constructor-shaped fn is a Rust-side factory:
+                // it allocates a JS object like `#[constructor]` does, but is
+                // not exposed to JS. A class may have any number of them.
+                None if is_implicit_constructor(&fn_item.sig, &type_name) => {
+                    ctor_indices.push(methods.len());
+                    MethodKind::Constructor
+                }
                 None => {
                     helper_fn_names.push(fn_item.sig.ident.clone());
                     continue;
@@ -1026,10 +1086,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                 custom_nargs,
                 &type_name,
             );
-
-            if matches!(info.kind, MethodKind::Constructor) {
-                ctor_original_name = Some(fn_item.sig.ident.clone());
-            }
 
             // Rewrite RestArgs<T> in the function signature to use the
             // fully-qualified type path so the impl block compiles.
@@ -1097,7 +1153,8 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
     for (i, method) in methods.iter().enumerate() {
         let on_newtype = is_method_on_newtype(method);
         match &method.kind {
-            MethodKind::Constructor => {
+            // Only the explicit `#[constructor]` backs the JS constructor.
+            MethodKind::Constructor if Some(i) == js_ctor_index => {
                 if method.has_self || method.has_mut_self {
                     // Setup-style: constructor runs on the stack newtype after
                     // allocation. ConstructorRegistrar returns FooImpl::default(),
@@ -1109,6 +1166,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     constructor_body = Some(gen_constructor_body(method, &inner_name));
                 }
             }
+            MethodKind::Constructor => {}
             MethodKind::Destructor => {
                 destructor_fn_name = Some(method.fn_item.sig.ident.clone());
             }
@@ -1199,10 +1257,19 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
     }
 
     // ================================================================
-    // Remove setup-style ctor, new-style post_init, and stack newtype methods from impl FooImpl.
+    // Remove setup-style ctors, new-style post_init, and stack newtype methods from impl FooImpl.
     // ================================================================
-    let setup_ctor_fn_name = setup_ctor_info.map(|i| methods[i].fn_item.sig.ident.clone());
-    let new_post_init_fn_name = new_post_init_info.map(|i| methods[i].fn_item.sig.ident.clone());
+    // Setup-style ctor bodies run on the stack newtype (as `__ctor_setup_*`),
+    // so they are dropped from the FooImpl block; old-style ctors stay there.
+    let mut remove_fn_names: Vec<Ident> = ctor_indices
+        .iter()
+        .map(|i| &methods[*i])
+        .filter(|m| m.has_self || m.has_mut_self)
+        .map(|m| m.fn_item.sig.ident.clone())
+        .collect();
+    if let Some(i) = new_post_init_info {
+        remove_fn_names.push(methods[i].fn_item.sig.ident.clone());
+    }
 
     // Collect names of methods that go on the newtype.
     let newtype_method_names: Vec<Ident> = methods
@@ -1211,20 +1278,17 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         .map(|m| m.fn_item.sig.ident.clone())
         .collect();
 
-    // Remove setup ctor, post_init, and stack newtype methods from the FooImpl impl block.
+    // Remove setup ctors, post_init, and stack newtype methods from the FooImpl impl block.
     let mut newtype_items: Vec<ImplItem> = Vec::new();
     {
-        let remove_names: Vec<&Ident> = [&setup_ctor_fn_name, &new_post_init_fn_name]
-            .iter()
-            .filter_map(|n| n.as_ref())
-            .collect();
+        let remove_names: Vec<&Ident> = remove_fn_names.iter().collect();
 
         let mut retained = Vec::new();
         for item in input.items.drain(..) {
             if let ImplItem::Fn(ref fn_item) = item {
                 let ident = &fn_item.sig.ident;
                 if remove_names.iter().any(|n| *ident == **n) {
-                    continue; // setup ctor / post_init — dropped entirely
+                    continue; // setup ctors / post_init — dropped entirely
                 }
                 if newtype_method_names.contains(ident) || helper_fn_names.contains(ident) {
                     // Registered methods and unannotated helpers alike move to
@@ -1238,13 +1302,17 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         input.items = retained;
     }
 
-    let ctor_nargs: u32 = methods
-        .iter()
-        .find(|m| matches!(m.kind, MethodKind::Constructor))
-        .map_or(0, |m| m.nargs);
+    let ctor_nargs: u32 = js_ctor_index.map_or(0, |i| methods[i].nargs);
     let ctor_nargs_method = quote! {
         fn nargs(&self) -> u32 {
             #ctor_nargs
+        }
+    };
+
+    let has_js_ctor = js_ctor_name.is_some();
+    let ctor_defined_method = quote! {
+        fn defined(&self) -> bool {
+            #has_js_ctor
         }
     };
 
@@ -1262,6 +1330,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     Ok(#inner_name::default())
                 }
                 #ctor_nargs_method
+                #ctor_defined_method
             }
         }
     } else if let Some(body) = constructor_body {
@@ -1275,6 +1344,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     unsafe { #body }
                 }
                 #ctor_nargs_method
+                #ctor_defined_method
             }
         }
     } else {
@@ -1288,6 +1358,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     Err(::js::error::throw_type_error(scope, c"Illegal constructor"))
                 }
                 #ctor_nargs_method
+                #ctor_defined_method
             }
         }
     };
@@ -1364,7 +1435,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         // Generate the setup-style constructor call (if present).
         let setup_call = if let Some(idx) = setup_ctor_info {
             let info = &methods[idx];
-            let setup_fn_name = format_ident!("__ctor_setup");
+            let setup_fn_name = setup_fn_ident(&info.fn_item.sig.ident);
             let arg_extractions =
                 gen_arg_extractions(&info.params, quote!(args), true, quote!(scope), info.nargs);
             let arg_names: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
@@ -1443,247 +1514,66 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         }
     };
 
-    // Generate `impl<'s> Foo<'s>` containing new(), add_to_global(), and
-    // setup-style constructor / post_init methods.
-    let ctor_new_impl = if let Some(idx) = setup_ctor_info {
-        // ================================================================
-        // Setup-style constructor: Foo::new(scope, args) -> ::std::result::Result<Foo<'s>, E>
-        // The method body runs on &self (the stack newtype), not &FooImpl.
-        // ================================================================
-        let method = &methods[idx];
-        let setup_fn_ident = format_ident!("__ctor_setup");
-        let param_decls: Vec<_> = method
-            .params
-            .iter()
-            .map(|(name, ty)| quote! { #name: #ty })
-            .collect();
-        let param_names: Vec<_> = method
-            .params
-            .iter()
-            .map(|(name, _)| quote! { #name })
-            .collect();
+    // Generate `impl<'s> Foo<'s>` containing constructors, add_to_global(), and
+    // supporting methods such as setup-style constructor post_init methods.
 
-        // new() always returns Result<Foo<'s>, ExnThrown> because
-        // create_instance_with allocates a JS object, which is fallible.
-        let err_ty = extract_result_error_type(&method.fn_item.sig.output);
-        let new_ret_ty =
-            quote! { -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown> };
-        let new_ok_wrap = quote! { Ok(__typed) };
-
-        let setup_call_in_new = if err_ty.is_some() {
-            if method.has_cx {
-                quote! { #type_name::#setup_fn_ident(&__typed, scope, #(#param_names),*).map_err(|e| {
-                    ::js::error::ThrowException::throw(e, scope)
-                })?; }
-            } else {
-                quote! { #type_name::#setup_fn_ident(&__typed, #(#param_names),*).map_err(|e| {
-                    ::js::error::ThrowException::throw(e, scope)
-                })?; }
-            }
-        } else if method.has_cx {
-            quote! { #type_name::#setup_fn_ident(&__typed, scope, #(#param_names),*); }
-        } else {
-            quote! { #type_name::#setup_fn_ident(&__typed, #(#param_names),*); }
-        };
-
-        // Generate the post_init call in new() if present.
-        let pi_fn_ident = format_ident!("__post_init");
-        let new_post_init_call = if let Some(pi_idx) = new_post_init_info {
-            let pi_info = &methods[pi_idx];
-            if pi_info.has_cx {
-                quote! { #type_name::#pi_fn_ident(&__typed, scope).map_err(|e| {
-                    ::js::error::ThrowException::throw(e, scope)
-                })?; }
-            } else {
-                quote! { #type_name::#pi_fn_ident(&__typed).map_err(|e| {
-                    ::js::error::ThrowException::throw(e, scope)
-                })?; }
-            }
-        } else {
-            quote! {}
-        };
-
-        // Extract the setup-style constructor body and rename it.
-        let mut setup_fn = method.fn_item.clone();
-        setup_fn.sig.ident = setup_fn_ident.clone();
-        setup_fn.vis = syn::Visibility::Inherited; // private
-        setup_fn
-            .attrs
-            .retain(|a| !a.path().is_ident("constructor") && !a.path().is_ident("post_init"));
-
-        // Extract the post_init body and rename it (if any).
-        let post_init_fn_tokens = if let Some(pi_idx) = new_post_init_info {
+    // The `#[post_init]` body, moved onto the newtype as `__post_init`.
+    let moved_post_init_fn = new_post_init_info
+        .map(|pi_idx| {
             let pi = &methods[pi_idx];
             let mut pi_fn = pi.fn_item.clone();
-            pi_fn.sig.ident = pi_fn_ident.clone();
-            pi_fn.vis = syn::Visibility::Inherited; // private
-            pi_fn
-                .attrs
-                .retain(|a| !a.path().is_ident("post_init") && !a.path().is_ident("constructor"));
+            pi_fn.sig.ident = format_ident!("__post_init");
+            pi_fn.vis = Visibility::Inherited; // private
+            pi_fn.attrs.retain(|a| !a.path().is_ident("post_init"));
             quote! { #pi_fn }
+        })
+        .unwrap_or_else(|| quote! {});
+
+    // The `__post_init` call setup-style factories make after running setup.
+    let factory_post_init_call = if let Some(pi_idx) = new_post_init_info {
+        let pi_info = &methods[pi_idx];
+        let pi_fn_ident = format_ident!("__post_init");
+        if pi_info.has_cx {
+            quote! { #type_name::#pi_fn_ident(&__typed, scope).map_err(|e| {
+                ::js::error::ThrowException::throw(e, scope)
+            })?; }
         } else {
-            quote! {}
-        };
-
-        quote! {
-            impl<'s> #type_name<'s> {
-                /// Construct a new instance and return the stack newtype.
-                pub fn new(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
-                    #new_ret_ty
-                {
-                    unsafe {
-                        let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
-                            #inner_name::default()
-                        })?;
-                        let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
-                        let __typed = #type_name(::js::gc::handle::Stack::from_handle_unchecked(
-                            scope.root_object(__nn),
-                        ));
-                        #setup_call_in_new
-                        #new_post_init_call
-                        // Install [LegacyUnforgeable] accessors, as the JS
-                        // constructor path does (this factory bypasses it).
-                        <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __obj)?;
-                        #[cfg(debug_assertions)]
-                        if let Some(__data) = ::js::class::get_private::<#inner_name>(__obj.as_raw()) {
-                            ::js::class::ClassDef::debug_assert_fully_initialized(__data);
-                        }
-                        #new_ok_wrap
-                    }
-                }
-
-                #add_to_global_fn
-
-                #setup_fn
-                #post_init_fn_tokens
-            }
-        }
-    } else if let Some(ref ctor_fn_name) = ctor_original_name {
-        let ctor_method = methods
-            .iter()
-            .find(|m| matches!(m.kind, MethodKind::Constructor));
-        if let Some(method) = ctor_method {
-            // Skip generating the stack newtype `new()` when the constructor
-            // uses the raw `&CallArgs` pattern (only available inside JSNative
-            // wrappers). Such constructors are only callable from JS via `new`.
-            if method.is_raw {
-                // For old-style with post_init but no setup ctor, still generate
-                // the post_init method on the newtype.
-                let pi_fn_tokens = new_post_init_info
-                    .map(|pi_idx| {
-                        let pi = &methods[pi_idx];
-                        let mut pi_fn = pi.fn_item.clone();
-                        pi_fn.sig.ident = format_ident!("__post_init");
-                        pi_fn.vis = syn::Visibility::Inherited;
-                        pi_fn.attrs.retain(|a| !a.path().is_ident("post_init"));
-                        quote! { #pi_fn }
-                    })
-                    .unwrap_or_else(|| quote! {});
-
-                quote! {
-                    impl<'s> #type_name<'s> {
-                        #add_to_global_fn
-                        #pi_fn_tokens
-                    }
-                }
-            } else {
-                let mut param_decls: Vec<_> = method
-                    .params
-                    .iter()
-                    .map(|(name, ty)| quote! { #name: #ty })
-                    .collect();
-                let mut param_names: Vec<_> = method
-                    .params
-                    .iter()
-                    .map(|(name, _)| quote! { #name })
-                    .collect();
-
-                if let Some(rest_name) = method.rest_arg_name.as_ref() {
-                    let inner_ty = rest_args_element_type(method.rest_inner_type.as_ref());
-                    param_decls.push(quote! { #rest_name: ::js::class::RestArgs<#inner_ty> });
-                    param_names.push(quote! { #rest_name });
-                }
-
-                let call = if method.has_cx {
-                    quote! { #inner_name::#ctor_fn_name(scope, #(#param_names),*) }
-                } else {
-                    quote! { #inner_name::#ctor_fn_name(#(#param_names),*) }
-                };
-
-                let init_fn = if method.has_cx {
-                    quote! {
-                        /// Construct the inner data for this class without creating
-                        /// a JS object. Used by subclass constructors to initialize
-                        /// their `parent` field.
-                        // Constructor-shaped: the returned `#[must_root]` value is
-                        // embedded in the subclass Impl before any allocation.
-                        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
-                        #[doc(hidden)]
-                        pub fn init(scope: &::js::gc::scope::Scope<'_>, #(#param_decls),*) -> #inner_name {
-                            #call
-                        }
-                    }
-                } else {
-                    quote! {
-                        /// Construct the inner data for this class without creating
-                        /// a JS object. Used by subclass constructors to initialize
-                        /// their `parent` field.
-                        // Constructor-shaped: the returned `#[must_root]` value is
-                        // embedded in the subclass Impl before any allocation.
-                        #[cfg_attr(crown, allow(crown::unrooted_must_root))]
-                        #[doc(hidden)]
-                        pub fn init(#(#param_decls),*) -> #inner_name {
-                            #call
-                        }
-                    }
-                };
-
-                // For old-style with post_init but no setup ctor, generate
-                // the post_init method on the newtype.
-                let pi_fn_tokens = new_post_init_info
-                    .map(|pi_idx| {
-                        let pi = &methods[pi_idx];
-                        let mut pi_fn = pi.fn_item.clone();
-                        pi_fn.sig.ident = format_ident!("__post_init");
-                        pi_fn.vis = syn::Visibility::Inherited;
-                        pi_fn.attrs.retain(|a| !a.path().is_ident("post_init"));
-                        quote! { #pi_fn }
-                    })
-                    .unwrap_or_else(|| quote! {});
-
-                quote! {
-                    impl<'s> #type_name<'s> {
-                        /// Construct a new instance and return the stack newtype.
-                        pub fn new(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
-                            -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown>
-                        {
-                            unsafe {
-                                let obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
-                                    #call
-                                })?;
-                                // Install [LegacyUnforgeable] accessors, as the JS
-                                // constructor path does (this factory bypasses it).
-                                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, obj)?;
-                                #[cfg(debug_assertions)]
-                                if let Some(__data) = ::js::class::get_private::<#inner_name>(obj.as_raw()) {
-                                    ::js::class::ClassDef::debug_assert_fully_initialized(__data);
-                                }
-                                let nn = ::std::ptr::NonNull::new_unchecked(obj.as_raw());
-                                Ok(#type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(nn))))
-                            }
-                        }
-
-                        #init_fn
-                        #add_to_global_fn
-                        #pi_fn_tokens
-                    }
-                }
-            }
-        } else {
-            quote! {}
+            quote! { #type_name::#pi_fn_ident(&__typed).map_err(|e| {
+                ::js::error::ThrowException::throw(e, scope)
+            })?; }
         }
     } else {
         quote! {}
+    };
+
+    let mut ctor_items: Vec<proc_macro2::TokenStream> = Vec::new();
+    for i in &ctor_indices {
+        let method = &methods[*i];
+        if method.has_self || method.has_mut_self {
+            ctor_items.push(gen_setup_factory(
+                method,
+                &type_name,
+                &inner_name,
+                &factory_post_init_call,
+            ));
+        } else if !method.is_raw {
+            // A raw (`&CallArgs`) constructor is callable only from a JSNative
+            // wrapper, so it gets no Rust-side factory.
+            ctor_items.push(gen_instance_factory(
+                &method.fn_item.sig.ident,
+                method,
+                &type_name,
+                &inner_name,
+            ));
+        }
+    }
+
+    let ctor_new_impl = quote! {
+        impl<'s> #type_name<'s> {
+            #(#ctor_items)*
+            #add_to_global_fn
+            #moved_post_init_fn
+        }
     };
 
     // Generate forwarding methods on Foo<'s> for InstanceValue methods
@@ -1837,7 +1727,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         // Generated unforgeable-accessor registrar
         #unforgeable_impl
 
-        // Generated inherent new() constructor + add_to_global on stack newtype
+        // Generated Rust-side instantiation functions + add_to_global on stack newtype
         #ctor_new_impl
 
         // Generated newtype instance methods + forwarding methods
@@ -2432,6 +2322,29 @@ fn is_result_type(ty_str: &str) -> Option<bool> {
     None
 }
 
+/// Whether an unannotated `fn` in a `#[jsmethods]` block is one of the class's
+/// Rust-only instantiation functions. Such a fn is not exposed to JS, but gets
+/// a wrapper with the same name installed on the stack newtype that allocates
+/// a JS object around the data it produces.
+///
+/// The receiver selects which of the two constructor shapes to look for:
+///
+/// - **No receiver returning `Self`, `Foo`, or `Foo<'s>`** — constructor-shaped
+/// regardless of name.
+/// - **`fn new` taking `&self` or `&mut self` and returning `Result<(), E>` or `()`**
+///   — the setup-style shape, which runs on an already-allocated instance.
+fn is_implicit_constructor(sig: &syn::Signature, type_name: &Ident) -> bool {
+    if matches!(sig.inputs.first(), Some(FnArg::Receiver(_))) {
+        return unraw(&sig.ident) == "new";
+    }
+    match &sig.output {
+        ReturnType::Default => false,
+        ReturnType::Type(_, ty) => {
+            is_self_or_instance_type(&quote!(#ty).to_string(), &type_name.to_string())
+        }
+    }
+}
+
 /// Check if a type string is exactly `Self` or the class name (with optional
 /// lifetime). Matches `Self`, `Foo`, `Foo<'s>`, `Foo<'_>` but not types where
 /// the class name is nested inside wrappers like `Result<Option<Foo<'s>>, E>`.
@@ -2610,6 +2523,164 @@ fn gen_typed_arg_getter(
         }
     } else {
         quote! { unsafe { ::js::class::get_arg(#scope_expr, #args_expr, #idx) } }
+    }
+}
+
+/// The declarations and names of a constructor's parameters, with a trailing
+/// `RestArgs<T>` appended when the constructor is variadic.
+fn ctor_param_lists(
+    info: &MethodInfo,
+) -> (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) {
+    let mut decls: Vec<_> = info
+        .params
+        .iter()
+        .map(|(name, ty)| quote! { #name: #ty })
+        .collect();
+    let mut names: Vec<_> = info
+        .params
+        .iter()
+        .map(|(name, _)| quote! { #name })
+        .collect();
+    if let Some(rest_name) = info.rest_arg_name.as_ref() {
+        let inner_ty = rest_args_element_type(info.rest_inner_type.as_ref());
+        decls.push(quote! { #rest_name: ::js::class::RestArgs<#inner_ty> });
+        names.push(quote! { #rest_name });
+    }
+    (decls, names)
+}
+
+/// The call to an old-style constructor fn on the inner data struct, which
+/// yields the `FooImpl` value to wrap in a fresh JS object.
+fn ctor_call(
+    info: &MethodInfo,
+    inner_name: &Ident,
+    param_names: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    let ctor_fn = &info.fn_item.sig.ident;
+    if info.has_cx {
+        quote! { #inner_name::#ctor_fn(scope, #(#param_names),*) }
+    } else {
+        quote! { #inner_name::#ctor_fn(#(#param_names),*) }
+    }
+}
+
+/// The `__ctor_setup_*` name a setup-style constructor's body is moved to on
+/// the stack newtype.
+fn setup_fn_ident(ident: &Ident) -> Ident {
+    format_ident!("__ctor_setup_{}", unraw(ident))
+}
+
+/// A Rust-side instantiation function on the stack newtype for a setup-style
+/// constructor (`&self` receiver): allocate a default-initialized JS object,
+/// run the moved constructor body (`__ctor_setup_*`, emitted alongside) on the
+/// rooted newtype, then `__post_init` if the class declares one.
+fn gen_setup_factory(
+    info: &MethodInfo,
+    type_name: &Ident,
+    inner_name: &Ident,
+    post_init_call: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let factory_name = &info.fn_item.sig.ident;
+    let setup_ident = setup_fn_ident(factory_name);
+    let param_decls: Vec<_> = info
+        .params
+        .iter()
+        .map(|(name, ty)| quote! { #name: #ty })
+        .collect();
+    let param_names: Vec<_> = info
+        .params
+        .iter()
+        .map(|(name, _)| quote! { #name })
+        .collect();
+
+    // Always returns Result<Foo<'s>, ExnThrown> because create_instance_with
+    // allocates a JS object, which is fallible.
+    let err_ty = extract_result_error_type(&info.fn_item.sig.output);
+    let setup_call = if err_ty.is_some() {
+        if info.has_cx {
+            quote! { #type_name::#setup_ident(&__typed, scope, #(#param_names),*).map_err(|e| {
+                ::js::error::ThrowException::throw(e, scope)
+            })?; }
+        } else {
+            quote! { #type_name::#setup_ident(&__typed, #(#param_names),*).map_err(|e| {
+                ::js::error::ThrowException::throw(e, scope)
+            })?; }
+        }
+    } else if info.has_cx {
+        quote! { #type_name::#setup_ident(&__typed, scope, #(#param_names),*); }
+    } else {
+        quote! { #type_name::#setup_ident(&__typed, #(#param_names),*); }
+    };
+
+    // Extract the constructor body and rename it.
+    let mut setup_fn = info.fn_item.clone();
+    setup_fn.sig.ident = setup_ident;
+    setup_fn.vis = Visibility::Inherited; // private
+    setup_fn
+        .attrs
+        .retain(|a| !a.path().is_ident("constructor") && !a.path().is_ident("post_init"));
+
+    quote! {
+        /// Construct a new instance and return the stack newtype.
+        pub fn #factory_name(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
+            -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown>
+        {
+            unsafe {
+                let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                    #inner_name::default()
+                })?;
+                let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
+                let __typed = #type_name(::js::gc::handle::Stack::from_handle_unchecked(
+                    scope.root_object(__nn),
+                ));
+                #setup_call
+                #post_init_call
+                // Install [LegacyUnforgeable] accessors, as the JS
+                // constructor path does.
+                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __obj)?;
+                #[cfg(debug_assertions)]
+                if let Some(__data) = ::js::class::get_private::<#inner_name>(__obj.as_raw()) {
+                    ::js::class::ClassDef::debug_assert_fully_initialized(__data);
+                }
+                Ok(__typed)
+            }
+        }
+
+        #setup_fn
+    }
+}
+
+/// A Rust-side instantiation function on the stack newtype for an old-style
+/// constructor (no receiver, returns `Self`): build the data, allocate the JS
+/// object around it, and install `[LegacyUnforgeable]` accessors as the JS
+/// constructor path would.
+fn gen_instance_factory(
+    factory_name: &Ident,
+    info: &MethodInfo,
+    type_name: &Ident,
+    inner_name: &Ident,
+) -> proc_macro2::TokenStream {
+    let (param_decls, param_names) = ctor_param_lists(info);
+    let call = ctor_call(info, inner_name, &param_names);
+    quote! {
+        /// Construct a new instance and return the stack newtype.
+        pub fn #factory_name(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
+            -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown>
+        {
+            unsafe {
+                let obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                    #call
+                })?;
+                // Install [LegacyUnforgeable] accessors.
+                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, obj)?;
+                #[cfg(debug_assertions)]
+                if let Some(__data) = ::js::class::get_private::<#inner_name>(obj.as_raw()) {
+                    ::js::class::ClassDef::debug_assert_fully_initialized(__data);
+                }
+                let nn = ::std::ptr::NonNull::new_unchecked(obj.as_raw());
+                Ok(#type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(nn))))
+            }
+        }
     }
 }
 
@@ -5211,6 +5282,54 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without a receiver, the return type alone marks a constructor — the
+    /// name is irrelevant.
+    #[test]
+    fn implicit_constructor_detects_self_returns_by_shape() {
+        let sig = |s: &str| syn::parse_str::<syn::Signature>(s).unwrap();
+        let url = format_ident!("URL");
+        assert!(is_implicit_constructor(&sig("fn new() -> Self"), &url));
+        assert!(is_implicit_constructor(
+            &sig("fn from_parts(a: String) -> Self"),
+            &url
+        ));
+        assert!(is_implicit_constructor(&sig("fn make() -> URL<'s>"), &url));
+    }
+
+    /// A no-receiver fn that returns anything else is a plain helper.
+    #[test]
+    fn implicit_constructor_rejects_non_instance_returns() {
+        let sig = |s: &str| syn::parse_str::<syn::Signature>(s).unwrap();
+        let url = format_ident!("URL");
+        assert!(!is_implicit_constructor(&sig("fn new() -> i32"), &url));
+        assert!(!is_implicit_constructor(&sig("fn helper()"), &url));
+        assert!(!is_implicit_constructor(
+            &sig("fn all() -> Vec<URL<'s>>"),
+            &url
+        ));
+    }
+
+    /// The setup-style shape (a receiver, no instance return) is
+    /// indistinguishable from a helper method, so it is keyed on the name.
+    #[test]
+    fn implicit_constructor_detects_setup_style_by_name() {
+        let sig = |s: &str| syn::parse_str::<syn::Signature>(s).unwrap();
+        let url = format_ident!("URL");
+        assert!(is_implicit_constructor(
+            &sig("fn new(&self, url: String) -> Result<(), ExnThrown>"),
+            &url
+        ));
+        assert!(is_implicit_constructor(
+            &sig("fn new(&mut self) -> Result<(), ExnThrown>"),
+            &url
+        ));
+        // Same shape, different name: an ordinary helper.
+        assert!(!is_implicit_constructor(
+            &sig("fn flush(&self) -> Result<(), ExnThrown>"),
+            &url
+        ));
+    }
 
     #[test]
     fn is_self_or_instance_type_matches_bare_name() {

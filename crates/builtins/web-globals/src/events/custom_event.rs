@@ -35,7 +35,7 @@ impl CustomEvent {
             composed: opts.composed,
         };
         CustomEventImpl {
-            parent: Event::init(event_type, Some(parent_init)),
+            parent: EventImpl::new(event_type, Some(parent_init)),
             detail: Heap::from(opts.detail.map_or(value::null(), |h| h.get())),
         }
     }

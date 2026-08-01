@@ -55,7 +55,7 @@ unsafe impl js::heap::Trace for AbortAlgorithm {
 }
 
 /// <https://dom.spec.whatwg.org/#interface-abortsignal>
-#[webidl_interface(extends = EventTarget, no_ctor)]
+#[webidl_interface(extends = EventTarget)]
 pub struct AbortSignal {
     parent: EventTarget,
 
@@ -83,13 +83,6 @@ pub struct AbortSignal {
 
 #[webidl_methods]
 impl AbortSignal {
-    /// <https://dom.spec.whatwg.org/#dom-abortsignal-constructor>
-    ///
-    /// AbortSignal has no constructor exposed to JS per spec. Only static
-    /// factory methods (`abort()`, `timeout()`, `any()`) create instances.
-    /// The proc macro requires a `#[constructor]` though, so we provide a
-    /// minimal one.
-    #[constructor]
     fn new() -> Self {
         AbortSignalImpl {
             parent: EventTargetImpl::default(),

@@ -57,7 +57,6 @@ pub struct ReadableStreamAsyncIterator {
 impl ReadableStreamAsyncIterator {
     /// Not exposed to JS (see `hidden`). Produces the default-initialized data;
     /// the fields are populated by `ReadableStream.prototype.values`.
-    #[constructor]
     fn new() -> Self {
         ReadableStreamAsyncIteratorImpl::default()
     }

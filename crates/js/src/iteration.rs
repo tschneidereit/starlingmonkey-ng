@@ -66,7 +66,6 @@ impl AsyncIteratorRecord<'_> {
     /// back to the sync iterator (wrapped via `afs_next`) when there is no
     /// `Symbol.asyncIterator` method. Use [`get_async_iterator`], which also
     /// registers this hidden class on the global.
-    #[constructor]
     fn new(&self, scope: &Scope<'_>, iterable: HandleValue<'_>) -> Result<(), ExnThrown> {
         // The method lookups use the boxed value (so primitive iterables such as
         // strings work), but each iterator factory is called with the original

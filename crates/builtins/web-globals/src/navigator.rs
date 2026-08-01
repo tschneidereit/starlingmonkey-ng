@@ -12,12 +12,6 @@ pub struct Navigator {}
 
 #[webidl_methods]
 impl Navigator {
-    /// Not exposed to JS due to the `hidden` attribute on the interface.
-    #[constructor]
-    fn new() -> Self {
-        NavigatorImpl {}
-    }
-
     /// <https://html.spec.whatwg.org/multipage/system-state.html#dom-navigator-useragent>
     #[getter]
     fn user_agent(&self) -> String {
