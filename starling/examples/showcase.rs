@@ -454,7 +454,7 @@ checks.join(", ")
         .get_property(&scope, c"__showcaseOk")
         .expect("Failed to read property");
     assert!(
-        val.to_boolean() == true,
+        val.to_boolean(),
         "JS showcase did not set __showcaseOk = true"
     );
     println!("  showcase.js completed successfully");

@@ -132,7 +132,7 @@ fn test_js_api_with_runtime() {
     // --- FromJSVal for bool ---
     {
         let v = scope.root_value(value::from_bool(false));
-        assert_eq!(bool::from_jsval(&scope, v, ()).unwrap(), false);
+        assert!(!bool::from_jsval(&scope, v, ()).unwrap());
     }
 
     // --- FromJSVal for i32 ---

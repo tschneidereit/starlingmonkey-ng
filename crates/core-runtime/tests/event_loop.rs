@@ -266,7 +266,7 @@ fn test_event_loop() {
 
         // Evaluate JS with the event loop thread-local set so setTimeout works.
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._timerFired = false; setTimeout(function() { globalThis._timerFired = true; }, 1);",
@@ -305,10 +305,10 @@ fn test_event_loop() {
     // is per-global, so a `clearTimeout` from one invocation must never resolve
     // to a different invocation's timer.
     {
-        let mut el_a = EventLoop::new();
-        let mut el_b = EventLoop::new();
+        let el_a = EventLoop::new();
+        let el_b = EventLoop::new();
 
-        with_event_loop(&mut el_a, |_| {
+        with_event_loop(&el_a, |_| {
             let ok = js::compile::evaluate_with_filename(
                 &scope,
                 "globalThis._idA = setTimeout(function() {}, 100000);",
@@ -317,7 +317,7 @@ fn test_event_loop() {
             );
             assert!(ok.is_ok(), "setTimeout in loop A failed");
         });
-        with_event_loop(&mut el_b, |_| {
+        with_event_loop(&el_b, |_| {
             let ok = js::compile::evaluate_with_filename(
                 &scope,
                 "globalThis._idB = setTimeout(function() {}, 100000);",
@@ -349,7 +349,7 @@ fn test_event_loop() {
         let mut el = EventLoop::new();
 
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._timerArgs = null; \
@@ -384,10 +384,10 @@ fn test_event_loop() {
 
     // ---- Test 8c: handler is converted before the timeout (WebIDL order) ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
 
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._convOrder = []; \
@@ -419,7 +419,7 @@ fn test_event_loop() {
 
         // Drain the queued (far-future) timer so it can't leak into later tests.
         let cleared = {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 js::compile::evaluate_with_filename(
                     &scope,
                     "clearTimeout(globalThis._convTid)",
@@ -439,7 +439,7 @@ fn test_event_loop() {
         let mut el = EventLoop::new();
 
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._ivTicks = 0; \
@@ -489,7 +489,7 @@ fn test_event_loop() {
         );
 
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._t1Fired = false; \
@@ -543,7 +543,7 @@ fn test_event_loop() {
         let mut el = EventLoop::new();
 
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._fireOrder = []; \
@@ -593,7 +593,7 @@ fn test_event_loop() {
         let mut el = EventLoop::new();
 
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._gcArgSeen = []; \
@@ -636,10 +636,10 @@ fn test_event_loop() {
 
     // ---- Test 9: clearTimeout cancels a timer ----
     {
-        let mut el = EventLoop::new();
+        let el = EventLoop::new();
 
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     "globalThis._cleared = true; var tid = setTimeout(function() { globalThis._cleared = false; }, 1); clearTimeout(tid);",
@@ -674,7 +674,7 @@ fn test_event_loop() {
         let mut el = EventLoop::new();
 
         {
-            with_event_loop(&mut el, |_| {
+            with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
                     r#"

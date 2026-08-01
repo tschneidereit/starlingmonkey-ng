@@ -61,7 +61,7 @@ fn block_on_event_loop(scope: &Scope<'_>, el: &mut EventLoop) {
 #[test]
 fn async_promise_resolves_and_rejects_via_event_loop() {
     clear_global_initializers();
-    register_global_initializer(|scope, global| AsyncTest::add_to_global(scope, global));
+    register_global_initializer(AsyncTest::add_to_global);
     let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
     let scope = rt.default_global();
     let mut el = EventLoop::new();
@@ -69,7 +69,7 @@ fn async_promise_resolves_and_rejects_via_event_loop() {
     // The two promises are spawned (their futures queued) during evaluation; they
     // are not event-loop tasks, so only the future driver will settle them.
     {
-        with_event_loop(&mut el, |_| {
+        with_event_loop(&el, |_| {
             js::compile::evaluate_with_filename(
                 &scope,
                 r#"
@@ -107,13 +107,13 @@ fn zero_delay_interval_does_not_starve_async_futures() {
     // from ever reaching its await branch — the future is never polled, the
     // promise never settles, and this test livelocks.
     clear_global_initializers();
-    register_global_initializer(|scope, global| AsyncTest::add_to_global(scope, global));
+    register_global_initializer(AsyncTest::add_to_global);
     let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
     let scope = rt.default_global();
     let mut el = EventLoop::new();
 
     {
-        with_event_loop(&mut el, |_| {
+        with_event_loop(&el, |_| {
             js::compile::evaluate_with_filename(
                 &scope,
                 r#"
@@ -147,13 +147,13 @@ fn long_handler_timer_chain_does_not_starve_async_futures() {
     // poll keeps the Rust-future-backed promise alive. The iteration cap turns
     // a starved future into an assertion failure instead of a livelock.
     clear_global_initializers();
-    register_global_initializer(|scope, global| AsyncTest::add_to_global(scope, global));
+    register_global_initializer(AsyncTest::add_to_global);
     let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
     let scope = rt.default_global();
     let mut el = EventLoop::new();
 
     {
-        with_event_loop(&mut el, |_| {
+        with_event_loop(&el, |_| {
             js::compile::evaluate_with_filename(
                 &scope,
                 r#"

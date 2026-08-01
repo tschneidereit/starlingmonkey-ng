@@ -22,7 +22,7 @@ use web_streams::readable::ReadableStream;
 /// `code`, drain microtasks, and return `String(globalThis.__out)`.
 fn run_with_stream(bytes: &[u8], code: &str) -> String {
     clear_global_initializers();
-    register_global_initializer(|scope, global| web_streams::add_to_global(scope, global));
+    register_global_initializer(web_streams::add_to_global);
     let rt = Runtime::init(&RuntimeConfig::default());
     let scope = rt.default_global();
     let global = scope.global();
