@@ -3,7 +3,7 @@
 //! Integration test for the async-promise event-loop driver.
 //!
 //! `fetch` and other async-IO builtins return a JS promise backed by a Rust
-//! future (`JSPromise`). The event loop's `run_to_completion` must poll those
+//! future (`PromiseFuture`). The event loop's `run_to_completion` must poll those
 //! futures with a real waker and settle their promises. This test exercises that
 //! path end to end with a tokio-timer-backed future — no networking — covering
 //! both resolution and rejection.
@@ -14,7 +14,7 @@ use core_runtime::event_loop::{run_to_completion, with_event_loop, EventLoop};
 use core_runtime::runtime::{clear_global_initializers, register_global_initializer, Runtime};
 use js::conversion::FromJSVal;
 use js::gc::scope::Scope;
-use js::promise::JSPromise;
+use js::promise::PromiseFuture;
 use std::time::Duration;
 
 /// A test builtin whose methods return promises backed by tokio-timer futures.
@@ -30,8 +30,8 @@ impl AsyncTest {
 
     /// Resolve with `value` after a short delay.
     #[method]
-    fn delayed(&self, value: i32) -> JSPromise {
-        JSPromise::new(async move {
+    fn delayed(&self, value: i32) -> PromiseFuture {
+        PromiseFuture::from_value(async move {
             tokio::time::sleep(Duration::from_millis(1)).await;
             Ok::<i32, String>(value)
         })
@@ -39,8 +39,8 @@ impl AsyncTest {
 
     /// Reject with `message` after a short delay.
     #[method]
-    fn fail(&self, message: String) -> JSPromise {
-        JSPromise::new(async move {
+    fn fail(&self, message: String) -> PromiseFuture {
+        PromiseFuture::from_value(async move {
             tokio::time::sleep(Duration::from_millis(1)).await;
             Err::<i32, String>(message)
         })

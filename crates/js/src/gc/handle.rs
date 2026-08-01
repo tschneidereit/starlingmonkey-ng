@@ -14,7 +14,7 @@ use crate::conversion::{ConversionError, ToJSVal};
 use crate::gc::scope::Scope;
 use crate::heap::{MozHeap, Trace};
 use crate::native::{JSObject, JSTracer, RawHandle};
-use mozjs::gc::{GCMethods, Handle};
+use mozjs::gc::{GCMethods, Handle, RootedTraceableBox};
 use mozjs_sys::jsval::ObjectValue;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -404,6 +404,18 @@ impl<T: JSType> std::cmp::PartialEq for Heap<T> {
     }
 }
 
+impl<T: JSType> std::cmp::PartialEq<Stack<'_, T>> for Heap<T> {
+    fn eq(&self, other: &Stack<'_, T>) -> bool {
+        unsafe { self.as_ptr() == other.as_raw() }
+    }
+}
+
+impl<T: JSType> std::cmp::PartialEq<Heap<T>> for Stack<'_, T> {
+    fn eq(&self, other: &Heap<T>) -> bool {
+        unsafe { self.as_raw() == other.as_ptr() }
+    }
+}
+
 /// Default creates a null `Heap`. Only intended for use by the proc
 /// macro's setup-style constructor path, which initializes all fields
 /// before the object is exposed. Calling `get()` on a default `Heap`
@@ -521,5 +533,65 @@ impl ToJSVal<'_> for Heap<crate::native::Value> {
     #[inline]
     fn to_jsval_raw(&self, _scope: &Scope<'_>) -> Result<crate::value::Value, ConversionError> {
         Ok(self.heap.get())
+    }
+}
+
+/// A GC-rooted boxed handle not tied to any `Scope`'s lifetime.
+///
+/// Use this to store a GC reference in locations that aren't traced themselves.
+pub struct RootedHeap<T: JSType> {
+    boxed: RootedTraceableBox<MozHeap<*mut JSObject>>,
+    _marker: PhantomData<T>,
+}
+
+impl<T: JSType> RootedHeap<T> {
+    /// Create a rooted boxed handle for the given stack-rooted object.
+    pub fn new<'s>(object: impl Into<Stack<'s, T>>) -> Self {
+        let boxed = RootedTraceableBox::new(MozHeap::default());
+        boxed.set(object.into().handle().get());
+        Self {
+            boxed,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Root the referenced object, returning a stack-rooted handle.
+    ///
+    /// Returns `T::Rooted<'s>`, the stack-rooted type for `Heap<T>`.
+    pub fn get<'s>(&self, scope: &'s Scope<'_>) -> T::Rooted<'s> {
+        let obj = self.boxed.get();
+        let handle = scope.root_object(NonNull::new(obj).expect("BoxedHeap::get can't fail"));
+        T::Rooted::from(Stack {
+            handle,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Return a raw pointer to the references `JSObject`
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer must either be used in  rooted immeda
+    pub unsafe fn as_ptr(&self) -> *mut JSObject {
+        self.boxed.get()
+    }
+}
+
+impl<T: JSType> std::cmp::Eq for RootedHeap<T> {}
+impl<T: JSType> std::cmp::PartialEq for RootedHeap<T> {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { self.as_ptr() == other.as_ptr() }
+    }
+}
+
+impl<T: JSType> std::cmp::PartialEq<Stack<'_, T>> for RootedHeap<T> {
+    fn eq(&self, other: &Stack<'_, T>) -> bool {
+        unsafe { self.as_ptr() == other.as_raw() }
+    }
+}
+
+impl<T: JSType> std::cmp::PartialEq<RootedHeap<T>> for Stack<'_, T> {
+    fn eq(&self, other: &RootedHeap<T>) -> bool {
+        unsafe { self.as_raw() == other.as_ptr() }
     }
 }
