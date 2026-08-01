@@ -19,8 +19,8 @@ use js::error::ExnThrown;
 
 fn run(code: &str) -> String {
     clear_global_initializers();
-    register_global_initializer(|scope, global| web_globals::add_to_global(scope, global));
-    register_global_initializer(|scope, global| web_streams::add_to_global(scope, global));
+    register_global_initializer(web_globals::add_to_global);
+    register_global_initializer(web_streams::add_to_global);
     let rt = Runtime::init(&RuntimeConfig::default());
     let scope = rt.default_global();
     if js::compile::evaluate_with_filename(&scope, code, "test.js", 1).is_err() {

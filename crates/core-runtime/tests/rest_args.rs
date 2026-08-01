@@ -312,7 +312,7 @@ mod handle_value_tests {
         /// the rooted argv, the relocated objects would be read through stale
         /// pointers and this would crash or return garbage.
         #[static_method]
-        fn sum_x_after_gc<'r>(scope: &'r Scope<'_>, rest: RestArgs<HandleValue<'_>>) -> i32 {
+        fn sum_x_after_gc(scope: &Scope<'_>, rest: RestArgs<HandleValue<'_>>) -> i32 {
             // Force a full, compacting collection with the values still held.
             js::gc::prepare_for_full_gc(scope);
             js::gc::non_incremental_gc(scope, js::gc::GCOptions::Shrink, js::gc::GCReason::API);
