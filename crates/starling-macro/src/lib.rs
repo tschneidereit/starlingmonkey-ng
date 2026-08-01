@@ -767,7 +767,7 @@ enum ReturnStyle {
     ResultValue,
     /// Raw method returning `Result<(), ExnThrown>` with manual exception handling
     Raw,
-    /// Returns `JSPromise` — creates a JS Promise and spawns the async future
+    /// Returns `PromiseFuture` — creates a JS Promise and spawns the async future
     Promise,
     /// Returns `Result<Promise<'_>, E>` — a synchronous WebIDL operation whose
     /// return type is a promise. The `Ok` promise is returned to JS; an `Err`
@@ -2107,7 +2107,7 @@ fn is_promise_type(ty: &Type) -> bool {
     tp.path
         .segments
         .last()
-        .is_some_and(|s| s.ident == "Promise" || s.ident == "JSPromise")
+        .is_some_and(|s| s.ident == "Promise" || s.ident == "PromiseFuture")
 }
 
 /// Whether the return type is `Result<Promise<...>, _>`: a synchronous WebIDL
@@ -2890,12 +2890,11 @@ fn emit_native_fn(
             };
             // Return the promise object to JS immediately
             __args.rval().set(unsafe { ::js::value::from_object(__promise.as_raw()) });
-            // Call the user's function to get the JSPromise (containing the future)
+            // Call the user's function to get the PromiseFuture (containing the future)
             let __js_promise = #call;
             // Spawn the future, which will resolve/reject the promise later (driven by
             // the event loop via `js::promise::drive_pending_futures`).
-            // TODO: this should probably not happen automatically for every promise-returning function.
-            unsafe { ::js::promise::__spawn_promise(__promise.as_raw(), __js_promise) };
+            __promise.spawn(__js_promise);
             ::js::exception::check_fn_return(&scope, true, &#name_str)
         },
         ReturnStyle::InstanceValue => {
@@ -5367,7 +5366,7 @@ mod tests {
             "Result<js::Promise<'r>, ExnThrown>"
         )));
         assert!(is_result_promise_type(&parse(
-            "Result<JSPromise, ExnThrown>"
+            "Result<PromiseFuture, ExnThrown>"
         )));
     }
 
