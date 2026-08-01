@@ -980,7 +980,6 @@ pub(crate) struct FromIterableState {
 #[jsmethods]
 impl FromIterableState<'_> {
     /// Step 2: Let _iteratorRecord_ be ? `GetIterator`(_asyncIterable_, async).
-    #[constructor]
     fn new(&self, scope: &Scope<'_>, async_iterable: HandleValue<'_>) -> Result<(), ExnThrown> {
         let record = js::iteration::get_async_iterator(scope, async_iterable)?;
         self.data_mut().record.set(record);
@@ -1816,7 +1815,6 @@ pub(crate) struct TeeState {
 /// Steps 4-18 of `ReadableStreamDefaultTee` are algorithm.
 #[jsmethods]
 impl TeeState<'_> {
-    #[constructor]
     fn new(
         &self,
         scope: &Scope<'_>,
@@ -1932,7 +1930,6 @@ pub(crate) struct PipeState {
 
 #[jsmethods]
 impl PipeState<'_> {
-    #[constructor]
     fn new(
         &self,
         scope: &Scope<'_>,
@@ -2211,7 +2208,6 @@ pub(crate) struct ByteTeeState {
 
 #[jsmethods]
 impl ByteTeeState<'_> {
-    #[constructor]
     fn new(&self, scope: &Scope<'_>, stream: ReadableStream<'_>) -> Result<(), ExnThrown> {
         self.data_mut().stream.set(stream);
         // Step 3: _reader_ = `AcquireDefaultReader`(_stream_).

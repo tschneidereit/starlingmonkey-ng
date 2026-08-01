@@ -71,7 +71,6 @@ pub struct JSRequest {
 
 #[jsmethods]
 impl JSRequest {
-    #[constructor]
     fn new() -> Self {
         Self {
             method: String::new(),

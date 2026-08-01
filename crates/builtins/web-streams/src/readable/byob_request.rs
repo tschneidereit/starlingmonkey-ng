@@ -10,7 +10,7 @@ use js::native::Value;
 use js::prelude::{HandleValue, OptionHeapExt};
 
 /// <https://streams.spec.whatwg.org/#rs-byob-request-class>
-#[webidl_interface(no_ctor)]
+#[webidl_interface]
 pub struct ReadableStreamBYOBRequest {
     /// <https://streams.spec.whatwg.org/#ReadableStreamBYOBRequest-controller>
     /// The parent ReadableByteStreamController instance, or null once the BYOB
@@ -25,7 +25,6 @@ pub struct ReadableStreamBYOBRequest {
 #[webidl_methods]
 impl ReadableStreamBYOBRequest {
     /// <https://streams.spec.whatwg.org/#dom-ReadableStreamBYOBRequest-constructor>
-    #[constructor]
     fn new() -> Self {
         ReadableStreamBYOBRequestImpl::default()
     }

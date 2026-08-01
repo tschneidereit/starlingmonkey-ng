@@ -8,7 +8,7 @@
 use std::time::Instant;
 
 use core_runtime::{webidl_interface, webidl_methods};
-use js::error::{ExnThrown, TypeError};
+use js::error::ExnThrown;
 use js::gc::scope::Scope;
 use js::Object;
 
@@ -55,13 +55,6 @@ pub fn now() -> f64 {
 
 #[webidl_methods]
 impl Performance {
-    /// Performance has no public constructor; it's exposed only as a
-    /// singleton on `globalThis.performance`.
-    #[constructor]
-    fn new(&self, _scope: &Scope<'_>) -> Result<(), TypeError> {
-        Err(TypeError("Illegal constructor".into()))
-    }
-
     /// <https://www.w3.org/TR/hr-time-3/#now-method>
     ///
     /// Return the number of milliseconds since the time origin, as a `double`.

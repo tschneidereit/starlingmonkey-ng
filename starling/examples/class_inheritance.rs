@@ -54,7 +54,7 @@ impl Dog {
     #[constructor]
     fn new(name: String, breed: String) -> Self {
         Self {
-            parent: Animal::init(name),
+            parent: AnimalImpl::new(name),
             breed,
         }
     }
@@ -87,7 +87,7 @@ impl Puppy {
     #[constructor]
     fn new(name: String, breed: String, age_months: i32) -> Self {
         Self {
-            parent: Dog::init(name, breed),
+            parent: DogImpl::new(name, breed),
             age_months,
         }
     }

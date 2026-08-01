@@ -1368,14 +1368,15 @@ pub trait ClassDef: Sized + Trace + 'static {
     /// Set automatically by `#[webidl_interface]`.
     const CONSTANTS_ON_PROTOTYPE: bool = false;
 
-    /// Whether `new Foo()` is allowed from JavaScript. When `false`, the
-    /// generated constructor throws a `TypeError` ("Illegal constructor"),
-    /// matching a WebIDL interface with no `constructor` operation (e.g.
-    /// `AbortSignal`, which is created only via static factory methods).
-    /// Internal factory paths (`Foo::new(scope)`) are unaffected.
+    /// Whether `new Foo()` is allowed from JavaScript, i.e. whether the
+    /// class's `#[jsmethods]` block declares a `#[constructor]`.
     ///
-    /// Set by the `no_ctor` macro option.
-    const CONSTRUCTIBLE: bool = true;
+    /// The macro-generated impl delegates to
+    /// [`__ConstructorRegistrar::defined`], so the answer comes from the
+    /// `#[jsmethods]` expansion rather than the class attribute.
+    fn has_js_constructor() -> bool {
+        true
+    }
 
     /// Whether `Foo` is installed as a property on the global object.
     /// When `true`, the class is hidden and accessible from JavaScript only
@@ -1724,9 +1725,7 @@ unsafe extern "C" fn generic_constructor<T: ClassDef>(
         return false;
     }
 
-    // Interfaces with no WebIDL `constructor` operation are not constructible
-    // from JS.
-    if !T::CONSTRUCTIBLE {
+    if !T::has_js_constructor() {
         crate::error::throw_type_error(&scope, c"Illegal constructor");
         return false;
     }
@@ -2187,6 +2186,14 @@ pub trait __ConstructorRegistrar<T: ClassDef> {
     /// impl on `__CtorReg<T>` overrides this.
     fn nargs(&self) -> u32 {
         0
+    }
+
+    /// Whether the `#[jsmethods]` block declares an explicit `#[constructor]`.
+    /// When `false`, the class is not constructible from JS (`new Foo()`
+    /// throws "Illegal constructor"). Rust-side factories (`Foo::new(scope)`)
+    /// are unaffected.
+    fn defined(&self) -> bool {
+        false
     }
 }
 

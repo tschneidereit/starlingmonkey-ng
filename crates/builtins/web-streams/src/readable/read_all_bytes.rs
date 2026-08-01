@@ -65,21 +65,9 @@ pub(crate) struct ReadAllBytesState {
     read_next_fn: Option<Heap<js::function::Function>>,
 }
 
+// Needed to fully initialize the class. Intentionally left blank.
 #[jsmethods]
 impl ReadAllBytesState {
-    #[constructor]
-    fn new() -> Self {
-        // Internal type, always created with real values via `create_instance_with`;
-        // this hidden constructor exists only so the prototype is registered.
-        ReadAllBytesStateImpl {
-            reader: Heap::default(),
-            promise: Heap::default(),
-            on_complete: None,
-            payload: Heap::default(),
-            bytes: Vec::new(),
-            read_next_fn: None,
-        }
-    }
 }
 
 /// `Read all bytes` from a default reader for `stream`, returning a promise that

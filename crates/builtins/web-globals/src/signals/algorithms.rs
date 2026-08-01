@@ -265,6 +265,7 @@ pub(crate) fn add_listener_removal_algorithm(
 /// Add an abort algorithm to `signal` that calls `callback` (with the abort
 /// reason as its argument) when the signal is aborted. For callers such as
 /// `fetch` that react to abort.
+// TODO: add support for native abort algorithms, with a GC-traced state argument.
 pub fn add_abort_algorithm(signal: &AbortSignal<'_>, callback: &js::Function<'_>) {
     // Step 1: If _signal_ is `aborted`, then return.
     if is_aborted(signal) {

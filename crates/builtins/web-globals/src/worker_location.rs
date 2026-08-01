@@ -62,20 +62,13 @@ fn with_url<T>(field: &str, f: impl FnOnce(&url::Url) -> T) -> Result<T, TypeErr
 /// `Symbol.toStringTag` is `"Location"` rather than the WebIDL default of
 /// `"WorkerLocation"`, matching the C++ runtime so JS code observes
 /// `Object.prototype.toString.call(location) === "[object Location]"`.
+///
+/// Instantiated as a singleton in [`add_to_global`].
 #[webidl_interface(to_string_tag = "Location")]
 pub struct WorkerLocation {}
 
 #[webidl_methods]
 impl WorkerLocation {
-    /// <https://html.spec.whatwg.org/multipage/workers.html#workerlocation>
-    ///
-    /// `WorkerLocation` has no IDL `[Constructor]`; JS code is not permitted
-    /// to construct one.
-    #[constructor]
-    fn new(&self, _scope: &Scope<'_>) -> Result<(), TypeError> {
-        Err(TypeError("Illegal constructor".into()))
-    }
-
     /// <https://html.spec.whatwg.org/multipage/workers.html#dom-workerlocation-href>
     #[getter]
     fn href(&self) -> Result<String, TypeError> {

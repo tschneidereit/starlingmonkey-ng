@@ -16,12 +16,7 @@ use js::native::Value;
 use js::prelude::{HandleValue, OptionHeapExt};
 
 /// <https://streams.spec.whatwg.org/#rs-default-controller-class>
-///
-/// `no_ctor`: per WebIDL the interface exposes no constructor, so
-/// `new ReadableStreamDefaultController()` throws. Instances are created
-/// internally via the macro-generated `ReadableStreamDefaultController::new`
-/// factory and populated by `SetUpDefaultController`.
-#[webidl_interface(no_ctor)]
+#[webidl_interface]
 pub struct ReadableStreamDefaultController {
     /// <https://streams.spec.whatwg.org/#ReadableStreamDefaultController-cancelalgorithm>
     /// A promise-returning algorithm, taking one argument (the cancel reason), which communicates a
@@ -82,12 +77,6 @@ pub struct ReadableStreamDefaultController {
 
 #[webidl_methods]
 impl ReadableStreamDefaultController {
-    /// <https://streams.spec.whatwg.org/#dom-ReadableStreamDefaultController-constructor>
-    ///
-    /// Not exposed to JS (see `no_ctor` on the interface). This produces the
-    /// default-initialized data used by the internal factory; the fields are
-    /// populated by `SetUpDefaultController`.
-    #[constructor]
     fn new() -> Self {
         ReadableStreamDefaultControllerImpl::default()
     }

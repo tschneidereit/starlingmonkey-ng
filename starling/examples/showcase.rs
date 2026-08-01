@@ -144,7 +144,7 @@ impl Circle {
     #[constructor]
     fn new(color: String, radius: f64) -> Self {
         Self {
-            parent: Shape::init(color),
+            parent: ShapeImpl::new(color),
             radius,
         }
     }
@@ -185,7 +185,7 @@ impl Rect {
     #[constructor]
     fn new(color: String, width: f64, height: f64) -> Self {
         Self {
-            parent: Shape::init(color),
+            parent: ShapeImpl::new(color),
             width,
             height,
         }

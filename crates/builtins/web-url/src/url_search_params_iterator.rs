@@ -41,11 +41,6 @@ pub struct URLSearchParamsIterator {
 
 #[webidl_methods]
 impl URLSearchParamsIterator {
-    #[constructor]
-    fn new(&self, _scope: &Scope<'_>) -> Result<(), js::error::TypeError> {
-        Err(js::error::TypeError("Illegal constructor".into()))
-    }
-
     /// <https://webidl.spec.whatwg.org/#es-iterator-prototype-next>
     #[method]
     fn next<'a>(&self, scope: &'a Scope<'a>) -> Result<js::Object<'a>, ExnThrown> {
