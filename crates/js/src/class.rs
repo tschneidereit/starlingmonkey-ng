@@ -39,6 +39,7 @@ use mozjs::jsapi::{
 };
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
+use mozjs_sys::jsapi::JS::SymbolCode;
 use starling_macro::must_root;
 
 /// Initialize a class on a global object.
@@ -2292,16 +2293,21 @@ impl<T: ClassDef> __PostInitRegistrar<T> for &__PostInitReg<T> {
 /// The closure receives the newly allocated (but empty) JS object and
 /// returns the Rust data to store in it. Because the JS object is
 /// allocated *before* `init` runs, any `Heap<U>` fields created inside
-/// the closure are safe from GC hazards — the allocation that could
-/// trigger GC has already happened.
-///
-/// # Safety
-///
-/// - The class for `T` must have been registered via [`register_class`] first.
-pub unsafe fn create_instance_with<'s, T: ClassDef>(
+/// the closure are safe from GC hazards: the object is already rooted.
+pub fn create_instance_with<'s, T: ClassDef>(
     scope: &'s Scope<'_>,
     init: impl FnOnce(Object<'s>) -> T,
-) -> Result<Object<'s>, ExnThrown> {
+) -> Result<T::Rooted<'s>, ExnThrown> {
+    try_create_instance_with(scope, |obj| Ok(init(obj)))
+}
+
+/// Fallible variant of [`create_instance_with`]: when `init` fails, its error
+/// propagates and the freshly allocated object is discarded without private
+/// data.
+pub fn try_create_instance_with<'s, T: ClassDef>(
+    scope: &'s Scope<'_>,
+    init: impl FnOnce(Object<'s>) -> Result<T, ExnThrown>,
+) -> Result<T::Rooted<'s>, ExnThrown> {
     let global = scope.global();
     let proto = match get_prototype::<T>(global) {
         // SAFETY: builtins' prototypes are always valid objects.
@@ -2310,10 +2316,14 @@ pub unsafe fn create_instance_with<'s, T: ClassDef>(
     };
 
     let class = T::class();
-    Object::new_with_proto(scope, class, proto).inspect(|obj| {
-        let data = init(*obj);
+    let obj = Object::new_with_proto(scope, class, proto)?;
+    let data = init(obj)?;
+    unsafe {
         set_private(obj.as_raw(), data);
-    })
+    }
+    // SAFETY: The handle points to a just-created object backed by `T`.
+    let stack = unsafe { Stack::<T>::from_handle_unchecked(obj.handle()) };
+    Ok(T::Rooted::from(stack))
 }
 
 // ---------------------------------------------------------------------------
@@ -2471,7 +2481,7 @@ pub fn define_to_string_tag(
     proto: crate::native::GCHandle<'_, *mut JSObject>,
     tag_value: &str,
 ) {
-    let tag_key = crate::symbol::get_well_known_key(scope, crate::native::SymbolCode::toStringTag);
+    let tag_key = crate::symbol::get_well_known_key(scope, SymbolCode::toStringTag);
     let tag_str = crate::string::Str::from_str(scope, tag_value)
         .expect("failed to create toStringTag string");
     // SAFETY: tag_str is a live JSString* from `from_str` above, valid in the current scope.
@@ -2501,4 +2511,52 @@ pub fn define_to_string_tag(
     proto_obj
         .define_property_by_id(scope, tag_id.handle(), desc.handle())
         .expect("failed to define Symbol.toStringTag");
+}
+
+/// Define a data property keyed by a well-known symbol on `obj` (typically a
+/// prototype), with the attributes WebIDL gives symbol-keyed prototype
+/// members: writable, non-enumerable, configurable.
+///
+/// Used for symbol-keyed method aliases, such as an `async iterable<>`
+/// declaration installing `@@asyncIterator` as an alias of the `values`
+/// method (WebIDL §3.7.10.2).
+pub fn define_well_known_symbol_property(
+    scope: &Scope<'_>,
+    obj: Object<'_>,
+    which: SymbolCode,
+    value: crate::prelude::HandleValue<'_>,
+) -> Result<(), ExnThrown> {
+    let key = crate::symbol::get_well_known_key(scope, which);
+
+    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let desc = crate::native::PropertyDescriptor {
+        _bitfield_align_1: [0; 0],
+        _bitfield_1: crate::native::PropertyDescriptor::new_bitfield_1(
+            true,  // hasConfigurable
+            true,  // configurable
+            true,  // hasEnumerable
+            false, // enumerable
+            true,  // hasWritable
+            true,  // writable
+            true,  // hasValue
+            false, // hasGetter
+            false, // hasSetter
+            false, // resolving
+        ),
+        getter_: ptr::null_mut(),
+        setter_: ptr::null_mut(),
+        value_: value.get(),
+    });
+
+    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let id = key);
+    obj.define_property_by_id(scope, id.handle(), desc.handle())
+}
+
+/// Adds an alias to the property given by `property` under the symbol `symbol` to the
+/// prototype of the builtin class `T`.
+pub fn add_symbol_alias<T: ClassDef>(scope: &Scope, property: &CStr, symbol: SymbolCode) {
+    let proto = get_prototype_object_for::<T>(scope).expect("prototype not found");
+    let values = proto
+        .get_property(scope, property)
+        .expect("property not found");
+    let _ = define_well_known_symbol_property(scope, proto, symbol, values);
 }

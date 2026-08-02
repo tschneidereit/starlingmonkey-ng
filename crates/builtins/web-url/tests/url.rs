@@ -467,7 +467,9 @@ fn url_search_params_updates_url() {
 #[test]
 fn url_set_search_updates_params() {
     assert_eq!(
-        eval("let u = new URL('https://example.com/?old=1'); u.search = '?new=2'; u.searchParams.get('new')"),
+        eval(
+            "let u = new URL('https://example.com/?old=1'); u.search = '?new=2'; u.searchParams.get('new')"
+        ),
         "2"
     );
 }
@@ -475,7 +477,9 @@ fn url_set_search_updates_params() {
 #[test]
 fn url_set_href_updates_search_params() {
     assert_eq!(
-        eval("let u = new URL('https://a.com/?x=1'); u.href = 'https://b.com/?y=2'; u.searchParams.get('y')"),
+        eval(
+            "let u = new URL('https://a.com/?x=1'); u.href = 'https://b.com/?y=2'; u.searchParams.get('y')"
+        ),
         "2"
     );
 }

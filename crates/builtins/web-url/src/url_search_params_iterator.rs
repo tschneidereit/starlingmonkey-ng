@@ -9,11 +9,12 @@
 use crate::url_search_params::{URLSearchParams, URLSearchParamsImpl};
 
 use core_runtime::{webidl_interface, webidl_methods};
-use js::class::get_prototype_for;
+use js::class::{get_iterator_prototype, get_prototype_for};
 use js::conversion::ToJSVal;
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
+use js::Object;
 
 /// Which kind of values the iterator produces.
 #[derive(Clone, Copy, Default)]
@@ -53,16 +54,14 @@ impl URLSearchParamsIterator {
             let js_value = match kind {
                 IteratorKind::Entries => {
                     let arr = js::Array::new(scope, 2)?;
-                    let name_val = name.as_str().to_jsval(scope).map_err(|e| e.throw(scope))?;
-                    let val_val = value.as_str().to_jsval(scope).map_err(|e| e.throw(scope))?;
+                    let name_val = name.as_str().to_jsval_throwing(scope)?;
+                    let val_val = value.as_str().to_jsval_throwing(scope)?;
                     arr.set_element(scope, 0, name_val)?;
                     arr.set_element(scope, 1, val_val)?;
                     scope.root_value(arr.as_value())
                 }
-                IteratorKind::Keys => name.as_str().to_jsval(scope).map_err(|e| e.throw(scope))?,
-                IteratorKind::Values => {
-                    value.as_str().to_jsval(scope).map_err(|e| e.throw(scope))?
-                }
+                IteratorKind::Keys => name.as_str().to_jsval_throwing(scope)?,
+                IteratorKind::Values => value.as_str().to_jsval_throwing(scope)?,
             };
             self.data_mut().index = index + 1;
             result.set_property(scope, c"value", js_value)?;
@@ -76,12 +75,11 @@ impl URLSearchParamsIterator {
     }
 }
 
-/// Define `Symbol.iterator` on the URLSearchParamsIterator prototype
-/// (returns `this`, per the iterable protocol).  Called after class
-/// registration.
+/// Chain the `URLSearchParamsIterator` prototype under `%IteratorPrototype%` to satisfy
+/// the interface's `iterable<>` declaration.
 pub fn install_symbol_iterator(scope: &Scope<'_>) {
     let proto = unsafe {
-        js::Object::from_raw(
+        Object::from_raw(
             scope,
             get_prototype_for::<URLSearchParamsIteratorImpl>(scope)
                 .expect("URLSearchParamsIterator class not registered"),
@@ -89,20 +87,7 @@ pub fn install_symbol_iterator(scope: &Scope<'_>) {
         .expect("URLSearchParamsIterator prototype is null")
     };
 
-    // Symbol.iterator on an iterator returns `this`.
-    let return_this = js::Function::new_callback(
-        scope,
-        c"[Symbol.iterator]",
-        0,
-        |_scope, args, _payload| Ok(args.this()),
-        js::value::undefined(),
-    )
-    .expect("failed to create Symbol.iterator function");
-
-    let iter_key = js::symbol::get_well_known_key(scope, js::native::SymbolCode::iterator);
-    let iter_id = scope.root_id(iter_key);
-    let fn_val = scope.root_value(return_this.as_value());
-    proto
-        .set_property_by_id(scope, iter_id, fn_val)
-        .expect("failed to define Symbol.iterator on iterator prototype");
+    if let Ok(iterator_proto) = get_iterator_prototype(scope) {
+        let _ = proto.set_prototype(scope, iterator_proto.handle());
+    }
 }

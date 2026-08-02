@@ -432,7 +432,9 @@ mod throw_exception_integration {
     #[test]
     fn type_error_thrown() {
         assert_eq!(
-            eval("try { throwTypeError(); 'no' } catch(e) { (e instanceof TypeError) + ',' + e.message }"),
+            eval(
+                "try { throwTypeError(); 'no' } catch(e) { (e instanceof TypeError) + ',' + e.message }"
+            ),
             "true,test type error"
         );
     }
@@ -440,7 +442,9 @@ mod throw_exception_integration {
     #[test]
     fn range_error_thrown() {
         assert_eq!(
-            eval("try { throwRangeError(); 'no' } catch(e) { (e instanceof RangeError) + ',' + e.message }"),
+            eval(
+                "try { throwRangeError(); 'no' } catch(e) { (e instanceof RangeError) + ',' + e.message }"
+            ),
             "true,test range error"
         );
     }
@@ -448,7 +452,9 @@ mod throw_exception_integration {
     #[test]
     fn syntax_error_thrown() {
         assert_eq!(
-            eval("try { throwSyntaxError(); 'no' } catch(e) { (e instanceof SyntaxError) + ',' + e.message }"),
+            eval(
+                "try { throwSyntaxError(); 'no' } catch(e) { (e instanceof SyntaxError) + ',' + e.message }"
+            ),
             "true,test syntax error"
         );
     }
@@ -457,7 +463,9 @@ mod throw_exception_integration {
     fn string_error_throws_type_error() {
         // String errors throw TypeError.
         assert_eq!(
-            eval("try { throwStringError(); 'no' } catch(e) { (e instanceof TypeError) + ',' + e.message }"),
+            eval(
+                "try { throwStringError(); 'no' } catch(e) { (e instanceof TypeError) + ',' + e.message }"
+            ),
             "true,test string error"
         );
     }

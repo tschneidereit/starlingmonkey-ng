@@ -267,7 +267,9 @@ mod webidl_interface_tests {
     #[test]
     fn constant_readonly_on_constructor() {
         assert_eq!(
-            eval("'use strict'; try { MediaError.MEDIA_ERR_ABORTED = 99; 'changed' } catch(e) { 'error' }"),
+            eval(
+                "'use strict'; try { MediaError.MEDIA_ERR_ABORTED = 99; 'changed' } catch(e) { 'error' }"
+            ),
             "error"
         );
     }
@@ -275,7 +277,9 @@ mod webidl_interface_tests {
     #[test]
     fn constant_readonly_on_prototype() {
         assert_eq!(
-            eval("'use strict'; try { MediaError.prototype.MEDIA_ERR_ABORTED = 99; 'changed' } catch(e) { 'error' }"),
+            eval(
+                "'use strict'; try { MediaError.prototype.MEDIA_ERR_ABORTED = 99; 'changed' } catch(e) { 'error' }"
+            ),
             "error"
         );
     }
@@ -725,5 +729,58 @@ mod webidl_dictionary_tests {
     #[test]
     fn undefined_dict_uses_defaults() {
         assert_eq!(eval("new Config(undefined).timeout"), "10");
+    }
+}
+
+/// Tests for Rust-side factory functions: unannotated constructor-shaped fns
+/// in a `#[jsmethods]` block, including the fallible `Result<Self, E>` shape.
+mod implicit_factory_tests {
+    use core_runtime::config::RuntimeConfig;
+    use core_runtime::jsclass;
+    use core_runtime::jsmethods;
+    use core_runtime::runtime::Runtime;
+    use js::error::{throw_type_error, ExnThrown};
+    use js::gc::scope::Scope;
+
+    #[jsclass]
+    struct Checked {
+        value: i32,
+    }
+
+    #[jsmethods]
+    impl Checked {
+        #[constructor]
+        fn construct() -> Self {
+            Self { value: 0 }
+        }
+
+        /// Fallible Rust-side factory, detected by its `Result<Self, E>` shape.
+        fn checked(scope: &Scope<'_>, value: i32) -> Result<Self, ExnThrown> {
+            if value < 0 {
+                return Err(throw_type_error(scope, c"value must be non-negative"));
+            }
+            Ok(Self { value })
+        }
+    }
+
+    #[test]
+    fn fallible_factory_ok_and_err() {
+        core_runtime::runtime::register_global_initializer(|scope, global| {
+            Checked::add_to_global(scope, global);
+        });
+        let rt = Runtime::init(&RuntimeConfig::default());
+        let scope = rt.default_global();
+
+        let ok = Checked::checked(&scope, 7).expect("factory should succeed");
+        assert_eq!(ok.data().value, 7);
+
+        assert!(Checked::checked(&scope, -1).is_err());
+        // The error path must leave the thrown exception pending; capture
+        // clears it and yields the message.
+        let captured = ExnThrown::capture(&scope);
+        assert_eq!(
+            captured.message.as_deref(),
+            Some("value must be non-negative")
+        );
     }
 }

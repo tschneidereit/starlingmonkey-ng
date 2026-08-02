@@ -13,6 +13,7 @@ use core_runtime::runtime::Runtime;
 use js::gc::scope::Scope;
 use js::native::JSTracer;
 
+use js::error::ExnThrown;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -54,7 +55,7 @@ impl Task for CounterTask {
         self: Box<Self>,
         _scope: &Scope<'_>,
         _id: core_runtime::event_loop::TaskId,
-    ) -> Result<(), ()> {
+    ) -> Result<(), ExnThrown> {
         self.counter.set(self.counter.get() + 1);
         Ok(())
     }
@@ -862,7 +863,7 @@ fn test_event_loop() {
                 mut self: Box<Self>,
                 _scope: &Scope<'_>,
                 _id: core_runtime::event_loop::TaskId,
-            ) -> Result<(), ()> {
+            ) -> Result<(), ExnThrown> {
                 drop(self.interest.take());
                 Ok(())
             }

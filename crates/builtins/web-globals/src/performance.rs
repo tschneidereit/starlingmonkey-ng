@@ -100,12 +100,11 @@ pub fn add_to_global<'s>(scope: &'s Scope<'_>, global: Object<'s>) {
 
     Performance::add_to_global(scope, global);
 
-    let performance = unsafe {
+    let performance =
         js::class::create_instance_with::<PerformanceImpl>(scope, |_| PerformanceImpl {
             parent: EventTargetImpl::default(),
         })
-    }
-    .expect("failed to allocate Performance singleton");
+        .expect("failed to allocate Performance singleton");
 
     global
         .set_property(scope, c"performance", performance)

@@ -9,7 +9,7 @@ use core_runtime::{webidl_interface, webidl_methods};
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
-use js::prelude::HandleValue;
+use js::prelude::{HandleValue, OptionHeapExt};
 use js::Promise;
 
 /// <https://streams.spec.whatwg.org/#default-reader-class>
@@ -37,25 +37,21 @@ impl DefaultReader {
     /// `SetUpDefaultReader` populates it (it needs `&self` to wire
     /// the stream↔reader links and the closed promise).
     #[constructor]
-    pub(crate) fn new(
-        &self,
-        scope: &Scope<'_>,
-        stream: ReadableStream<'_>,
-    ) -> Result<(), ExnThrown> {
+    pub fn new(&self, scope: &Scope<'_>, stream: ReadableStream<'_>) -> Result<(), ExnThrown> {
         // Step 1: Perform ? `SetUpDefaultReader`(`this`, _stream_).
         algorithms::set_up_readable_stream_default_reader(scope, self, &stream)
     }
 
     /// <https://streams.spec.whatwg.org/#dom-DefaultReader-closed>
     #[getter]
-    pub(crate) fn closed<'r>(&self, scope: &'r Scope<'_>) -> Promise<'r> {
+    pub fn closed<'r>(&self, scope: &'r Scope<'_>) -> Promise<'r> {
         // Step 1: Return `this`.`[[closedPromise]]`.
         self.data().closed_promise.get(scope)
     }
 
     /// <https://streams.spec.whatwg.org/#default-reader-read>
     #[method]
-    fn read<'r>(&self, scope: &'r Scope<'_>) -> Result<Promise<'r>, ExnThrown> {
+    pub fn read<'r>(&self, scope: &'r Scope<'_>) -> Result<Promise<'r>, ExnThrown> {
         // Step 1: If `this`.`[[stream]]` is undefined, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if self.data().stream.is_none() {
@@ -97,7 +93,7 @@ impl DefaultReader {
 
     /// <https://streams.spec.whatwg.org/#DefaultReader-cancel>
     #[method]
-    fn cancel<'r>(
+    pub fn cancel<'r>(
         &self,
         scope: &'r Scope<'_>,
         reason: Option<HandleValue<'r>>,
@@ -116,5 +112,9 @@ impl DefaultReader {
         Ok(algorithms::readable_stream_reader_generic_cancel(
             scope, self, reason,
         ))
+    }
+
+    pub fn stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>> {
+        self.data().stream.get(scope)
     }
 }

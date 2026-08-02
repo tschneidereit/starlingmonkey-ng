@@ -21,6 +21,7 @@ use crate::readable::ReadableStreamDefaultController;
 use crate::transform::readable_writable_pair::ReadableWritablePair;
 use crate::writable::WritableStream;
 use core_runtime::{webidl_interface, webidl_methods};
+use js::prelude::ToJSVal;
 use js::{
     conversion::ConversionError, conversion::FromJSVal, error::ExnThrown, gc::handle::Heap,
     gc::handle::OptionHeapExt, gc::scope::Scope, native::Value, prelude::HandleValue, Object,
@@ -219,12 +220,19 @@ impl ReadableStream {
     /// no such object.
     pub fn new_native<'r>(
         scope: &'r Scope<'_>,
-        underlying_source: HandleValue<'_>,
+        underlying_source: impl ToJSVal<'r>,
         pull: HandleValue<'_>,
         cancel: HandleValue<'_>,
     ) -> Result<ReadableStream<'r>, ExnThrown> {
-        let undef = HandleValue::undefined();
-        let stream = create_readable_stream(scope, undef, pull, cancel, 0.0, undef)?;
+        let underlying_source = underlying_source.to_jsval_throwing(scope)?;
+        let stream = create_readable_stream(
+            scope,
+            HandleValue::undefined(),
+            pull,
+            cancel,
+            0.0,
+            HandleValue::undefined(),
+        )?;
         if let Ok(source) = js::Object::from_value(scope, underlying_source.get()) {
             stream.set_native_source(&source);
         }
@@ -468,13 +476,10 @@ impl ReadableStream {
         // Step 1: Let _reader_ be ? `AcquireDefaultReader`(`this`).
         let reader = algorithms::acquire_readable_stream_default_reader(scope, self)?;
         // Step 2: Let _iterator_ be a `new` ``ReadableStreamAsyncIterator``.
-        let iterator = unsafe {
+        let iterator =
             js::class::create_instance_with::<ReadableStreamAsyncIteratorImpl>(scope, |_| {
                 ReadableStreamAsyncIteratorImpl::default()
-            })
-        }?
-        .cast::<ReadableStreamAsyncIterator>()
-        .map_err(|_| ExnThrown)?;
+            })?;
         // Step 3: Set _iterator_'s reader to _reader_.
         iterator.data_mut().reader = Some(Heap::from(reader));
         // Step 4: Let _preventCancel_ be _options_["``preventCancel``"].
@@ -503,6 +508,22 @@ impl ReadableStream {
     /// closing or erroring it would still have an observable effect.
     pub fn is_readable(&self) -> bool {
         self.data().state == ReadableStreamState::Readable
+    }
+
+    /// <https://streams.spec.whatwg.org/#readable-stream-cancel>
+    /// Cancel the stream with `reason`, running its underlying source's cancel
+    /// steps. This is `ReadableStreamCancel`, the internal algorithm, so — unlike
+    /// the author-facing `cancel()` method — it applies to a locked stream too.
+    /// Callers that hold a reader should prefer
+    /// [`native_read::native_reader_cancel`](crate::readable::native_read::native_reader_cancel).
+    /// Distinct from the author-facing [`cancel`](Self::cancel) method above,
+    /// which rejects when the stream is locked.
+    pub fn cancel_internal<'r>(
+        &self,
+        scope: &'r Scope<'_>,
+        reason: HandleValue<'r>,
+    ) -> Promise<'r> {
+        algorithms::readable_stream_cancel(scope, self, reason)
     }
 
     pub fn error(&self, scope: &Scope<'_>, reason: HandleValue<'_>) {
@@ -552,9 +573,11 @@ impl ReadableStream {
     pub fn set_native_source(&self, source: &Object<'_>) {
         self.data_mut().native_byte_source = Some(Heap::from(*source));
     }
-}
 
-impl<'s> ReadableStream<'s> {
+    pub fn controller(&self, scope: &'s Scope<'_>) -> Option<Object<'s>> {
+        self.data().controller.get(scope)
+    }
+
     pub fn reader(&self, scope: &'s Scope<'_>) -> Option<Object<'s>> {
         self.data().reader.get(scope)
     }

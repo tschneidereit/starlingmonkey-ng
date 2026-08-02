@@ -163,10 +163,9 @@ pub fn add_to_global<'s>(scope: &'s Scope<'_>, global: Object<'s>) {
 
     // SAFETY: `WorkerLocation::add_to_global` registered the class on the
     // current global immediately above.
-    let location = unsafe {
+    let location =
         js::class::create_instance_with::<WorkerLocationImpl>(scope, |_| WorkerLocationImpl {})
-    }
-    .expect("failed to allocate WorkerLocation singleton");
+            .expect("failed to allocate WorkerLocation singleton");
 
     global
         .set_property(scope, c"location", location)

@@ -421,15 +421,12 @@ impl URL<'_> {
             .into_owned()
             .collect();
 
-        let query_object = unsafe {
-            js::class::create_instance_with::<crate::url_search_params::URLSearchParamsImpl>(
-                scope,
-                |_| crate::url_search_params::URLSearchParamsImpl {
-                    list: query_list,
-                    url_object: None,
-                },
-            )
-        }?;
+        let query_object = js::class::create_instance_with::<
+            crate::url_search_params::URLSearchParamsImpl,
+        >(scope, |_| crate::url_search_params::URLSearchParamsImpl {
+            list: query_list,
+            url_object: None,
+        })?;
         let query_object = query_object
             .cast::<URLSearchParams>()
             .map_err(|_| throw_type_error(scope, c"Failed to create URLSearchParams object"))?;

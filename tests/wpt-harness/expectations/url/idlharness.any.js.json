@@ -177,7 +177,7 @@
     "status": "PASS"
   },
   "URLSearchParams interface: iterable<USVString, USVString>": {
-    "status": "FAIL"
+    "status": "PASS"
   },
   "URLSearchParams interface: stringifier": {
     "status": "PASS"

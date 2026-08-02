@@ -18,6 +18,13 @@
 //! and invoke an author-installed `then`. (The same property is why `pipeTo`
 //! survives that attack.)
 
+use super::algorithms::{
+    acquire_readable_stream_default_reader, readable_stream_default_reader_read,
+};
+use super::default_reader::DefaultReaderImpl;
+use super::read_request::ReadRequest;
+use super::readable_stream::ReadableStream;
+use crate::readable::DefaultReader;
 use core_runtime::{jsclass, jsmethods};
 use js::conversion::FromJSVal;
 use js::error::ExnThrown;
@@ -27,13 +34,6 @@ use js::native::Value;
 use js::prelude::{CallbackArgs, HandleValue, OptionHeapExt};
 use js::value;
 use js::{Function, Object, Promise, Uint8Array};
-
-use super::algorithms::{
-    acquire_readable_stream_default_reader, readable_stream_default_reader_read,
-};
-use super::default_reader::DefaultReaderImpl;
-use super::read_request::ReadRequest;
-use super::readable_stream::ReadableStream;
 
 /// The completion of a read-all-bytes drain (the caller's `successSteps`):
 /// receives the payload value given to [`read_all_bytes`] and the assembled
@@ -68,6 +68,21 @@ pub(crate) struct ReadAllBytesState {
 // Needed to fully initialize the class. Intentionally left blank.
 #[jsmethods]
 impl ReadAllBytesState {
+    fn new(
+        reader: DefaultReader,
+        promise: Promise,
+        on_complete: ReadAllBytesComplete,
+        payload: HandleValue,
+    ) -> Self {
+        Self {
+            reader: Heap::from(reader),
+            promise: Heap::from(promise),
+            on_complete: Some(on_complete),
+            payload: Heap::from(payload.get()),
+            bytes: Vec::new(),
+            read_next_fn: None,
+        }
+    }
 }
 
 /// `Read all bytes` from a default reader for `stream`, returning a promise that
@@ -92,22 +107,10 @@ pub fn read_all_bytes<'r>(
     // non-fetch caller that wants the stream reusable afterward must release it
     // itself.
     let reader = acquire_readable_stream_default_reader(scope, &stream)?;
-    let state = unsafe {
-        js::class::create_instance_with::<ReadAllBytesStateImpl>(scope, |_| ReadAllBytesStateImpl {
-            reader: Heap::from(reader),
-            promise: Heap::from(promise),
-            on_complete: Some(on_complete),
-            payload: Heap::from(payload.get()),
-            bytes: Vec::new(),
-            read_next_fn: None,
-        })
-    }?
-    .cast::<ReadAllBytesState>()
-    .expect("freshly created ReadAllBytesState");
+    let state = ReadAllBytesState::new(scope, reader, promise, on_complete, payload)?;
     // The deferred-read callback, reused for every chunk. Created here (not in
     // the closure above) because its payload is the state object.
-    let state_value = scope.root_value(state.as_value());
-    let read_next_fn = Function::new_callback(scope, c"", 0, read_next_microtask, state_value)?;
+    let read_next_fn = Function::new_callback(scope, c"", 0, read_next_microtask, state)?;
     state.data_mut().read_next_fn = Some(Heap::from(read_next_fn));
     read_next(scope, state);
     Ok(promise)
