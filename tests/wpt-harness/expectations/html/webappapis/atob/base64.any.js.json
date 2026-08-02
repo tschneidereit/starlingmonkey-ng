@@ -855,6 +855,288 @@
     "status": "PASS"
   },
   "atob() setup.": {
-    "status": "FAIL"
+    "status": "PASS"
+  },
+  "atob(\"\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd\")": {
+    "status": "PASS"
+  },
+  "atob(\" abcd\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd \")": {
+    "status": "PASS"
+  },
+  "atob(\" abcd===\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd=== \")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd ===\")": {
+    "status": "PASS"
+  },
+  "atob(\"a\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab\")": {
+    "status": "PASS"
+  },
+  "atob(\"abc\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcde\")": {
+    "status": "PASS"
+  },
+  "atob(\"𐀀\")": {
+    "status": "PASS"
+  },
+  "atob(\"=\")": {
+    "status": "PASS"
+  },
+  "atob(\"==\")": {
+    "status": "PASS"
+  },
+  "atob(\"===\")": {
+    "status": "PASS"
+  },
+  "atob(\"====\")": {
+    "status": "PASS"
+  },
+  "atob(\"=====\")": {
+    "status": "PASS"
+  },
+  "atob(\"a=\")": {
+    "status": "PASS"
+  },
+  "atob(\"a==\")": {
+    "status": "PASS"
+  },
+  "atob(\"a===\")": {
+    "status": "PASS"
+  },
+  "atob(\"a====\")": {
+    "status": "PASS"
+  },
+  "atob(\"a=====\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab=\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab==\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab===\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab====\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab=====\")": {
+    "status": "PASS"
+  },
+  "atob(\"abc=\")": {
+    "status": "PASS"
+  },
+  "atob(\"abc==\")": {
+    "status": "PASS"
+  },
+  "atob(\"abc===\")": {
+    "status": "PASS"
+  },
+  "atob(\"abc====\")": {
+    "status": "PASS"
+  },
+  "atob(\"abc=====\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd=\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd==\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd===\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd====\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd=====\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcde=\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcde==\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcde===\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcde====\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcde=====\")": {
+    "status": "PASS"
+  },
+  "atob(\"=a\")": {
+    "status": "PASS"
+  },
+  "atob(\"=a=\")": {
+    "status": "PASS"
+  },
+  "atob(\"a=b\")": {
+    "status": "PASS"
+  },
+  "atob(\"a=b=\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab=c\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab=c=\")": {
+    "status": "PASS"
+  },
+  "atob(\"abc=d\")": {
+    "status": "PASS"
+  },
+  "atob(\"abc=d=\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab\\vcd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab　cd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab、cd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab\\tcd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab\\ncd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab\\fcd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab\\rcd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab cd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab cd\")": {
+    "status": "PASS"
+  },
+  "atob(\"ab\\t\\n\\f\\r cd\")": {
+    "status": "PASS"
+  },
+  "atob(\" \\t\\n\\f\\r ab\\t\\n\\f\\r cd\\t\\n\\f\\r \")": {
+    "status": "PASS"
+  },
+  "atob(\"ab\\t\\n\\f\\r =\\t\\n\\f\\r =\\t\\n\\f\\r \")": {
+    "status": "PASS"
+  },
+  "atob(\"A\")": {
+    "status": "PASS"
+  },
+  "atob(\"/A\")": {
+    "status": "PASS"
+  },
+  "atob(\"//A\")": {
+    "status": "PASS"
+  },
+  "atob(\"///A\")": {
+    "status": "PASS"
+  },
+  "atob(\"////A\")": {
+    "status": "PASS"
+  },
+  "atob(\"/\")": {
+    "status": "PASS"
+  },
+  "atob(\"A/\")": {
+    "status": "PASS"
+  },
+  "atob(\"AA/\")": {
+    "status": "PASS"
+  },
+  "atob(\"AAAA/\")": {
+    "status": "PASS"
+  },
+  "atob(\"AAA/\")": {
+    "status": "PASS"
+  },
+  "atob(\"\\0nonsense\")": {
+    "status": "PASS"
+  },
+  "atob(\"abcd\\0nonsense\")": {
+    "status": "PASS"
+  },
+  "atob(\"YQ\")": {
+    "status": "PASS"
+  },
+  "atob(\"YR\")": {
+    "status": "PASS"
+  },
+  "atob(\"~~\")": {
+    "status": "PASS"
+  },
+  "atob(\"..\")": {
+    "status": "PASS"
+  },
+  "atob(\"--\")": {
+    "status": "PASS"
+  },
+  "atob(\"__\")": {
+    "status": "PASS"
+  },
+  "atob(undefined)": {
+    "status": "PASS"
+  },
+  "atob(null)": {
+    "status": "PASS"
+  },
+  "atob(7)": {
+    "status": "PASS"
+  },
+  "atob(12)": {
+    "status": "PASS"
+  },
+  "atob(1.5)": {
+    "status": "PASS"
+  },
+  "atob(true)": {
+    "status": "PASS"
+  },
+  "atob(false)": {
+    "status": "PASS"
+  },
+  "atob(NaN)": {
+    "status": "PASS"
+  },
+  "atob(Infinity)": {
+    "status": "PASS"
+  },
+  "atob(-Infinity)": {
+    "status": "PASS"
+  },
+  "atob(0)": {
+    "status": "PASS"
+  },
+  "atob(-0)": {
+    "status": "PASS"
+  },
+  "atob(object \"foo\")": {
+    "status": "PASS"
+  },
+  "atob(object \"abcd\")": {
+    "status": "PASS"
   }
 }

@@ -1,0 +1,26 @@
+{
+  "Fetching data:,response%27s%20body is OK": {
+    "status": "PASS"
+  },
+  "Fetching data:,response%27s%20body is OK (same-origin)": {
+    "status": "PASS"
+  },
+  "Fetching data:,response%27s%20body is OK (cors)": {
+    "status": "PASS"
+  },
+  "Fetching data:text/plain;base64,cmVzcG9uc2UncyBib[...] is OK": {
+    "status": "PASS"
+  },
+  "Fetching data:image/png;base64,cmVzcG9uc2UncyBib2[...] is OK": {
+    "status": "PASS"
+  },
+  "Fetching [POST] data:,response%27s%20body is OK": {
+    "status": "PASS"
+  },
+  "Fetching [HEAD] data:,response%27s%20body is OK": {
+    "status": "PASS"
+  },
+  "Fetching [GET] data:notAdataUrl.com is KO": {
+    "status": "PASS"
+  }
+}

@@ -1,5 +1,5 @@
 [package]
-name = "libstarling"
+name = "web-fetch"
 version.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -10,24 +10,22 @@ edition.workspace = true
 # No unit tests; skip building the (SpiderMonkey-sized) lib test harness binary.
 test = false
 
-[features]
-debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs"]
-
 [dependencies]
+bytes.workspace = true
 core-runtime.workspace = true
+data-url.workspace = true
 js.workspace = true
+platform.workspace = true
 url.workspace = true
-web-fetch.workspace = true
 web-globals.workspace = true
 web-streams.workspace = true
 web-url.workspace = true
-cpp-builtins.workspace = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[dev-dependencies]
+libstarling.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio.workspace = true
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasip3.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,41 @@
+{
+  "Passing nothing to Headers constructor": {
+    "status": "PASS"
+  },
+  "Passing undefined to Headers constructor": {
+    "status": "PASS"
+  },
+  "Passing null to Headers constructor": {
+    "status": "PASS"
+  },
+  "Basic operation with one property": {
+    "status": "PASS"
+  },
+  "Basic operation with one property and a proto": {
+    "status": "PASS"
+  },
+  "Correct operation ordering with two properties": {
+    "status": "PASS"
+  },
+  "Correct operation ordering with two properties one of which has an invalid name": {
+    "status": "PASS"
+  },
+  "Correct operation ordering with two properties one of which has an invalid value": {
+    "status": "PASS"
+  },
+  "Correct operation ordering with non-enumerable properties": {
+    "status": "PASS"
+  },
+  "Correct operation ordering with undefined descriptors": {
+    "status": "PASS"
+  },
+  "Correct operation ordering with repeated keys": {
+    "status": "PASS"
+  },
+  "Basic operation with Symbol keys": {
+    "status": "PASS"
+  },
+  "Operation with non-enumerable Symbol keys": {
+    "status": "PASS"
+  }
+}
