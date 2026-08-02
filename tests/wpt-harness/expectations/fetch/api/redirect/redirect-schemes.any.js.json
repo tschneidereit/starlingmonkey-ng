@@ -1,0 +1,20 @@
+{
+  "redirect-schemes": {
+    "status": "PASS"
+  },
+  "redirect-schemes 1": {
+    "status": "PASS"
+  },
+  "redirect-schemes 2": {
+    "status": "PASS"
+  },
+  "redirect-schemes 3": {
+    "status": "PASS"
+  },
+  "redirect-schemes 4": {
+    "status": "PASS"
+  },
+  "redirect-schemes 5": {
+    "status": "PASS"
+  }
+}

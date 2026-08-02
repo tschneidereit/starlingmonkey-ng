@@ -1,0 +1,50 @@
+{
+  "Fetching aaa://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching cap://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching cid://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching dav://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching dict://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching dns://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching geo://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching im://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching imap://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching ipp://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching ldap://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching mailto://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching nfs://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching pop://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching rtsp://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  },
+  "Fetching snmp://{{host}}:{{ports[http][0]}}/ is KO": {
+    "status": "PASS"
+  }
+}

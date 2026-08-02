@@ -1,0 +1,74 @@
+{
+  "Request has clone method": {
+    "status": "PASS"
+  },
+  "Request has arrayBuffer method": {
+    "status": "PASS"
+  },
+  "Request has blob method": {
+    "status": "PASS"
+  },
+  "Request has formData method": {
+    "status": "PASS"
+  },
+  "Request has json method": {
+    "status": "PASS"
+  },
+  "Request has text method": {
+    "status": "PASS"
+  },
+  "Check method attribute": {
+    "status": "PASS"
+  },
+  "Check url attribute": {
+    "status": "PASS"
+  },
+  "Check headers attribute": {
+    "status": "PASS"
+  },
+  "Check destination attribute": {
+    "status": "PASS"
+  },
+  "Check referrer attribute": {
+    "status": "PASS"
+  },
+  "Check referrerPolicy attribute": {
+    "status": "PASS"
+  },
+  "Check mode attribute": {
+    "status": "PASS"
+  },
+  "Check credentials attribute": {
+    "status": "PASS"
+  },
+  "Check cache attribute": {
+    "status": "PASS"
+  },
+  "Check redirect attribute": {
+    "status": "PASS"
+  },
+  "Check integrity attribute": {
+    "status": "PASS"
+  },
+  "Check isReloadNavigation attribute": {
+    "status": "PASS"
+  },
+  "Check isHistoryNavigation attribute": {
+    "status": "PASS"
+  },
+  "Check duplex attribute": {
+    "status": "PASS"
+  },
+  "Check bodyUsed attribute": {
+    "status": "PASS"
+  },
+  "Request does not expose priority attribute": {
+    "status": "PASS"
+  },
+  "Request does not expose internalpriority attribute": {
+    "status": "PASS"
+  },
+  "Request does not expose blocking attribute": {
+    "status": "PASS"
+  }
+}

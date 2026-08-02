@@ -1,0 +1,221 @@
+{
+  "Setup.": {
+    "status": "PASS"
+  },
+  "\"data://test/,X\"": {
+    "status": "PASS"
+  },
+  "\"data://test:test/,X\"": {
+    "status": "PASS"
+  },
+  "\"data:,X\"": {
+    "status": "PASS"
+  },
+  "\"data:\"": {
+    "status": "PASS"
+  },
+  "\"data:text/html\"": {
+    "status": "PASS"
+  },
+  "\"data:text/html    ;charset=x   \"": {
+    "status": "PASS"
+  },
+  "\"data:,\"": {
+    "status": "PASS"
+  },
+  "\"data:,X#X\"": {
+    "status": "PASS"
+  },
+  "\"data:,%FF\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain,X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain ,X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain%20,X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain\\f,X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain%0C,X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain;,X\"": {
+    "status": "PASS"
+  },
+  "\"data:;x=x;charset=x,X\"": {
+    "status": "PASS"
+  },
+  "\"data:;x=x,X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain;charset=windows-1252,%C2%B1\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain;Charset=UTF-8,%C2%B1\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain;charset=windows-1252,áñçə💩\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain;charset=UTF-8,áñçə💩\"": {
+    "status": "PASS"
+  },
+  "\"data:image/gif,%C2%B1\"": {
+    "status": "PASS"
+  },
+  "\"data:IMAGE/gif,%C2%B1\"": {
+    "status": "PASS"
+  },
+  "\"data:IMAGE/gif;hi=x,%C2%B1\"": {
+    "status": "PASS"
+  },
+  "\"data:IMAGE/gif;CHARSET=x,%C2%B1\"": {
+    "status": "PASS"
+  },
+  "\"data: ,%FF\"": {
+    "status": "PASS"
+  },
+  "\"data:%20,%FF\"": {
+    "status": "PASS"
+  },
+  "\"data:\\f,%FF\"": {
+    "status": "PASS"
+  },
+  "\"data:%1F,%FF\"": {
+    "status": "PASS"
+  },
+  "\"data:\\0,%FF\"": {
+    "status": "PASS"
+  },
+  "\"data:%00,%FF\"": {
+    "status": "PASS"
+  },
+  "\"data:text/html  ,X\"": {
+    "status": "PASS"
+  },
+  "\"data:text / html,X\"": {
+    "status": "PASS"
+  },
+  "\"data:†,X\"": {
+    "status": "PASS"
+  },
+  "\"data:†/†,X\"": {
+    "status": "PASS"
+  },
+  "\"data:X,X\"": {
+    "status": "PASS"
+  },
+  "\"data:image/png,X X\"": {
+    "status": "PASS"
+  },
+  "\"data:application/javascript,X X\"": {
+    "status": "PASS"
+  },
+  "\"data:application/xml,X X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/javascript,X X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain,X X\"": {
+    "status": "PASS"
+  },
+  "\"data:unknown/unknown,X X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain;a=\\\",\\\",X\"": {
+    "status": "PASS"
+  },
+  "\"data:text/plain;a=%2C,X\"": {
+    "status": "PASS"
+  },
+  "\"data:;base64;base64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:x/x;base64;base64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:x/x;base64;charset=x,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:x/x;base64;charset=x;base64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:x/x;base64;base64x,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;base64,W%20A\"": {
+    "status": "PASS"
+  },
+  "\"data:;base64,W%0CA\"": {
+    "status": "PASS"
+  },
+  "\"data:x;base64x,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:x;base64;x,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:x;base64=x,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:; base64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;  base64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:  ;charset=x   ;  base64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;base64;,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;base64 ,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;base64   ,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;base 64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;BASe64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;%62ase64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:%3Bbase64,WA\"": {
+    "status": "PASS"
+  },
+  "\"data:;charset=x,X\"": {
+    "status": "PASS"
+  },
+  "\"data:; charset=x,X\"": {
+    "status": "PASS"
+  },
+  "\"data:;charset =x,X\"": {
+    "status": "PASS"
+  },
+  "\"data:;charset= x,X\"": {
+    "status": "PASS"
+  },
+  "\"data:;charset=,X\"": {
+    "status": "PASS"
+  },
+  "\"data:;charset,X\"": {
+    "status": "PASS"
+  },
+  "\"data:;charset=\\\"x\\\",X\"": {
+    "status": "PASS"
+  },
+  "\"data:;CHARSET=\\\"X\\\",X\"": {
+    "status": "PASS"
+  }
+}

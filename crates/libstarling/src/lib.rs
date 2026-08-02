@@ -13,6 +13,7 @@ pub fn register_builtins() {
     runtime::register_global_initializer(web_globals::add_to_global);
     runtime::register_global_initializer(web_streams::add_to_global);
     runtime::register_global_initializer(web_url::add_to_global);
+    runtime::register_global_initializer(web_fetch::add_to_global);
     runtime::register_global_initializer(|scope, global| unsafe {
         cpp_builtins::install(scope.cx_mut().raw_cx(), global.handle());
     });
@@ -98,8 +99,10 @@ fn drive_event_loop_native(
     runtime: std::rc::Rc<runtime::Runtime>,
     mut invocation: invocation::InvocationState,
 ) -> Result<(), String> {
+    // Enable both the timer and IO drivers: timers back `setTimeout`, and IO backs
+    // `fetch`'s async HTTP transport (which uses tokio TCP sockets).
     let tokio_rt = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .build()
         .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
 

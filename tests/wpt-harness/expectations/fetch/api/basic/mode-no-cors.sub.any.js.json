@@ -1,0 +1,14 @@
+{
+  "Fetch ../resources/top.txt with no-cors mode": {
+    "status": "PASS"
+  },
+  "Fetch http://{{host}}:{{ports[http][0]}}/fetch/api/resources/top.txt with no-cors mode": {
+    "status": "FAIL"
+  },
+  "Fetch https://{{host}}:{{ports[https][0]}}/fetch/api/resources/top.txt with no-cors mode": {
+    "status": "FAIL"
+  },
+  "Fetch http://{{host}}:{{ports[http][1]}}/fetch/api/resources/top.txt with no-cors mode": {
+    "status": "FAIL"
+  }
+}
