@@ -26,9 +26,8 @@ pub fn add_to_global<'s>(scope: &'s Scope<'_>, global: Object<'s>) {
 
     // SAFETY: `Navigator::add_to_global` registered the class on the
     // current global immediately above.
-    let navigator =
-        unsafe { js::class::create_instance_with::<NavigatorImpl>(scope, |_| NavigatorImpl {}) }
-            .expect("failed to allocate Navigator singleton");
+    let navigator = js::class::create_instance_with::<NavigatorImpl>(scope, |_| NavigatorImpl {})
+        .expect("failed to allocate Navigator singleton");
 
     global
         .set_property(scope, c"navigator", navigator)

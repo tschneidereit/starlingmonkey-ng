@@ -9,6 +9,7 @@ pub mod writable;
 
 use js::gc::scope::Scope;
 use js::Object;
+use readable::readable_stream::ReadableStreamImpl;
 
 pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
     readable::readable_stream::ReadableStream::add_to_global(scope, global);
@@ -57,9 +58,11 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
 
     // WebIDL `async iterable<chunk>`: `ReadableStream.prototype[@@asyncIterator]`
     // is the same function as `values`, installed non-enumerable per WebIDL.
-    let alias = "Object.defineProperty(ReadableStream.prototype, Symbol.asyncIterator, \
-        { value: ReadableStream.prototype.values, writable: true, enumerable: false, configurable: true });";
-    let _ = js::compile::evaluate_with_filename(scope, alias, "<streams-async-iterator>", 1);
+    js::class::add_symbol_alias::<ReadableStreamImpl>(
+        scope,
+        c"values",
+        js::native::SymbolCode::asyncIterator,
+    );
 
     // Byte streams construct `ArrayBuffer`, `Uint8Array`, and `DataView` directly
     // (auto-allocation and `ReadableStreamBYOBRequest.view`). Resolve those standard

@@ -194,7 +194,7 @@ pub(crate) fn add_an_event_listener(
 
     // Step 2: If _listener_'s `signal` is non-null and is `aborted`, then return.
     if let Some(signal) = &signal {
-        if signal_algorithms::is_aborted(signal) {
+        if signal.aborted() {
             return;
         }
     }

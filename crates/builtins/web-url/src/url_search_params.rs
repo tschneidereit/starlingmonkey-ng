@@ -6,10 +6,8 @@ use crate::url_search_params_iterator::{
     IteratorKind, URLSearchParamsIterator, URLSearchParamsIteratorImpl,
 };
 use core_runtime::{webidl_interface, webidl_methods, webidl_union};
-use js::class::get_prototype_for;
 use js::conversion::{Record, ToJSVal};
 use js::error::{throw_type_error, ExnThrown, TypeError};
-use js::function::EmptyArgs;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
@@ -74,14 +72,14 @@ impl URLSearchParams<'_> {
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-size>
     #[getter]
-    fn size(&self) -> u32 {
+    pub fn size(&self) -> u32 {
         // Step 1: Return this’s list’s size.
         self.data().list.len() as u32
     }
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-append>
     #[method]
-    fn append(&self, scope: &Scope<'_>, name: String, value: String) -> Result<(), ExnThrown> {
+    pub fn append(&self, scope: &Scope<'_>, name: String, value: String) -> Result<(), ExnThrown> {
         // Step 1: `Append` (_name_, _value_) to `this`’s `list`.
         self.data_mut().list.push((name, value));
         // Step 2: `Update` `this`.
@@ -90,7 +88,7 @@ impl URLSearchParams<'_> {
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-delete>
     #[method]
-    fn delete(
+    pub fn delete(
         &self,
         scope: &Scope<'_>,
         name: String,
@@ -118,7 +116,7 @@ impl URLSearchParams<'_> {
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-get>
     #[method]
-    fn get(&self, scope: &Scope<'_>, name: String) -> Result<Option<String>, ExnThrown> {
+    pub fn get(&self, scope: &Scope<'_>, name: String) -> Result<Option<String>, ExnThrown> {
         // Step 1: Return the value of the first tuple whose name is name in this’s list, if there
         //         is such a tuple; otherwise null.
         let _ = scope;
@@ -132,7 +130,7 @@ impl URLSearchParams<'_> {
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-getall>
     #[method]
-    fn get_all(&self, scope: &Scope<'_>, name: String) -> Result<Vec<String>, ExnThrown> {
+    pub fn get_all(&self, scope: &Scope<'_>, name: String) -> Result<Vec<String>, ExnThrown> {
         // Step 1: Return the values of all tuples whose name is name in this’s list, in list
         //         order; otherwise the empty sequence.
         let _ = scope;
@@ -147,7 +145,7 @@ impl URLSearchParams<'_> {
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-has>
     #[method]
-    fn has(
+    pub fn has(
         &self,
         scope: &Scope<'_>,
         name: String,
@@ -181,7 +179,7 @@ impl URLSearchParams<'_> {
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-set>
     #[method]
-    fn set(&self, scope: &Scope<'_>, name: String, value: String) -> Result<(), ExnThrown> {
+    pub fn set(&self, scope: &Scope<'_>, name: String, value: String) -> Result<(), ExnThrown> {
         // Step 1: If `this`’s `list` `contains` any `tuples` whose name is _name_, then set the
         //         value of the first such `tuple` to _value_ and `remove` the others.
         // Step 2: Otherwise, `append` (_name_, _value_) to `this`’s `list`.
@@ -214,7 +212,7 @@ impl URLSearchParams<'_> {
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-sort>
     #[method]
-    fn sort(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
+    pub fn sort(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
         // Step 1: Set `this`’s `list` to the result of `sorting in ascending order` `this`’s
         //         `list`, with _a_ being less than _b_ if _a_’s name is `code unit less than`
         //         _b_’s name.
@@ -244,8 +242,8 @@ impl URLSearchParams<'_> {
         let mut index = 0usize;
         while index < self.data().list.len() {
             let (name, value) = self.data().list[index].clone();
-            let value_js = value.as_str().to_jsval(scope).map_err(|e| e.throw(scope))?;
-            let name_js = name.as_str().to_jsval(scope).map_err(|e| e.throw(scope))?;
+            let value_js = value.as_str().to_jsval_throwing(scope)?;
+            let name_js = name.as_str().to_jsval_throwing(scope)?;
             let self_js = scope.root_value(self.as_value());
 
             js::Function::call(
@@ -262,7 +260,7 @@ impl URLSearchParams<'_> {
 
     #[allow(clippy::wrong_self_convention)]
     #[method]
-    fn to_string(&self, _scope: &Scope<'_>) -> Result<String, ExnThrown> {
+    pub fn to_string(&self, _scope: &Scope<'_>) -> Result<String, ExnThrown> {
         let mut serializer = form_urlencoded::Serializer::new(String::new());
         for (name, value) in &self.data().list {
             serializer.append_pair(name, value);
@@ -288,35 +286,11 @@ impl URLSearchParams<'_> {
 
 /// Define `Symbol.iterator` on URLSearchParams.prototype.
 pub fn install_symbol_iterator(scope: &Scope<'_>) {
-    let proto = unsafe {
-        js::Object::from_raw(
-            scope,
-            get_prototype_for::<URLSearchParamsImpl>(scope)
-                .expect("URLSearchParams class not registered"),
-        )
-        .expect("URLSearchParams prototype is null")
-    };
-
-    let iterator_fn = js::Function::new_callback(
+    js::class::add_symbol_alias::<URLSearchParamsImpl>(
         scope,
-        c"[Symbol.iterator]",
-        0,
-        |scope, args, _payload| {
-            let this_obj = js::Object::from_value(scope, args.this())
-                .map_err(|_| throw_type_error(scope, c"Invalid URLSearchParams receiver"))?;
-            js::Function::call_by_name(scope, this_obj.handle(), c"entries", EmptyArgs)
-                .map(|value| *value)
-        },
-        js::value::undefined(),
-    )
-    .expect("failed to create URLSearchParams @@iterator function");
-
-    let iter_key = js::symbol::get_well_known_key(scope, js::native::SymbolCode::iterator);
-    let iter_id = scope.root_id(iter_key);
-    let fn_val = scope.root_value(iterator_fn.as_value());
-    proto
-        .set_property_by_id(scope, iter_id, fn_val)
-        .expect("failed to define Symbol.iterator on URLSearchParams prototype");
+        c"entries",
+        js::native::SymbolCode::iterator,
+    );
 }
 
 impl URLSearchParams<'_> {
@@ -362,17 +336,12 @@ impl URLSearchParams<'_> {
         scope: &'r Scope<'_>,
         kind: IteratorKind,
     ) -> Result<URLSearchParamsIterator<'r>, ExnThrown> {
-        let iter_object = unsafe {
-            js::class::create_instance_with::<URLSearchParamsIteratorImpl>(scope, |_| {
-                URLSearchParamsIteratorImpl {
-                    params: (*self).into(),
-                    index: 0,
-                    kind,
-                }
-            })
-        }?;
-        iter_object
-            .cast::<URLSearchParamsIterator>()
-            .map_err(|_| throw_type_error(scope, c"Failed to create URLSearchParams iterator"))
+        js::class::create_instance_with::<URLSearchParamsIteratorImpl>(scope, |_| {
+            URLSearchParamsIteratorImpl {
+                params: (*self).into(),
+                index: 0,
+                kind,
+            }
+        })
     }
 }

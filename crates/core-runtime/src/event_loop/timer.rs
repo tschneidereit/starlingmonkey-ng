@@ -15,7 +15,7 @@
 use std::time::{Duration, Instant};
 
 use js::conversion::ToJSVal;
-use js::error::throw_error;
+use js::error::{throw_error, ExnThrown};
 use js::gc::handle::Heap;
 use js::heap::RootedTraceableBox;
 use js::native::Value;
@@ -120,7 +120,7 @@ impl Task for TimerTask {
         }
     }
 
-    fn run(self: Box<Self>, scope: &Scope<'_>, id: TaskId) -> Result<(), ()> {
+    fn run(self: Box<Self>, scope: &Scope<'_>, id: TaskId) -> Result<(), ExnThrown> {
         let Self {
             handler,
             interval,
@@ -132,14 +132,12 @@ impl Task for TimerTask {
         // as a classic script in the global scope.
         // Timers the handler schedules nest one level below this task (see
         // `CURRENT_TIMER_NESTING`); restore the previous level afterwards.
-        let previous_nesting = CURRENT_TIMER_NESTING.with(|cell| cell.replace(nesting_level));
+        let previous_nesting = CURRENT_TIMER_NESTING.replace(nesting_level);
         let failed = match &handler {
             TimerHandler::Function { callback, args } => {
                 let cb = callback.get(scope);
-                let fval = scope.root_value(cb.as_value());
                 let arg_handles: Vec<_> = args.iter().map(|arg| arg.get(scope)).collect();
-                js::Function::call_value(scope, scope.global().handle(), fval, &arg_handles)
-                    .is_err()
+                js::Function::call(scope, scope.global(), cb, &arg_handles).is_err()
             }
             TimerHandler::Code(code) => {
                 js::compile::evaluate_with_filename(scope, code, "<timer>", 1).is_err()
@@ -174,7 +172,7 @@ impl Task for TimerTask {
 
         if failed {
             // The caller (EventLoop::step) reports and clears the exception.
-            return Err(());
+            return Err(ExnThrown);
         }
 
         Ok(())

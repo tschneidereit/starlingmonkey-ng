@@ -105,12 +105,8 @@ impl ReadableStreamDefaultController {
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-enqueue>
-    #[method]
-    pub fn enqueue(
-        &self,
-        scope: &Scope<'_>,
-        chunk: Option<HandleValue<'_>>,
-    ) -> Result<(), ExnThrown> {
+    #[method(length = 0)]
+    pub fn enqueue(&self, scope: &Scope<'_>, chunk: HandleValue<'_>) -> Result<(), ExnThrown> {
         // Step 1: If ! `DefaultControllerCanCloseOrEnqueue`(`this`) is false, throw a
         //         ``TypeError`` exception.
         if !algorithms::readable_stream_default_controller_can_close_or_enqueue(scope, self) {
@@ -120,7 +116,6 @@ impl ReadableStreamDefaultController {
             ));
         }
         // Step 2: Perform ? `DefaultControllerEnqueue`(`this`, _chunk_).
-        let chunk = chunk.unwrap_or(HandleValue::undefined());
         algorithms::readable_stream_default_controller_enqueue(scope, self, chunk)
     }
 

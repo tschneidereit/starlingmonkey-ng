@@ -118,7 +118,7 @@ fn parse_marker_opts(attr: &syn::Attribute, allowed: &[&str]) -> syn::Result<Att
             return Err(syn::Error::new_spanned(
                 other,
                 "expected parenthesized arguments, e.g. `(name = \"...\")`",
-            ))
+            ));
         }
     };
     let reject = |present: bool, key: &str| -> syn::Result<()> {
@@ -620,6 +620,12 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             #[cfg_attr(crown, allow(crown::unrooted_must_root))]
             pub unsafe fn as_raw(self) -> *mut ::js::native::JSObject {
                 self.0.as_raw()
+            }
+
+            /// Upcast to the untyped `Object` handle, reusing this rooting.
+            pub fn as_object(self) -> ::js::Object<'s> {
+                // SAFETY: every class instance is a JS object.
+                unsafe { ::js::gc::handle::Stack::from_handle_unchecked(self.0.handle()) }
             }
 
             pub fn eq_stack(&self, other: &::js::gc::handle::Stack<'_, #inner_name>) -> bool {
@@ -1628,12 +1634,11 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     {
                         #get_inner
                         unsafe {
-                            let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                            let __typed = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
                                 #inner_name::#fn_name(#inner_arg, #cx_arg #(#param_names),*)
                             })?;
-                            <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __obj)?;
-                            let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
-                            Ok(#type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(__nn))))
+                            <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __typed.as_object())?;
+                            Ok(__typed)
                         }
                     }
                 });
@@ -2301,21 +2306,20 @@ fn is_result_unit_jserror(ty_str: &str) -> bool {
 /// Returns `None` if not a Result type.
 fn is_result_type(ty_str: &str) -> Option<bool> {
     let normalized: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
-    if !normalized.starts_with("Result<") {
-        return None;
-    }
-    // Extract the inner part between Result< and >
-    let inner = &normalized["Result<".len()..normalized.len() - 1];
+    result_ok_type(&normalized).map(|ok_type| ok_type != "()")
+}
+
+/// Extract the Ok type from a whitespace-normalized `Result<T, E>` string.
+/// Returns `None` if the string is not a two-parameter `Result`.
+fn result_ok_type(normalized: &str) -> Option<&str> {
+    let inner = normalized.strip_prefix("Result<")?.strip_suffix('>')?;
     // Find the Ok type (before the first comma at depth 0)
     let mut depth = 0;
     for (i, c) in inner.char_indices() {
         match c {
             '<' => depth += 1,
             '>' => depth -= 1,
-            ',' if depth == 0 => {
-                let ok_type = &inner[..i];
-                return Some(ok_type != "()");
-            }
+            ',' if depth == 0 => return Some(&inner[..i]),
             _ => {}
         }
     }
@@ -2329,8 +2333,12 @@ fn is_result_type(ty_str: &str) -> Option<bool> {
 ///
 /// The receiver selects which of the two constructor shapes to look for:
 ///
-/// - **No receiver returning `Self`, `Foo`, or `Foo<'s>`** — constructor-shaped
-/// regardless of name.
+/// - **No receiver returning `Self`, `Foo`, `Foo<'s>`, or `Result<Self, E>`**
+///   — constructor-shaped regardless of name. The fallible form is detected
+///   only for a literal `Self` Ok type: a fn returning `Result<Foo<'s>, E>`
+///   is a helper that allocates the JS object itself and returns the rooted
+///   newtype (whose lifetime `Self` could not express), e.g. built on top of
+///   another factory.
 /// - **`fn new` taking `&self` or `&mut self` and returning `Result<(), E>` or `()`**
 ///   — the setup-style shape, which runs on an already-allocated instance.
 fn is_implicit_constructor(sig: &syn::Signature, type_name: &Ident) -> bool {
@@ -2340,7 +2348,12 @@ fn is_implicit_constructor(sig: &syn::Signature, type_name: &Ident) -> bool {
     match &sig.output {
         ReturnType::Default => false,
         ReturnType::Type(_, ty) => {
-            is_self_or_instance_type(&quote!(#ty).to_string(), &type_name.to_string())
+            let ty_str = quote!(#ty).to_string();
+            let normalized: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
+            match result_ok_type(&normalized) {
+                Some(ok_type) => ok_type == "Self",
+                None => is_self_or_instance_type(&normalized, &type_name.to_string()),
+            }
         }
     }
 }
@@ -2626,20 +2639,16 @@ fn gen_setup_factory(
             -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown>
         {
             unsafe {
-                let __obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                let __typed = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
                     #inner_name::default()
                 })?;
-                let __nn = ::std::ptr::NonNull::new_unchecked(__obj.as_raw());
-                let __typed = #type_name(::js::gc::handle::Stack::from_handle_unchecked(
-                    scope.root_object(__nn),
-                ));
                 #setup_call
                 #post_init_call
                 // Install [LegacyUnforgeable] accessors, as the JS
                 // constructor path does.
-                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __obj)?;
+                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __typed.as_object())?;
                 #[cfg(debug_assertions)]
-                if let Some(__data) = ::js::class::get_private::<#inner_name>(__obj.as_raw()) {
+                if let Some(__data) = ::js::class::get_private::<#inner_name>(__typed.0.as_raw()) {
                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
                 }
                 Ok(__typed)
@@ -2651,9 +2660,11 @@ fn gen_setup_factory(
 }
 
 /// A Rust-side instantiation function on the stack newtype for an old-style
-/// constructor (no receiver, returns `Self`): build the data, allocate the JS
-/// object around it, and install `[LegacyUnforgeable]` accessors as the JS
-/// constructor path would.
+/// constructor (no receiver, returns `Self` or `Result<Self, E>`): build the
+/// data, allocate the JS object around it, and install `[LegacyUnforgeable]`
+/// accessors as the JS constructor path would. A fallible constructor's error
+/// is thrown as a JS exception via `ThrowException`, as in the JS constructor
+/// path.
 fn gen_instance_factory(
     factory_name: &Ident,
     info: &MethodInfo,
@@ -2662,23 +2673,33 @@ fn gen_instance_factory(
 ) -> proc_macro2::TokenStream {
     let (param_decls, param_names) = ctor_param_lists(info);
     let call = ctor_call(info, inner_name, &param_names);
+    let create = if extract_result_error_type(&info.fn_item.sig.output).is_some() {
+        quote! {
+            ::js::class::try_create_instance_with::<#inner_name>(scope, |_| {
+                #call.map_err(|e| ::js::error::ThrowException::throw(e, scope))
+            })?
+        }
+    } else {
+        quote! {
+            ::js::class::create_instance_with::<#inner_name>(scope, |_| {
+                #call
+            })?
+        }
+    };
     quote! {
         /// Construct a new instance and return the stack newtype.
         pub fn #factory_name(scope: &'s ::js::gc::scope::Scope<'_>, #(#param_decls),*)
             -> ::std::result::Result<#type_name<'s>, ::js::error::ExnThrown>
         {
             unsafe {
-                let obj = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
-                    #call
-                })?;
+                let __typed = #create;
                 // Install [LegacyUnforgeable] accessors.
-                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, obj)?;
+                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __typed.as_object())?;
                 #[cfg(debug_assertions)]
-                if let Some(__data) = ::js::class::get_private::<#inner_name>(obj.as_raw()) {
+                if let Some(__data) = ::js::class::get_private::<#inner_name>(__typed.0.as_raw()) {
                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
                 }
-                let nn = ::std::ptr::NonNull::new_unchecked(obj.as_raw());
-                Ok(#type_name(::js::gc::handle::Stack::from_handle_unchecked(scope.root_object(nn))))
+                Ok(__typed)
             }
         }
     }
@@ -2901,7 +2922,7 @@ fn emit_native_fn(
             let type_name =
                 instance_type.expect("InstanceValue return style requires a class type");
             quote! {
-                let __obj = match ::js::class::create_instance_with::<#type_name>(&scope, |_| {
+                let __typed = match ::js::class::create_instance_with::<#type_name>(&scope, |_| {
                     #call
                 }) {
                     Ok(o) => o,
@@ -2910,14 +2931,14 @@ fn emit_native_fn(
                 // Install [LegacyUnforgeable] accessors and assert full
                 // initialization, so an instance minted by a JS method call matches
                 // one built by the constructor or the Rust-side factory.
-                if <#type_name as ::js::class::ClassDef>::install_unforgeable(&scope, __obj).is_err() {
+                if <#type_name as ::js::class::ClassDef>::install_unforgeable(&scope, __typed.as_object()).is_err() {
                     return ::js::exception::check_fn_return(&scope, false, &#name_str);
                 }
                 #[cfg(debug_assertions)]
-                if let Some(__data) = unsafe { ::js::class::get_private::<#type_name>(__obj.as_raw()) } {
+                if let Some(__data) = unsafe { ::js::class::get_private::<#type_name>(__typed.as_raw()) } {
                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
                 }
-                __args.rval().set(unsafe { ::js::value::from_object(__obj.as_raw()) });
+                __args.rval().set(unsafe { ::js::value::from_object(__typed.as_raw()) });
                 ::js::exception::check_fn_return(&scope, true, &#name_str)
             }
         }
@@ -5294,6 +5315,33 @@ mod tests {
             &url
         ));
         assert!(is_implicit_constructor(&sig("fn make() -> URL<'s>"), &url));
+    }
+
+    /// A fallible factory returning `Result<Self, E>` is constructor-shaped
+    /// too — but only for a literal `Self` Ok type. A named-newtype Ok type
+    /// (`Result<URL<'s>, E>`) marks a helper that allocates the JS object
+    /// itself (e.g. `ReadableStream::new_native`) and returns the rooted
+    /// newtype, whose lifetime `Self` could not express.
+    #[test]
+    fn implicit_constructor_detects_fallible_self_returns() {
+        let sig = |s: &str| syn::parse_str::<syn::Signature>(s).unwrap();
+        let url = format_ident!("URL");
+        assert!(is_implicit_constructor(
+            &sig("fn from_incoming(a: String) -> Result<Self, ExnThrown>"),
+            &url
+        ));
+        assert!(!is_implicit_constructor(
+            &sig("fn make() -> Result<URL<'s>, Error>"),
+            &url
+        ));
+        assert!(!is_implicit_constructor(
+            &sig("fn all() -> Result<Vec<URL<'s>>, Error>"),
+            &url
+        ));
+        assert!(!is_implicit_constructor(
+            &sig("fn flush() -> Result<(), ExnThrown>"),
+            &url
+        ));
     }
 
     /// A no-receiver fn that returns anything else is a plain helper.

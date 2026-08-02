@@ -17,6 +17,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use core_runtime::test_util::eval_with_setup;
+use js::conversion::FromJSVal;
+use web_globals::signals::AbortSignal;
 
 fn setup() {
     core_runtime::runtime::register_global_initializer(|scope, global| {
@@ -31,14 +33,8 @@ fn setup() {
             c"__addAbortAlgorithm",
             2,
             |scope, args, _| {
-                let signal = js::Object::from_value(scope, *args.get(0))
-                    .map_err(|e| e.throw(scope))?
-                    .cast::<web_globals::signals::AbortSignal>()
-                    .map_err(|_| js::error::throw_type_error(scope, c"not an AbortSignal"))?;
-                let callback = js::Object::from_value(scope, *args.get(1))
-                    .map_err(|e| e.throw(scope))?
-                    .cast::<js::Function>()
-                    .map_err(|_| js::error::throw_type_error(scope, c"not a function"))?;
+                let signal = AbortSignal::from_jsval_throwing(scope, args.get(0), ())?;
+                let callback = js::Function::from_jsval_throwing(scope, args.get(1), ())?;
                 web_globals::signals::algorithms::add_abort_algorithm(&signal, &callback);
                 Ok(js::value::undefined())
             },

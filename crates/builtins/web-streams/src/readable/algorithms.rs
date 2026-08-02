@@ -823,14 +823,9 @@ pub(crate) fn create_readable_stream<'r>(
     // Step 3: Assert: ! `IsNonNegativeNumber`(_highWaterMark_) is true.
     debug_assert!(is_non_negative_number(high_water_mark));
     // Step 4: Let _stream_ be a `new` ``ReadableStream``.
-    let obj = unsafe {
-        js::class::create_instance_with::<ReadableStreamImpl>(scope, |_| {
-            ReadableStreamImpl::default()
-        })
-    }?;
-    let stream = obj
-        .cast::<ReadableStream>()
-        .expect("ReadableStream instance");
+    let stream = js::class::create_instance_with::<ReadableStreamImpl>(scope, |_| {
+        ReadableStreamImpl::default()
+    })?;
     // Step 5: Perform ! `InitializeReadableStream`(_stream_).
     initialize_readable_stream(&stream);
     // Step 6: Let _controller_ be a `new` ``ReadableStreamDefaultController``.
@@ -864,14 +859,9 @@ pub(crate) fn create_readable_byte_stream<'r>(
     cancel_algorithm: HandleValue<'_>,
 ) -> Result<ReadableStream<'r>, ExnThrown> {
     // Step 1: Let _stream_ be a `new` ``ReadableStream``.
-    let obj = unsafe {
-        js::class::create_instance_with::<ReadableStreamImpl>(scope, |_| {
-            ReadableStreamImpl::default()
-        })
-    }?;
-    let stream = obj
-        .cast::<ReadableStream>()
-        .expect("ReadableStream instance");
+    let stream = js::class::create_instance_with::<ReadableStreamImpl>(scope, |_| {
+        ReadableStreamImpl::default()
+    })?;
     // Step 2: Perform ! `InitializeReadableStream`(_stream_).
     initialize_readable_stream(&stream);
     // Step 3: Let _controller_ be a `new` ``ReadableByteStreamController``.
@@ -1004,7 +994,7 @@ fn from_pull_native(
         Err(_) => {
             return Ok(Promise::new_rejected_with_pending_error(scope)
                 .map_err(|_| ExnThrown)?
-                .as_value())
+                .as_value());
         }
     };
     // Let _nextPromise_ be a promise resolved with _nextResult_.

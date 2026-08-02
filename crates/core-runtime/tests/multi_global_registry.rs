@@ -80,9 +80,7 @@ fn displaced_global_registry_survives_compacting_gc() {
     );
 
     // Rust-side minting in realm A goes through the registry prototype.
-    let obj =
-        unsafe { js::class::create_instance_with::<ProbeImpl>(&scope_a, |_| ProbeImpl { tag: 9 }) }
-            .expect("create_instance_with in realm A");
-    let probe = obj.cast::<Probe>().unwrap();
+    let probe = js::class::create_instance_with::<ProbeImpl>(&scope_a, |_| ProbeImpl { tag: 9 })
+        .expect("create_instance_with in realm A");
     assert_eq!(probe.data().tag, 9);
 }

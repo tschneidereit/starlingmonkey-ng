@@ -239,7 +239,7 @@ function applyConfig(argv) {
 
   if (!existsSync(config.wptRoot)) {
     console.error(
-      `WPT root not found: ${config.wptRoot}. Run 'just wpt-setup' first, define 'WPT_ROOT' in your environment, or pass '--wpt-root'.`,
+      `WPT root not found: ${config.wptRoot}. Run 'just clone-wpt-tests' first, define 'WPT_ROOT' in your environment, or pass '--wpt-root'.`,
     );
     return false;
   }

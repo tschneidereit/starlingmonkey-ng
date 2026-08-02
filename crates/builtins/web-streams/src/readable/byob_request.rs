@@ -70,7 +70,7 @@ impl ReadableStreamBYOBRequest {
                 return Err(js::error::throw_type_error(
                     scope,
                     c"respond() called on an invalidated BYOB request",
-                ))
+                ));
             }
         };
         // Step 2: If ! `IsDetachedBuffer`(`this`.`[[view]]`.[[ArrayBuffer]]) is true, throw a
@@ -123,7 +123,7 @@ impl ReadableStreamBYOBRequest {
                 return Err(js::error::throw_type_error(
                     scope,
                     c"respondWithNewView() called on an invalidated BYOB request",
-                ))
+                ));
             }
         };
         // Step 2: If ! `IsDetachedBuffer`(_view_.[[ViewedArrayBuffer]]) is true, throw a

@@ -38,6 +38,12 @@
 use std::os::raw::c_void;
 use std::ptr::NonNull;
 
+use crate::builtins::JSType;
+use crate::conversion::{ConversionError, FromJSVal};
+use crate::gc::handle::Stack;
+use crate::gc::scope::Scope;
+use crate::native::RawJSContext;
+use crate::Object;
 use mozjs::gc::{HandleObject, HandleValue};
 use mozjs::jsapi::{JSClass, JSObject, JSProtoKey, JS};
 use mozjs::rust::wrappers2;
@@ -45,13 +51,6 @@ use mozjs::typedarray::{
     ClampedU8, Float32, Float64, Int16, Int32, Int8, TypedArrayElement, TypedArrayElementCreator,
     Uint16, Uint32, Uint8,
 };
-
-use crate::builtins::JSType;
-use crate::conversion::{ConversionError, FromJSVal};
-use crate::gc::handle::Stack;
-use crate::gc::scope::Scope;
-use crate::native::RawJSContext;
-use crate::Object;
 
 use super::error::ExnThrown;
 
@@ -586,20 +585,17 @@ crate::gc::handle::from_jsval_via_cast!(ArrayBufferView, c"Value isn't a typed a
 /// `SharedArrayBuffer`, or `ArrayBufferView`) into an owned `Vec`.
 ///
 /// Returns `None` if `obj` is none of the above.
-pub fn copy_buffer_source_bytes(obj: Object<'_>) -> Option<Vec<u8>> {
-    let raw = obj.as_raw();
-    // SAFETY: `obj` is a rooted handle to a live JS object; the
-    // GetArrayBuffer* / JS_GetArrayBufferView* family are simple field
-    // reads, so no GC is triggered between the type check and the copy.
+pub fn copy_bytes_if_buffer_source(obj: Object<'_>) -> Option<Vec<u8>> {
+    // SAFETY: All functions called following JSAPI's contract.
     unsafe {
-        if JS::IsArrayBufferObject(raw) {
-            let (ptr, len) = array_buffer_length_and_data(raw);
+        if JS::IsArrayBufferObject(obj.as_raw()) {
+            let (ptr, len) = array_buffer_length_and_data(obj.as_raw());
             if ptr.is_null() || len == 0 {
                 return Some(Vec::new());
             }
             return Some(std::slice::from_raw_parts(ptr, len).to_vec());
         }
-        if mozjs::jsapi::JS_IsArrayBufferViewObject(raw) {
+        if mozjs::jsapi::JS_IsArrayBufferViewObject(obj.as_raw()) {
             let view: Stack<'_, ArrayBufferView> = Stack::from_handle_unchecked(obj.handle());
             return Some(view.copy_bytes());
         }

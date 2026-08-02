@@ -238,8 +238,7 @@ pub trait Task {
     ///
     /// Returns `Ok(())` on success or `Err(())` if a JS exception was
     /// thrown (the caller is responsible for reporting it).
-    #[allow(clippy::result_unit_err)]
-    fn run(self: Box<Self>, scope: &Scope<'_>, id: TaskId) -> Result<(), ()>;
+    fn run(self: Box<Self>, scope: &Scope<'_>, id: TaskId) -> Result<(), ExnThrown>;
 
     /// Trace any GC-managed pointers held by this task.
     ///

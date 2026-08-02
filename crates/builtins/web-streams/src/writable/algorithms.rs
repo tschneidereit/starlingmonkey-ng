@@ -251,14 +251,9 @@ pub(crate) fn create_writable_stream<'r>(
     // Step 1: Assert: ! `IsNonNegativeNumber`(_highWaterMark_) is true.
     debug_assert!(is_non_negative_number(high_water_mark));
     // Step 2: Let _stream_ be a `new` ``WritableStream``.
-    let obj = unsafe {
-        js::class::create_instance_with::<WritableStreamImpl>(scope, |_| {
-            WritableStreamImpl::default()
-        })
-    }?;
-    let stream = obj
-        .cast::<WritableStream>()
-        .expect("WritableStream instance");
+    let stream = js::class::create_instance_with::<WritableStreamImpl>(scope, |_| {
+        WritableStreamImpl::default()
+    })?;
     // Step 3: Perform ! `InitializeWritableStream`(_stream_).
     initialize_writable_stream(&stream);
     // Step 4: Let _controller_ be a `new` ``WritableStreamDefaultController``.

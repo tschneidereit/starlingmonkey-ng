@@ -5,46 +5,38 @@
 use std::time::{Duration, Instant};
 
 use core_runtime::event_loop::{with_active_event_loop, Task, TaskId};
+use js::conversion::ToJSVal;
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::Trace;
 use js::native::JSTracer;
 use js::prelude::HandleValue;
-use js::prelude::ToJSVal;
 use js::Function;
 
 use super::abort_signal::{AbortAlgorithm, AbortSignal, AbortSignalImpl};
+use crate::dom_exception::DOMException;
 use crate::events;
 use crate::events::event_target::EventTarget;
 
-/// Create a new `DOMException` with the given message and name as a JS value
-/// without throwing it.
-fn create_dom_exception<'s>(
-    scope: &'s Scope<'_>,
-    message: &str,
-    name: &str,
-) -> Result<HandleValue<'s>, ExnThrown> {
-    let name_val = name.to_jsval(scope).map_err(|_| ExnThrown)?;
-    let msg_val = message.to_jsval(scope).map_err(|_| ExnThrown)?;
-
-    let global = scope.global();
-    let ctor_val = global
-        .get_property(scope, c"DOMException")
-        .map_err(|_| ExnThrown)?;
-
-    let exception = js::Function::construct(scope, ctor_val, &[msg_val, name_val])?;
-    exception.to_jsval(scope).map_err(|_| ExnThrown)
-}
-
 /// Create a new "AbortError" DOMException as a JS value without throwing it.
 pub(crate) fn create_abort_error<'s>(scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
-    create_dom_exception(scope, "signal is aborted without reason", "AbortError")
+    let exception = DOMException::new(
+        scope,
+        Some("signal is aborted without reason".into()),
+        Some("AbortError".into()),
+    )?;
+    exception.to_jsval_throwing(scope)
 }
 
 /// Create a new "TimeoutError" DOMException as a JS value without throwing it.
 fn create_timeout_error<'s>(scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
-    create_dom_exception(scope, "signal timed out", "TimeoutError")
+    let exception = DOMException::new(
+        scope,
+        Some("signal timed out".into()),
+        Some("TimeoutError".into()),
+    )?;
+    exception.to_jsval_throwing(scope)
 }
 
 /// <https://dom.spec.whatwg.org/#create-a-dependent-abort-signal>
@@ -228,13 +220,6 @@ fn run_the_abort_steps(scope: &Scope<'_>, signal: &AbortSignal<'_>) -> Result<()
     Ok(())
 }
 
-/// <https://dom.spec.whatwg.org/#abortsignal-aborted>
-///
-/// Whether the signal is aborted (its abort reason is set).
-pub(crate) fn is_aborted(signal: &AbortSignal<'_>) -> bool {
-    !signal.data().abort_reason.is_undefined()
-}
-
 /// <https://dom.spec.whatwg.org/#abortsignal-add>
 ///
 /// Add an abort algorithm to `signal` that removes the event listener
@@ -246,7 +231,7 @@ pub(crate) fn add_listener_removal_algorithm(
     listener_id: u64,
 ) {
     // Step 1: If _signal_ is `aborted`, then return.
-    if is_aborted(signal) {
+    if signal.aborted() {
         return;
     }
 
@@ -266,9 +251,9 @@ pub(crate) fn add_listener_removal_algorithm(
 /// reason as its argument) when the signal is aborted. For callers such as
 /// `fetch` that react to abort.
 // TODO: add support for native abort algorithms, with a GC-traced state argument.
-pub fn add_abort_algorithm(signal: &AbortSignal<'_>, callback: &js::Function<'_>) {
+pub fn add_abort_algorithm(signal: &AbortSignal<'_>, callback: &Function<'_>) {
     // Step 1: If _signal_ is `aborted`, then return.
-    if is_aborted(signal) {
+    if signal.aborted() {
         return;
     }
 
@@ -335,12 +320,12 @@ impl Task for AbortTimeoutTask {
         "abort-timeout"
     }
 
-    fn run(self: Box<Self>, scope: &Scope<'_>, _id: TaskId) -> Result<(), ()> {
+    fn run(self: Box<Self>, scope: &Scope<'_>, _id: TaskId) -> Result<(), ExnThrown> {
         let signal: AbortSignal<'_> = self.signal.take(scope);
         // `Queue a global task` [...] to `signal abort` given _signal_ and a new
         // "``TimeoutError``" ``DOMException``.
-        let reason = create_timeout_error(scope).map_err(|_| ())?;
-        signal_abort(scope, &signal, reason).map_err(|_| ())
+        let reason = create_timeout_error(scope)?;
+        signal_abort(scope, &signal, reason)
     }
 
     #[allow(clippy::not_unsafe_ptr_arg_deref)]

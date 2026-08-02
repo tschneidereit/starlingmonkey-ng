@@ -379,6 +379,9 @@ pub trait OptionHeapExt<T: JSType> {
     /// Return a rooted handle to the contained item, if there is one.
     fn get<'s>(&self, scope: &'s Scope<'_>) -> Option<T::Rooted<'s>>;
 
+    /// Store a new referent, replacing any previous one.
+    fn set<'s>(&mut self, value: impl Into<Stack<'s, T>>);
+
     /// Return a rooted handle to the contained item, if there is one,
     /// and clear the field.
     ///
@@ -390,6 +393,10 @@ pub trait OptionHeapExt<T: JSType> {
 impl<T: JSType> OptionHeapExt<T> for Option<Heap<T>> {
     fn get<'s>(&self, scope: &'s Scope<'_>) -> Option<T::Rooted<'s>> {
         self.as_ref().map(|heap| heap.get(scope))
+    }
+
+    fn set<'s>(&mut self, value: impl Into<Stack<'s, T>>) {
+        *self = Some(Heap::from(value.into()));
     }
 
     fn take_rooted<'s>(&mut self, scope: &'s Scope<'_>) -> Option<T::Rooted<'s>> {
@@ -539,6 +546,7 @@ impl ToJSVal<'_> for Heap<crate::native::Value> {
 /// A GC-rooted boxed handle not tied to any `Scope`'s lifetime.
 ///
 /// Use this to store a GC reference in locations that aren't traced themselves.
+#[crate::allow_unrooted_interior]
 pub struct RootedHeap<T: JSType> {
     boxed: RootedTraceableBox<MozHeap<*mut JSObject>>,
     _marker: PhantomData<T>,
