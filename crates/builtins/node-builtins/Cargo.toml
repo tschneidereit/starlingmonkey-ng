@@ -7,7 +7,9 @@ authors.workspace = true
 edition.workspace = true
 
 [dependencies]
+base64.workspace = true
 core-runtime.workspace = true
+hex.workspace = true
 js.workspace = true
 
 [dev-dependencies]
