@@ -108,6 +108,49 @@ jobs:
           fi
           node tests/wpt-harness/run-wpt.mjs $WPT_TARGET
 
+  # ---------------------------------------------------------------------------
+  # Node.js compatibility tests
+  # ---------------------------------------------------------------------------
+  node_compat:
+    name: Node Compat (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [native, wasm32-wasip2]
+    runs-on: ubuntu-latest
+    env:
+      WASMTIME_BACKTRACE_DETAILS: '1'
+      RUST_BACKTRACE: 'full'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Init node-compat submodule
+        run: git submodule update --init tests/node-compat/node-test
+
+      - name: Build
+        run: |
+          TARGET_FLAG=""
+          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
+            TARGET_FLAG="--target wasm32-wasip2"
+          fi
+          cargo build --features debugmozjs,node_compat $TARGET_FLAG
+
+      - name: Run node-compat tests
+        run: |
+          NODE_TARGET=""
+          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
+            NODE_TARGET="--target=wasm"
+          fi
+          node tests/node-compat/run.mjs $NODE_TARGET
+
   gc_rooting:
     name: GC Rooting Checks
     strategy:

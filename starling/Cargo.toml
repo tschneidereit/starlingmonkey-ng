@@ -16,6 +16,7 @@ debugmozjs = ['libstarling/debugmozjs']
 profilemozjs = ['js/profilemozjs']
 jitspew = ['js/jitspew']
 intl = ['js/intl']
+node_compat = ["libstarling/node_compat"]
 
 [dependencies]
 clap.workspace = true

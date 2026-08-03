@@ -395,6 +395,24 @@ pub unsafe fn init_module_loader(rt: *mut js::native::JSRuntime, base_path: Path
     });
 }
 
+/// Look up a registered module by specifier and return its namespace object.
+///
+/// Returns `None` if no module with that specifier is in the registry.
+pub fn get_module_namespace<'s>(
+    scope: &'s Scope<'_>,
+    specifier: &str,
+) -> Option<Object<'s>> {
+    let module_ptr = MODULE_REGISTRY.with(|reg| {
+        reg.borrow()
+            .get(specifier)
+            .and_then(|entry| std::ptr::NonNull::new(unsafe { entry.module_obj.as_ptr() }))
+    })?;
+    let handle = scope.root_object(module_ptr);
+    js::module::get_namespace(scope, handle)
+        .ok()
+        .and_then(|h| unsafe { Object::from_raw(scope, *h) })
+}
+
 /// Clear all module state (registry, resolver, base path).
 ///
 /// Must be called while the `JSContext` is still alive, because

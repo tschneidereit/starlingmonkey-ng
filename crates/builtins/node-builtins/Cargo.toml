@@ -1,0 +1,19 @@
+[package]
+name = "node-builtins"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+core-runtime.workspace = true
+hex.workspace = true
+js.workspace = true
+
+[dev-dependencies]
+libstarling.workspace = true
+
+[lints]
+workspace = true

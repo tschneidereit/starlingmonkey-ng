@@ -92,6 +92,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -257,7 +263,6 @@ dependencies = [
  "shlex 2.0.1",
  "tempfile",
  "tokio",
- "wasip3 0.7.0+wasi-0.3.0",
 ]
 
 [[package]]
@@ -649,6 +654,12 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "http"
@@ -1286,9 +1297,8 @@ version = "0.3.0"
 dependencies = [
  "core-runtime",
  "cpp-builtins",
- "futures-lite",
  "js",
- "simple-http",
+ "node-builtins",
  "tokio",
  "url",
  "wasip3 0.7.0+wasi-0.3.0",
@@ -1384,6 +1394,17 @@ dependencies = [
  "libz-sys",
  "tar",
  "walkdir",
+]
+
+[[package]]
+name = "node-builtins"
+version = "0.3.0"
+dependencies = [
+ "base64",
+ "core-runtime",
+ "hex",
+ "js",
+ "libstarling",
 ]
 
 [[package]]

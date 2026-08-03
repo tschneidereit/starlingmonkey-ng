@@ -34,6 +34,8 @@ starling-macro = { path = "crates/starling-macro" }
 tokio = { version = "1", features = ["rt", "time"] }
 url = "2.5.8"
 uuid = { version = "1.23", features = ["v4"] }
+base64 = "0.22"
+hex = "0.4"
 wasip3 = { version = "0.7.0", features = ["http-compat"] }
 wpt-support = { path = "crates/wpt-support" }
 # wit-bindgen = { version = "0.51", features = ["async", "async-spawn"] }
@@ -50,6 +52,7 @@ web-globals = { path = "crates/builtins/web-globals" }
 web-streams = { path = "crates/builtins/web-streams" }
 web-url = { path = "crates/builtins/web-url" }
 cpp-builtins = { path = "crates/builtins/cpp-builtins" }
+node-builtins = { path = "crates/builtins/node-builtins" }
 
 
 [profile.release]
