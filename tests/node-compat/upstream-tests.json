@@ -1,0 +1,7 @@
+[
+  "parallel/test-process-release.js",
+  "parallel/test-process-env-delete.js",
+  "parallel/test-process-env-symbols.js",
+  "parallel/test-stdout-stderr-write.js",
+  "parallel/test-eval.js"
+]

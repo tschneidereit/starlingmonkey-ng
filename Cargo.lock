@@ -257,7 +257,6 @@ dependencies = [
  "shlex 2.0.1",
  "tempfile",
  "tokio",
- "wasip3 0.7.0+wasi-0.3.0",
 ]
 
 [[package]]
@@ -1286,9 +1285,8 @@ version = "0.3.0"
 dependencies = [
  "core-runtime",
  "cpp-builtins",
- "futures-lite",
  "js",
- "simple-http",
+ "node-builtins",
  "tokio",
  "url",
  "wasip3 0.7.0+wasi-0.3.0",
@@ -1384,6 +1382,15 @@ dependencies = [
  "libz-sys",
  "tar",
  "walkdir",
+]
+
+[[package]]
+name = "node-builtins"
+version = "0.3.0"
+dependencies = [
+ "core-runtime",
+ "js",
+ "libstarling",
 ]
 
 [[package]]

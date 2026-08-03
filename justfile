@@ -3,16 +3,22 @@
 # Starling-NG justfile
 #
 # Usage:
-#   just build           Build the project (debug mode)
-#   just test            Run all Rust tests
-#   just clone-wpt-tests Clone the WPT test suite
-#   just wpt-setup       Add the WPT hosts entries to /etc/hosts
-#   just wpt-test        Run all WPT tests
-#   just wpt-test base64 Run WPT tests matching "base64"
-#   just wpt-update      Run WPT tests and update expectations
-#   just fmt             Format all code
-#   just clippy          Run clippy lints
-#   just check           Run fmt check + clippy + tests
+#   just build              Build the project (debug mode)
+#   just test               Run all Rust tests
+#   just clone-wpt-tests    Clone the WPT test suite
+#   just wpt-setup          Add the WPT hosts entries to /etc/hosts
+#   just wpt-test           Run all WPT tests
+#   just wpt-test base64    Run WPT tests matching "base64"
+#   just wpt-update         Run WPT tests and update expectations
+#   just node-setup              Init the node-compat test submodule
+#   just node-test               Run node-compat tests
+#   just node-test process       Run node-compat tests matching "process"
+#   just node-test-wasm          Run node-compat tests against the wasm binary
+#   just node-update             Run node-compat tests and update expectations
+#   just node-update-wasm        Run node-compat wasm tests and update expectations
+#   just fmt                Format all code
+#   just clippy             Run clippy lints
+#   just check              Run fmt check + clippy + tests
 
 # Build in debug mode.
 build *TARGET:
@@ -120,3 +126,49 @@ wpt-test-wasm-verbose *PATTERN:
 wpt-update-wasm *PATTERN:
     @just build-wasm
     node tests/wpt-harness/run-wpt.mjs --target=wasm --update-expectations {{PATTERN}}
+
+
+# Init the node-compat test submodule (run once after clone).
+node-setup:
+    git submodule update --init tests/node-compat/node-test
+
+# Build with the node_compat feature (debug mode).
+build-node:
+    cargo build --features debugmozjs,node_compat
+
+# Build with node_compat feature (release mode).
+build-node-release:
+     cargo build --features debugmozjs,node_compat --release
+
+# Run node-compat tests, optionally filtering by pattern.
+node-test *PATTERN:
+    @just build-node
+    node tests/node-compat/run.mjs {{PATTERN}}
+
+# Run node-compat tests and update expectation files.
+node-update *PATTERN:
+    @just build-node
+    node tests/node-compat/run.mjs --update {{PATTERN}}
+
+# Build with the node_compat feature for wasm32-wasip2.
+build-node-wasm:
+    cargo build --target wasm32-wasip2 --features debugmozjs,node_compat
+
+# Build with the node_compat feature for wasm32-wasip2 (release mode).
+build-node-wasm-release:
+    cargo build --target wasm32-wasip2 --features debugmozjs,node_compat --release
+
+# Run node-compat tests against the wasm binary.
+node-test-wasm *PATTERN:
+    @just build-node-wasm
+    node tests/node-compat/run.mjs --target=wasm {{PATTERN}}
+
+# Run node-compat tests against the wasm binary with verbose output.
+node-test-wasm-verbose *PATTERN:
+    @just build-node-wasm
+    node tests/node-compat/run.mjs --target=wasm -v {{PATTERN}}
+
+# Run node-compat tests against the wasm binary and update expectation files.
+node-update-wasm *PATTERN:
+    @just build-node-wasm
+    node tests/node-compat/run.mjs --target=wasm --update {{PATTERN}}

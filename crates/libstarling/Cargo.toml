@@ -12,6 +12,7 @@ test = false
 
 [features]
 debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs"]
+node_compat = ["node-builtins"]
 
 [dependencies]
 core-runtime.workspace = true
@@ -21,6 +22,7 @@ web-globals.workspace = true
 web-streams.workspace = true
 web-url.workspace = true
 cpp-builtins.workspace = true
+node-builtins = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio.workspace = true
