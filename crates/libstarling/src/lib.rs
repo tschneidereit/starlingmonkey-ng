@@ -16,6 +16,8 @@ pub fn register_builtins() {
     runtime::register_global_initializer(|scope, global| unsafe {
         cpp_builtins::install(scope.cx_mut().raw_cx(), global.handle());
     });
+    #[cfg(feature = "node_compat")]
+    runtime::register_global_initializer(node_builtins::add_to_global);
 }
 
 /// Apply CLI options that take effect before the runtime is initialized.
@@ -87,6 +89,9 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
         .await;
     }
 
+    #[cfg(feature = "node_compat")]
+    node_builtins::process::fire_exit_handlers(&scope);
+
     drop(scope);
     Ok(())
 }
@@ -125,6 +130,9 @@ fn drive_event_loop_native(
         let raw_cx = unsafe { scope.raw_cx_no_gc() };
         unsafe { run_to_completion(raw_cx, el, tokio::time::sleep).await }
     });
+
+    #[cfg(feature = "node_compat")]
+    node_builtins::process::fire_exit_handlers(&scope);
 
     drop(scope);
     Ok(())

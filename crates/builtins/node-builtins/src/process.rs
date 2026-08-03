@@ -73,6 +73,68 @@ fn build_env_object<'s>(scope: &'s Scope<'_>) -> Object<'s> {
     obj
 }
 
+// Wrap `process.env` in a Proxy that:
+//   - coerces assigned values to strings (matching Node.js behaviour)
+//   - rejects symbol keys/values with TypeError (also matching Node.js)
+//   - returns undefined / false / true for symbol key get/has/delete
+fn build_env_proxy<'s>(scope: &'s Scope<'_>) -> Result<Object<'s>, js::error::ExnThrown> {
+    let target = build_env_object(scope);
+    let factory_src =
+        "(function(t){return new Proxy(t,{\
+         set:function(t,k,v){\
+           if(typeof k==='symbol')throw new TypeError('Symbol key not allowed in process.env');\
+           if(typeof v==='symbol')throw new TypeError('Symbol value not allowed in process.env');\
+           t[k]=String(v);return true;\
+         },\
+         get:function(t,k){\
+           if(typeof k==='symbol')return undefined;return t[k];\
+         },\
+         has:function(t,k){\
+           if(typeof k==='symbol')return false;return k in t;\
+         },\
+         deleteProperty:function(t,k){\
+           delete t[k];return true;\
+         }\
+        });})";
+    let factory_val = js::compile::evaluate(scope, factory_src)?;
+    let target_val = scope.root_value(target.as_value());
+    let result = js::Function::call_value(scope, scope.global().handle(), factory_val, &[target_val])?;
+    Object::from_value(scope, result).map_err(|_| js::error::ExnThrown)
+}
+
+fn build_release_object<'s>(scope: &'s Scope<'_>) -> Object<'s> {
+    let obj = js::Object::new_plain(scope).unwrap();
+    let _ = obj.set_property(scope, c"name", "node".to_string());
+    // v20.11.0 is an LTS release; the codename for the v20 line is "Iron".
+    let _ = obj.set_property(scope, c"lts", "Iron".to_string());
+    obj
+}
+
+#[cfg(unix)]
+fn read_system_umask() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    let tmp_path = std::env::temp_dir().join(".starling-umask-probe");
+    let _ = std::fs::remove_file(&tmp_path);
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .is_ok()
+    {
+        let umask = std::fs::metadata(&tmp_path)
+            .map(|m| (!m.mode()) & 0o666)
+            .unwrap_or(0o022);
+        let _ = std::fs::remove_file(&tmp_path);
+        return umask;
+    }
+    0o022
+}
+
+#[cfg(not(unix))]
+fn read_system_umask() -> u32 {
+    0o022
+}
+
 // process.stdin: synchronous readable stream.
 // read() returns the next line as a string, or null at EOF.
 // TODO: size argument (read([size])), event API (on/resume/pipe), setEncoding.
@@ -167,6 +229,7 @@ pub mod process_ns {
 
     /// `process.exit(code)` — exit the process with the given code.
     pub fn exit(scope: &Scope<'_>, args: &CallArgs) -> () {
+        super::fire_exit_handlers(scope);
         let code = if args.argc_ > 0 {
             i32::from_jsval(scope, scope.root_value(*args.get(0)), js::conversion::ConversionBehavior::Default).unwrap_or(0)
         } else {
@@ -196,6 +259,16 @@ pub mod process_ns {
         })));
         Ok(())
     }
+
+    /// `process.umask([mask])` — get/set the file mode creation mask.
+    pub fn umask(scope: &Scope<'_>, args: &CallArgs) -> Result<u32, TypeError> {
+        let current_umask = super::read_system_umask();
+        if args.argc_ > 0 {
+            let _mask = u32::from_jsval(scope, scope.root_value(*args.get(0)), js::conversion::ConversionBehavior::Default)
+                .map_err(|_| TypeError("umask mask must be an integer".into()))?;
+        }
+        Ok(current_umask)
+    }
 }
 
 /// Install the `process` global on the provided global object.
@@ -205,16 +278,46 @@ pub fn add_to_global<'s>(scope: &'s Scope<'_>, global: Object<'s>) {
     let process_val = global.get_property(scope, c"process").expect("process not on global");
     let process_obj = Object::from_value(scope, process_val).expect("process is not an object");
 
+    let env = build_env_proxy(scope).unwrap_or_else(|_| build_env_object(scope));
     let _ = process_obj.set_property(scope, c"version",  NODE_VERSION.to_string());
     let _ = process_obj.set_property(scope, c"platform", platform().to_string());
     let _ = process_obj.set_property(scope, c"arch",     arch().to_string());
     let _ = process_obj.set_property(scope, c"title",    "starling".to_string());
     let _ = process_obj.set_property(scope, c"argv",     build_argv(scope));
-    let _ = process_obj.set_property(scope, c"env",      build_env_object(scope));
+    let _ = process_obj.set_property(scope, c"env",      env);
     let _ = process_obj.set_property(scope, c"versions", build_versions_object(scope));
+    let _ = process_obj.set_property(scope, c"release",  build_release_object(scope));
     let _ = process_obj.set_property(scope, c"stdin",    build_stdin_object(scope));
     let _ = process_obj.set_property(scope, c"stdout",   build_stream_object(scope, false));
     let _ = process_obj.set_property(scope, c"stderr",   build_stream_object(scope, true));
+
+    install_event_emitter(scope, &process_obj);
+}
+
+fn install_event_emitter<'s>(scope: &'s Scope<'_>, process_obj: &Object<'s>) {
+    let script = "(function(p){\
+        var h={};\
+        p.on=function(e,f){if(typeof f==='function'){(h[e]||(h[e]=[])).push(f);}return p;};\
+        p.__fireEvent=function(e){\
+            var fns=h[e]||[];\
+            for(var i=0;i<fns.length;i++){try{fns[i]();}catch(err){}}\
+        };\
+    })";
+    if let Ok(factory) = js::compile::evaluate(scope, script) {
+        let _ = js::Function::call_value(
+            scope,
+            scope.global().handle(),
+            factory,
+            &[scope.root_value(process_obj.as_value())],
+        );
+    }
+}
+
+/// Fire all `process.on('exit')` handlers. Called by libstarling when the event
+/// loop drains, and by `process.exit()` before terminating.
+pub fn fire_exit_handlers(scope: &Scope<'_>) {
+    let script = "process.__fireEvent('exit')";
+    let _ = js::compile::evaluate(scope, script);
 }
 
 #[cfg(test)]
