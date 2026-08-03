@@ -14,8 +14,6 @@
 #   just node-test               Run node-compat tests
 #   just node-test process       Run node-compat tests matching "process"
 #   just node-test-wasm          Run node-compat tests against the wasm binary
-#   just node-update             Run node-compat tests and update expectations
-#   just node-update-wasm        Run node-compat wasm tests and update expectations
 #   just fmt                Format all code
 #   just clippy             Run clippy lints
 #   just check              Run fmt check + clippy + tests
@@ -145,11 +143,6 @@ node-test *PATTERN:
     @just build-node
     node tests/node-compat/run.mjs {{PATTERN}}
 
-# Run node-compat tests and update expectation files.
-node-update *PATTERN:
-    @just build-node
-    node tests/node-compat/run.mjs --update {{PATTERN}}
-
 # Build with the node_compat feature for wasm32-wasip2.
 build-node-wasm:
     cargo build --target wasm32-wasip2 --features debugmozjs,node_compat
@@ -162,13 +155,3 @@ build-node-wasm-release:
 node-test-wasm *PATTERN:
     @just build-node-wasm
     node tests/node-compat/run.mjs --target=wasm {{PATTERN}}
-
-# Run node-compat tests against the wasm binary with verbose output.
-node-test-wasm-verbose *PATTERN:
-    @just build-node-wasm
-    node tests/node-compat/run.mjs --target=wasm -v {{PATTERN}}
-
-# Run node-compat tests against the wasm binary and update expectation files.
-node-update-wasm *PATTERN:
-    @just build-node-wasm
-    node tests/node-compat/run.mjs --target=wasm --update {{PATTERN}}

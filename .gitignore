@@ -2,3 +2,4 @@
 /deps/wpt
 /deps/.wpt-tmp
 /.node-tmp*
+/.tmp*/
