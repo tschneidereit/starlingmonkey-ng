@@ -20,6 +20,7 @@ url.workspace = true
 web-globals.workspace = true
 web-streams.workspace = true
 web-url.workspace = true
+web-url-pattern.workspace = true
 cpp-builtins.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

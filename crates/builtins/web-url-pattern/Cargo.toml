@@ -1,0 +1,17 @@
+[package]
+name = "web-url-pattern"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+core-runtime.workspace = true
+indexmap = "2"
+js.workspace = true
+url.workspace = true
+urlpattern = "0.6.0"
+
+[lints]
+workspace = true

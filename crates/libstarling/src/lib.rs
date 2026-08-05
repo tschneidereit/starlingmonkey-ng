@@ -13,6 +13,7 @@ pub fn register_builtins() {
     runtime::register_global_initializer(web_globals::add_to_global);
     runtime::register_global_initializer(web_streams::add_to_global);
     runtime::register_global_initializer(web_url::add_to_global);
+    runtime::register_global_initializer(web_url_pattern::add_to_global);
     runtime::register_global_initializer(|scope, global| unsafe {
         cpp_builtins::install(scope.cx_mut().raw_cx(), global.handle());
     });
