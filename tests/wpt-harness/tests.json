@@ -189,7 +189,7 @@
   "NET fetch/api/basic/request-headers-nonascii.any.js",
   "SKIP(Blob/FormData not implemented) fetch/api/basic/request-headers.any.js",
   "SKIP(referrer policy not implemented) fetch/api/basic/request-referrer.any.js",
-  "SKIP(harness lacks WPT .sub template substitution) fetch/api/basic/response-url.sub.any.js",
+  "NET fetch/api/basic/response-url.sub.any.js",
   "NET fetch/api/basic/scheme-about.any.js",
   "SKIP(Blob/blob: URLs not implemented) fetch/api/basic/scheme-blob.sub.any.js",
   "NET fetch/api/basic/scheme-data.any.js",

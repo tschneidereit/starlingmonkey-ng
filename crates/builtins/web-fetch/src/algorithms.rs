@@ -1367,13 +1367,12 @@ fn main_fetch<'r>(
             // response to the caller, which resolves the promise with it.
             Ok(FetchOutcome::Response(response))
         }
-        // Step 12 Otherwise.1: Set _request_’s `response tainting` to "`cors`".
-        // Step 12 Otherwise.2: Return the result of running `override fetch` given "`http-fetch`"
-        //     and _fetchParams_.
-        // `HTTP fetch` onwards is the host transport. The tainting is not recorded: with no origin
-        // there is nothing to filter against, so `response_from_platform` builds a "`basic`"-type
-        // response (Step 14's `basic filtered response`) and applies Step 22 itself — on this path
-        // the response does not exist until the transport future completes.
+        // Step 12's origin/mode switch and the tainting it derives live in
+        // `transport::apply_main_fetch_switch`, run against the initial URL and every redirect
+        // hop. `response_from_platform` applies Step 14.2's filtering (and Step 22) from the
+        // accumulated tainting. On this path the response does not exist until the transport
+        // future completes.
+        // `HTTP fetch` onwards is the host transport.
         "http" | "https" => Ok(FetchOutcome::Network),
         // Step 12 _request_’s `current URL`’s `scheme` is not an `HTTP(S) scheme`: Return a
         //     `network error`.
