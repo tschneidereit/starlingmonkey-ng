@@ -286,9 +286,49 @@ const WPT_PATH_ALIASES = {
   "/resources/WebIDLParser.js": "/resources/webidl2/lib/webidl2.js",
 };
 
+// ---------------------------------------------------------------------------
+// wptserve `{{...}}` template substitution
+// ---------------------------------------------------------------------------
+//
+// The WPT server fills `{{host}}`-style placeholders into any `.sub.` file it
+// serves. This harness loads files from disk, so without doing the same here,
+// scripts like get-host-info.sub.js hand tests literal `{{host}}` strings.
+//
+// The values must describe the server the NET tests talk to. Host and domains
+// are wptserve defaults; the ports come from wpt-server-config.json, which
+// ensureWptServer passes to `wpt serve`.
+const WPT_HOST = "web-platform.test";
+const WPT_ALT_HOST = "not-web-platform.test";
+const WPT_PORTS = { http: [8000, 8001], https: [8443, 8444] };
+
+function isSubstitutedPath(filePath) {
+  return path.basename(filePath).includes(".sub.");
+}
+
+function substituteWptTemplates(source) {
+  const domain = (host, sub) => (sub ? `${sub}.${host}` : host);
+  return source
+    .replace(/\{\{host\}\}/g, WPT_HOST)
+    .replace(/\{\{domains\[(\w*)\]\}\}/g, (_, sub) => domain(WPT_HOST, sub))
+    .replace(/\{\{hosts\[\]\[(\w*)\]\}\}/g, (_, sub) => domain(WPT_HOST, sub))
+    .replace(/\{\{hosts\[alt\]\[(\w*)\]\}\}/g, (_, sub) =>
+      domain(WPT_ALT_HOST, sub),
+    )
+    .replace(
+      // Unknown scheme/index (e.g. `{{ports[ws][0]}}`) is left as-is rather
+      // than guessed at: a placeholder that survives is an obvious failure,
+      // a wrong port number a baffling one.
+      /\{\{ports\[(\w+)\]\[(\d+)\]\}\}/g,
+      (match, scheme, index) => WPT_PORTS[scheme]?.[index]?.toString() ?? match,
+    );
+}
+
 function assembleTestScript(testPath) {
   const fullPath = path.join(config.wptRoot, testPath);
-  const testSource = readFileSync(fullPath, "utf-8");
+  let testSource = readFileSync(fullPath, "utf-8");
+  if (isSubstitutedPath(testPath)) {
+    testSource = substituteWptTemplates(testSource);
+  }
 
   // Parse META: script= directives from the test source.
   const metaScripts = [];
@@ -374,7 +414,10 @@ function assembleTestScript(testPath) {
       );
       continue;
     }
-    const metaSource = readFileSync(resolvedPath, "utf-8");
+    let metaSource = readFileSync(resolvedPath, "utf-8");
+    if (isSubstitutedPath(resolvedPath)) {
+      metaSource = substituteWptTemplates(metaSource);
+    }
     script += toEvalScriptCall(metaSource, metaPath);
   }
 
@@ -836,29 +879,65 @@ function isWptServerReachable() {
  * for it; it is stopped on process exit. The `web-platform.test` hosts entries
  * must already be present (`just wpt-setup` installs them from `deps/wpt-hosts`).
  */
-function ensureWptServer() {
+async function ensureWptServer() {
   if (isWptServerReachable()) {
-    console.log("Using already-running WPT server at http://web-platform.test:8000/");
+    if (config.logLevel > LogLevel.Quiet) {
+      console.log("Using already-running WPT server at http://web-platform.test:8000/");
+    }
     return;
   }
-  console.log("Starting WPT server (wpt serve --no-h2) ...");
-  managedWptServer = spawn(path.join(config.wptRoot, "wpt"), ["serve", "--no-h2"], {
-    cwd: config.wptRoot,
-    stdio: "ignore",
-    detached: true,
+
+  if (config.logLevel > LogLevel.Quiet) {
+    console.info(`Starting WPT server (cmd: ${config.wptRoot}/wpt --no-h2 serve)...`);
+  }
+  // The config pins every port so that substituteWptTemplates' static table
+  // matches the running server; the default config picks the second HTTP port
+  // at random ("auto").
+  managedWptServer = spawn(
+    path.join(config.wptRoot, "wpt"),
+    ["serve", "--no-h2", "--config", relativePath("wpt-server-config.json")],
+    {
+      detached: true,
+    },
+  );
+  managedWptServer.on("error", event => {
+    console.log(`error starting WPT server: ${event}`);
   });
-  for (let i = 0; i < 90; i++) {
+
+  if (config.logLevel >= LogLevel.VeryVerbose) {
+    managedWptServer.stderr.on("data", data => {
+      console.log(`WPT server stderr: ${stripTrailingNewline(data)}`);
+    });
+    managedWptServer.stdout.on("data", data => {
+      console.log(`WPT server stdout: ${stripTrailingNewline(data)}`);
+    });
+  }
+
+  for (let i = 1; i <= 20; i++) {
+    console.log(`Waiting for WPT server to become reachable... (${i}/20)`);
     if (isWptServerReachable()) {
-      console.log("WPT server is ready.");
+      if (config.logLevel > LogLevel.Quiet) {
+        console.log("WPT server is ready.");
+      }
       return;
     }
-    spawnSync("sleep", ["1"]);
+    let resolve;
+    let promise = new Promise((r) => (resolve = r));
+    setTimeout(() => {resolve();}, 1000);
+    await promise;
   }
   stopWptServer();
   console.error(
     "WPT server did not become reachable. Ensure the hosts entries exist ('just wpt-setup').",
   );
   process.exit(1);
+}
+
+function stripTrailingNewline(str) {
+  if (str[str.length - 1] === '\n') {
+    return str.substr(0, str.length - 1);
+  }
+  return str;
 }
 
 function stopWptServer() {
@@ -883,7 +962,7 @@ async function run() {
   const { testPaths, totalCount, needsServer } = getTests(config.tests.pattern);
 
   if (needsServer) {
-    ensureWptServer();
+    await ensureWptServer();
   }
   const pathLength = testPaths.reduce((len, p) => Math.max(p.length, len), 0);
 
@@ -1032,6 +1111,13 @@ async function run() {
       }
     }
   });
+
+  // Stop a server this run started, explicitly rather than from the "exit"
+  // handler: its open stdout/stderr pipes hold the event loop open, so node
+  // never begins exiting on its own and the handler never runs. (The failure
+  // paths below force the issue with process.exit, but a fully green run
+  // would hang here.)
+  stopWptServer();
 
   // Report the suite's wall-clock time, not the sum of the per-test durations:
   // with tests running concurrently that sum exceeds the elapsed time, and it

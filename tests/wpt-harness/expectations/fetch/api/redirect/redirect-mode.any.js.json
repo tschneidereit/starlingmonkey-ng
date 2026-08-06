@@ -96,13 +96,13 @@
     "status": "PASS"
   },
   "cross-origin redirect 301 in manual redirect and cors mode": {
-    "status": "FAIL"
-  },
-  "cross-origin redirect 301 in manual redirect and no-cors mode": {
     "status": "PASS"
   },
-  "cross-origin redirect 301 in follow redirect and cors mode": {
+  "cross-origin redirect 301 in manual redirect and no-cors mode": {
     "status": "FAIL"
+  },
+  "cross-origin redirect 301 in follow redirect and cors mode": {
+    "status": "PASS"
   },
   "cross-origin redirect 301 in follow redirect and no-cors mode": {
     "status": "FAIL"
@@ -114,13 +114,13 @@
     "status": "PASS"
   },
   "cross-origin redirect 302 in manual redirect and cors mode": {
-    "status": "FAIL"
-  },
-  "cross-origin redirect 302 in manual redirect and no-cors mode": {
     "status": "PASS"
   },
-  "cross-origin redirect 302 in follow redirect and cors mode": {
+  "cross-origin redirect 302 in manual redirect and no-cors mode": {
     "status": "FAIL"
+  },
+  "cross-origin redirect 302 in follow redirect and cors mode": {
+    "status": "PASS"
   },
   "cross-origin redirect 302 in follow redirect and no-cors mode": {
     "status": "FAIL"
@@ -132,13 +132,13 @@
     "status": "PASS"
   },
   "cross-origin redirect 303 in manual redirect and cors mode": {
-    "status": "FAIL"
-  },
-  "cross-origin redirect 303 in manual redirect and no-cors mode": {
     "status": "PASS"
   },
-  "cross-origin redirect 303 in follow redirect and cors mode": {
+  "cross-origin redirect 303 in manual redirect and no-cors mode": {
     "status": "FAIL"
+  },
+  "cross-origin redirect 303 in follow redirect and cors mode": {
+    "status": "PASS"
   },
   "cross-origin redirect 303 in follow redirect and no-cors mode": {
     "status": "FAIL"
@@ -150,13 +150,13 @@
     "status": "PASS"
   },
   "cross-origin redirect 307 in manual redirect and cors mode": {
-    "status": "FAIL"
-  },
-  "cross-origin redirect 307 in manual redirect and no-cors mode": {
     "status": "PASS"
   },
-  "cross-origin redirect 307 in follow redirect and cors mode": {
+  "cross-origin redirect 307 in manual redirect and no-cors mode": {
     "status": "FAIL"
+  },
+  "cross-origin redirect 307 in follow redirect and cors mode": {
+    "status": "PASS"
   },
   "cross-origin redirect 307 in follow redirect and no-cors mode": {
     "status": "FAIL"
@@ -168,18 +168,18 @@
     "status": "PASS"
   },
   "cross-origin redirect 308 in manual redirect and cors mode": {
-    "status": "FAIL"
-  },
-  "cross-origin redirect 308 in manual redirect and no-cors mode": {
     "status": "PASS"
   },
-  "cross-origin redirect 308 in follow redirect and cors mode": {
+  "cross-origin redirect 308 in manual redirect and no-cors mode": {
     "status": "FAIL"
+  },
+  "cross-origin redirect 308 in follow redirect and cors mode": {
+    "status": "PASS"
   },
   "cross-origin redirect 308 in follow redirect and no-cors mode": {
     "status": "FAIL"
   },
   "manual redirect with a CORS error should be rejected": {
-    "status": "PASS"
+    "status": "FAIL"
   }
 }
