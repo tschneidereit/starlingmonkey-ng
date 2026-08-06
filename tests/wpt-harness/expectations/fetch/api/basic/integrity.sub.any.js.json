@@ -39,13 +39,13 @@
     "status": "FAIL"
   },
   "CORS empty integrity": {
-    "status": "FAIL"
+    "status": "PASS"
   },
   "CORS SHA-512 integrity": {
-    "status": "FAIL"
+    "status": "PASS"
   },
   "CORS invalid integrity": {
-    "status": "PASS"
+    "status": "FAIL"
   },
   "Empty string integrity for opaque response": {
     "status": "FAIL"

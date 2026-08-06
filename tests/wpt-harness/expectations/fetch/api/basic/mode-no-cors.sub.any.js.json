@@ -2,13 +2,13 @@
   "Fetch ../resources/top.txt with no-cors mode": {
     "status": "PASS"
   },
-  "Fetch http://{{host}}:{{ports[http][0]}}/fetch/api/resources/top.txt with no-cors mode": {
+  "Fetch http://web-platform.test:8000/fetch/api/resources/top.txt with no-cors mode": {
+    "status": "PASS"
+  },
+  "Fetch https://web-platform.test:8443/fetch/api/resources/top.txt with no-cors mode": {
     "status": "FAIL"
   },
-  "Fetch https://{{host}}:{{ports[https][0]}}/fetch/api/resources/top.txt with no-cors mode": {
-    "status": "FAIL"
-  },
-  "Fetch http://{{host}}:{{ports[http][1]}}/fetch/api/resources/top.txt with no-cors mode": {
+  "Fetch http://web-platform.test:8001/fetch/api/resources/top.txt with no-cors mode": {
     "status": "FAIL"
   }
 }
