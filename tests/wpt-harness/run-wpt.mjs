@@ -13,12 +13,28 @@
 // Options:
 //   --wpt-root=PATH            Path to WPT checkout (default: deps/wpt)
 //   --target=[native|wasm]     Execution target (default: native)
+//   --permissive               Run with the request restrictions disabled
 //   --runtime=PATH             Path to starling binary (default: target/debug/starling)
 //   --expectations=PATH        Path to expectations dir (default: tests/wpt-harness/expectations)
 //   --update-expectations      Update expectation files with current results
 //   -v                         Verbose output
 //   -vv                        Very verbose output
 //   --help                     Show help
+//
+// Three configurations share one set of expectation files, each recording its
+// results in its own field (see getExpectedResults):
+//
+//   native, restrictions enforced   `status`             the baseline
+//   wasm, restrictions enforced     `wasm_status`        --target=wasm
+//   native, restrictions disabled   `permissive_status`  --permissive
+//
+// An override field is written only where that configuration's result differs
+// from the baseline, so the vast majority of subtests — which behave the same
+// everywhere — are still recorded once.
+//
+// The permissive dimension exists because the browser-security Fetch
+// constraints are off by default, except in WPT mode. Without it, the whole
+// suite would only ever cover the configuration that ordinary users do not run.
 
 import { execFileSync, spawn, spawnSync } from "child_process";
 import {
@@ -79,6 +95,10 @@ const config = {
     pattern: "",
   },
   skipSlowTests: false,
+  // Run with the browser-security request restrictions disabled (the runtime's
+  // default outside WPT mode), checking `permissive_status` expectation
+  // overrides. See getExpectedResults.
+  permissive: false,
   // How many tests to have in flight at once. Defaults to number of CPUs * 2,
   // because many tests aren't CPU-bound, and can execute in parallel without
   // incurring compute contention.
@@ -136,6 +156,12 @@ const ArgParsers = {
     help: "Skip tests marked as SLOW",
     cmd: () => {
       config.skipSlowTests = true;
+    },
+  },
+  "--permissive": {
+    help: "Run with request restrictions disabled; checks permissive_status expectations",
+    cmd: () => {
+      config.permissive = true;
     },
   },
   "--jobs": {
@@ -210,6 +236,14 @@ function applyConfig(argv) {
   // When targeting wasm, adjust the runtime path if not explicitly set.
   if (config.target === "wasm" && config.runtime === "target/debug/starling") {
     config.runtime = "target/wasm32-wasip2/debug/starling.wasm";
+  }
+
+  // The permissive dimension records one `permissive_status` override per
+  // subtest, with no per-target variant of it, because the fetch code the switch
+  // gates is shared between the targets, so the native run covers both.
+  if (config.permissive && config.target === "wasm") {
+    console.error("--permissive runs are native-only; drop --target=wasm.");
+    return false;
   }
 
   if (!existsSync(config.runtime)) {
@@ -451,7 +485,8 @@ function extractPrefixes(path) {
   const prefixes = new Map();
   let remaining = path;
   while (true) {
-    const match = remaining.match(/^([A-Z-]+)(\(([^)]+)\))?[, ]/);
+    // Test paths never contain spaces, so the last `") "` in a line always closes the comment.
+    const match = remaining.match(/^([A-Z-]+)(\((.*)\))?[, ]/);
     if (!match) break;
     const prefix = match[1];
     const comment = match[3];
@@ -485,9 +520,24 @@ function expectationsPath(testPath) {
   return path.join(config.tests.expectations, testPath + ".json");
 }
 
-// The expectation field holding the wasm target's status, when it differs from
+// The expectation field holding the wasm target's status, iff it differs from
 // native. Absent means "same as native".
 const WASM_STATUS = "wasm_status";
+
+// The expectation field holding a subtest's status with the request
+// restrictions disabled (a `--permissive` run), iff it differs from the
+// enforced-mode `status`. Absent means "same as enforced".
+const PERMISSIVE_STATUS = "permissive_status";
+
+// Every status field an entry can carry, in the order they are written.
+const STATUS_FIELDS = ["status", WASM_STATUS, PERMISSIVE_STATUS];
+
+// The field a run records its results under: the baseline `status` for the
+// default native enforced run, or the matching override field.
+function runStatusField() {
+  if (config.permissive) return PERMISSIVE_STATUS;
+  return config.target === "wasm" ? WASM_STATUS : "status";
+}
 
 /// Read the raw expectations file, exactly as stored.
 function readExpectationsFile(testPath) {
@@ -498,28 +548,32 @@ function readExpectationsFile(testPath) {
   }
 }
 
-// The expectations for the target being run, from one file shared by both.
+// The expectations for the configuration being run, from one file shared by
+// all of them.
 //
-// A subtest is stored as `{"status": "PASS"}` when both targets agree, and
-// gains a `wasm_status` when they do not:
+// A subtest is stored as `{"status": "PASS"}` when every configuration agrees,
+// and gains override fields where one does not:
 //
 //     "some subtest": { "status": "PASS", "wasm_status": "FAIL" }
+//     "another":      { "status": "FAIL", "permissive_status": "PASS" }
 //
-// `status` is the native status and the default; `wasm_status` overrides it on
-// wasm. Keeping both in one file means a subtest that behaves the same
-// everywhere — the overwhelming majority — is still written once.
+// `status` is the native enforced-mode status and the default; `wasm_status`
+// overrides it on the wasm target, and `permissive_status` overrides it when
+// the request restrictions are disabled (`--permissive`). Keeping all of them
+// in one file means a subtest that behaves the same everywhere — the
+// overwhelming majority — is still written once.
 //
-// An entry with no status for this target (a `wasm_status`-only entry seen on
-// native) is dropped, so the subtest reads as having no expectation rather than
-// as an expectation that can never be met.
+// An entry with no status for this configuration (say, a `wasm_status`-only
+// entry seen on native) is dropped, so the subtest reads as having no
+// expectation rather than as an expectation that can never be met.
 function getExpectedResults(testPath) {
   const raw = readExpectationsFile(testPath);
   const expectations = {};
   for (const [name, entry] of Object.entries(raw)) {
     const status =
-      config.target === "wasm" && entry[WASM_STATUS] !== undefined
-        ? entry[WASM_STATUS]
-        : entry.status;
+      (config.permissive ? entry[PERMISSIVE_STATUS] : undefined) ??
+      (config.target === "wasm" ? entry[WASM_STATUS] : undefined) ??
+      entry.status;
     if (status !== undefined) {
       expectations[name] = { status };
     }
@@ -528,10 +582,11 @@ function getExpectedResults(testPath) {
 }
 
 // Fold this run's results into the stored expectations, touching only the
-// target that ran. Running on wasm must not overwrite the native statuses, and
-// vice versa, so that updating one target never silently invents results for
-// the other.
+// field for the configuration that ran. Running on wasm or permissive must not
+// overwrite the native enforced statuses, and vice versa, so that updating one
+// configuration never silently invents results for another.
 function mergeExpectations(previous, results) {
+  const field = runStatusField();
   const merged = {};
   for (const result of results) {
     const prev = previous[result.name] ?? {};
@@ -540,30 +595,31 @@ function mergeExpectations(previous, results) {
     // subtest, not the outcome of any single run.
     const keep = (stored) => (stored === "FLAKY" ? "FLAKY" : undefined);
 
-    if (config.target === "wasm") {
-      const native = prev.status;
-      const wasm = keep(prev[WASM_STATUS]) ?? observed;
-      const entry = native === undefined ? {} : { status: native };
-      // Only record a wasm status where it actually differs from native, so the
-      // file does not fill up with redundant duplicates.
-      if (wasm !== native) entry[WASM_STATUS] = wasm;
-      merged[result.name] = entry;
-    } else {
-      const entry = { status: keep(prev.status) ?? observed };
-      if (prev[WASM_STATUS] !== undefined && prev[WASM_STATUS] !== entry.status) {
-        entry[WASM_STATUS] = prev[WASM_STATUS];
+    const values = { ...prev, [field]: keep(prev[field]) ?? observed };
+    // Only record an override where it actually differs from the baseline, so
+    // the file does not fill up with redundant duplicates. (After a baseline
+    // run this also drops overrides the new baseline has caught up with.)
+    for (const override of [WASM_STATUS, PERMISSIVE_STATUS]) {
+      if (values[override] !== undefined && values[override] === values.status) {
+        delete values[override];
       }
-      merged[result.name] = entry;
     }
+    const entry = {};
+    for (const f of STATUS_FIELDS) {
+      if (values[f] !== undefined) entry[f] = values[f];
+    }
+    merged[result.name] = entry;
   }
-  // Carry over entries for the *other* target that this run did not observe, so
-  // updating one target never drops the other's record.
-  for (const [name, entry] of Object.entries(previous)) {
+  // Carry over what the *other* configurations recorded for subtests this run
+  // did not observe, dropping only this run's own stale field.
+  for (const [name, prev] of Object.entries(previous)) {
     if (merged[name]) continue;
-    if (config.target === "wasm" && entry.status !== undefined) {
-      merged[name] = { status: entry.status };
-    } else if (config.target === "native" && entry[WASM_STATUS] !== undefined) {
-      merged[name] = { [WASM_STATUS]: entry[WASM_STATUS] };
+    const entry = {};
+    for (const f of STATUS_FIELDS) {
+      if (f !== field && prev[f] !== undefined) entry[f] = prev[f];
+    }
+    if (Object.keys(entry).length > 0) {
+      merged[name] = entry;
     }
   }
   return merged;
@@ -708,10 +764,13 @@ function runScriptPath(testPath) {
 // `optimized` selects the flags the harness runs with — ahead-of-time compiled
 // runtime, no native unwind information.
 function testCommand(scriptFile, { optimized }) {
+  const restrictionFlags = config.permissive
+    ? ["--enforce-fetch-restrictions=false"]
+    : [];
   if (config.target !== "wasm") {
     return {
       command: config.runtime,
-      args: ["--legacy-script", "--wpt-mode", scriptFile],
+      args: ["--legacy-script", "--wpt-mode", ...restrictionFlags, scriptFile],
     };
   }
   // wasmtime sees the guest filesystem, where --dir=.::/ maps the host CWD to

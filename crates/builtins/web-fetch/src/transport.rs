@@ -54,7 +54,7 @@ fn apply_main_fetch_switch(
     redirect_mode: RequestRedirect,
     tainting: &mut ResponseTainting,
 ) -> Result<(), Error> {
-    if !crate::config::enforce_request_restrictions() {
+    if !core_runtime::config::enforce_fetch_restrictions() {
         return Ok(());
     }
     let Some(request_origin) = request_origin else {

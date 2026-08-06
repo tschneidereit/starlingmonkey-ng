@@ -1,20 +1,26 @@
 {
   "Request() with a forbidden method CONNECT must throw.": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Request() with a forbidden method TRACE must throw.": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Request() with a forbidden method TRACK must throw.": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Request() with a forbidden method connect must throw.": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Request() with a forbidden method trace must throw.": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Request() with a forbidden method track must throw.": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   }
 }

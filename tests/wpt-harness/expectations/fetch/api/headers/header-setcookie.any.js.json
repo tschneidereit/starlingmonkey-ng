@@ -69,6 +69,7 @@
     "status": "PASS"
   },
   "Set-Cookie is a forbidden response header": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   }
 }

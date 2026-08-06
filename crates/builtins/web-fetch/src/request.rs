@@ -5,11 +5,11 @@
 use super::{
     algorithms::{self, Body, BodySource},
     body_mixin::BodyMixin,
-    config,
     headers::{Guard, HeaderList, Headers, HeadersImpl, HeadersInit},
 };
 use crate::body_mixin::BodyInit;
 use crate::incoming_body::{HostBackedBodyOwner, HostBodySource};
+use core_runtime::config;
 use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods, webidl_union};
 use js::class::create_instance_with;
 use js::error::{throw_type_error, ExnThrown};
@@ -278,7 +278,7 @@ impl Request {
                     throw_type_error(scope, c"Failed to parse URL from Request input")
                 })?;
                 // Step 5.3: If _parsedURL_ `includes credentials`, then `throw` a `TypeError`.
-                if config::enforce_request_restrictions()
+                if config::enforce_fetch_restrictions()
                     && !input.is_empty()
                     && (!parsed.username().is_empty() || parsed.password().is_some())
                 {
@@ -325,7 +325,7 @@ impl Request {
         // Step 10: If _init_["`window`"] `exists` and is non-null, then `throw` a `TypeError`.
         // (There is no window in this runtime, so the rejection is a browser-model rule, gated by
         // the request-restrictions switch.)
-        if config::enforce_request_restrictions() {
+        if config::enforce_fetch_restrictions() {
             if let Some(window) = init.as_ref().and_then(|i| i.window.as_ref()) {
                 if !window.get().is_null() && !window.get().is_undefined() {
                     return Err(throw_type_error(scope, c"Request window must be null"));
@@ -394,7 +394,7 @@ impl Request {
             }
             // Step 15: If _init_["`referrerPolicy`"] `exists`, then set _request_’s `referrer
             //     policy` to it.
-            if config::enforce_request_restrictions() {
+            if config::enforce_fetch_restrictions() {
                 if let Some(policy) = init.referrer_policy.take() {
                     // ReferrerPolicy is a WebIDL enum, so an invalid value is a TypeError.
                     if !algorithms::is_valid_referrer_policy(&policy) {
@@ -407,7 +407,7 @@ impl Request {
         // Step 16: Let _mode_ be _init_["`mode`"] if it `exists`, and _fallbackMode_ otherwise.
         let mode = init.as_ref().and_then(|i| i.mode).or(fallback_mode);
         // Step 17: If _mode_ is "`navigate`", then `throw` a `TypeError`.
-        if config::enforce_request_restrictions() && mode == Some(RequestMode::Navigate) {
+        if config::enforce_fetch_restrictions() && mode == Some(RequestMode::Navigate) {
             return Err(throw_type_error(
                 scope,
                 c"Request mode must not be navigate",
@@ -430,7 +430,7 @@ impl Request {
         }
         // Step 21: If _request_’s `cache mode` is "`only-if-cached`" and _request_’s `mode` is
         //     _not_ "`same-origin`", then `throw` a `TypeError`.
-        if config::enforce_request_restrictions()
+        if config::enforce_fetch_restrictions()
             && request.cache_mode == RequestCache::OnlyIfCached
             && request.mode != RequestMode::SameOrigin
         {
@@ -461,7 +461,7 @@ impl Request {
                 // Step 25.2: If _method_ is not a `method` or _method_ is a `forbidden method`,
                 //     then `throw` a `TypeError`.
                 if !algorithms::is_method(&method)
-                    || (config::enforce_request_restrictions()
+                    || (config::enforce_fetch_restrictions()
                         && algorithms::is_forbidden_method(&method))
                 {
                     return Err(throw_type_error(scope, c"Invalid request method"));
@@ -514,8 +514,7 @@ impl Request {
         let headers = Headers::from_list(scope, init_header_list, Guard::Request)?;
         // Step 32: If `this`’s `request`’s `mode` is "`no-cors`", then:
         // (A browser-security policy, gated by the request-restrictions switch.)
-        if config::enforce_request_restrictions() && self.data().request.mode == RequestMode::NoCors
-        {
+        if config::enforce_fetch_restrictions() && self.data().request.mode == RequestMode::NoCors {
             // Step 32.1: If `this`’s `request`’s `method` is not a `CORS-safelisted method`, then
             //     `throw` a `TypeError`.
             if !algorithms::is_cors_safelisted_method(&self.data().request.method) {
@@ -624,7 +623,7 @@ impl Request {
                     }
                     // Step 39.2: If `this`’s `request`’s `mode` is neither "`same-origin`" nor
                     //     "`cors`", then throw a `TypeError`.
-                    if config::enforce_request_restrictions() {
+                    if config::enforce_fetch_restrictions() {
                         let mode = self.data().request.mode;
                         if mode != RequestMode::SameOrigin && mode != RequestMode::Cors {
                             return Err(throw_type_error(
