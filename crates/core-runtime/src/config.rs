@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
-//! CLI argument parsing for the StarlingMonkey runtime.
+//! CLI argument parsing for the StarlingMonkey runtime, and the runtime
+//! settings derived from it.
 
 use std::{
+    cell::Cell,
     env,
     path::{Path, PathBuf},
 };
@@ -42,6 +44,18 @@ pub struct RuntimeConfig {
     #[arg(long = "wpt-mode")]
     pub wpt_mode: bool,
 
+    /// Enforce the browser-security Fetch constraints (forbidden
+    /// request/response headers and methods, no-CORS safelisting, origin/mode
+    /// enforcement). Defaults to off except in `--wpt-mode`, which needs the
+    /// browser-observable behavior.
+    /// Pass `=true`/`=false` to override either default.
+    #[arg(
+        long = "enforce-fetch-restrictions",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub enforce_fetch_restrictions: Option<bool>,
+
     /// Override the location URL for initialization.
     #[arg(long = "init-location")]
     pub init_location: Option<String>,
@@ -65,6 +79,13 @@ impl RuntimeConfig {
     /// Whether to use ES module mode (the default, unless --legacy-script).
     pub fn module_mode(&self) -> bool {
         !self.legacy_script
+    }
+
+    /// The effective request-restrictions setting: an explicit
+    /// `--enforce-fetch-restrictions[=bool]` wins, otherwise restrictions are
+    /// on in WPT mode and off everywhere else.
+    pub fn enforce_fetch_restrictions(&self) -> bool {
+        self.enforce_fetch_restrictions.unwrap_or(self.wpt_mode)
     }
 
     /// The effective content script source — either from --eval or from the file path.
@@ -132,6 +153,32 @@ impl Default for RuntimeConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Request restrictions — runtime state
+// ---------------------------------------------------------------------------
+//
+// Several Fetch constraints are browser-security policies (forbidden request
+// and response headers, forbidden methods, no-CORS header/method safelisting,
+// origin/mode enforcement) rather than HTTP correctness rules. In non-browser
+// contexts these policies are usually unwanted, so they're disabled by default.
+
+thread_local! {
+    static ENFORCE_REQUEST_RESTRICTIONS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Enable or disable enforcement of the browser-security Fetch constraints.
+/// `Runtime::init` sets this from the [`RuntimeConfig`], embedders can override
+/// it at any point after.
+pub fn set_enforce_fetch_restrictions(enabled: bool) {
+    ENFORCE_REQUEST_RESTRICTIONS.with(|cell| cell.set(enabled));
+}
+
+/// Whether the browser-security Fetch constraints are currently enforced.
+#[inline]
+pub fn enforce_fetch_restrictions() -> bool {
+    ENFORCE_REQUEST_RESTRICTIONS.with(|cell| cell.get())
+}
+
 /// Split an argument string into individual arguments, respecting quotes.
 fn split_args(s: &str) -> Result<Vec<String>, clap::Error> {
     let mut args = vec!["starling".into()];
@@ -163,6 +210,24 @@ mod tests {
         assert_eq!(config.script_path, "app.js");
         assert!(config.verbose);
         assert!(!config.module_mode());
+    }
+
+    #[test]
+    fn enforce_fetch_restrictions_defaults_off_wpt_on_flag_wins() {
+        assert!(!RuntimeConfig::default().enforce_fetch_restrictions());
+        assert!(RuntimeConfig::from_arg_string("--wpt-mode")
+            .unwrap()
+            .enforce_fetch_restrictions());
+        assert!(
+            !RuntimeConfig::from_arg_string("--wpt-mode --enforce-fetch-restrictions=false")
+                .unwrap()
+                .enforce_fetch_restrictions()
+        );
+        assert!(
+            RuntimeConfig::from_arg_string("--enforce-fetch-restrictions")
+                .unwrap()
+                .enforce_fetch_restrictions()
+        );
     }
 
     #[test]

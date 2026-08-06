@@ -3,6 +3,7 @@
     "status": "PASS"
   },
   "redirect response with empty Location, manual mode": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   }
 }

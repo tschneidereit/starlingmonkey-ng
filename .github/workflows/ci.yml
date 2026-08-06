@@ -111,6 +111,12 @@ jobs:
           fi
           node tests/wpt-harness/run-wpt.mjs -v $WPT_TARGET
 
+      # The permissive dimension is native-only: the request-restrictions
+      # switch gates code shared between the targets.
+      - name: Run WPT tests (permissive)
+        if: matrix.target == 'native'
+        run: node tests/wpt-harness/run-wpt.mjs -v --permissive
+
   gc_rooting:
     name: GC Rooting Checks
     strategy:

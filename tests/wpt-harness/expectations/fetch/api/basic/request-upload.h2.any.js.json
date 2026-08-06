@@ -1,0 +1,38 @@
+{
+  "Fetch with POST with empty ReadableStream": {
+    "status": "FAIL"
+  },
+  "Fetch with POST with ReadableStream": {
+    "status": "FAIL"
+  },
+  "Fetch with POST with ReadableStream on 421 response should return the response and not retry.": {
+    "status": "FLAKY"
+  },
+  "Feature detect for POST with ReadableStream": {
+    "status": "PASS"
+  },
+  "Feature detect for POST with ReadableStream, using request object": {
+    "status": "PASS"
+  },
+  "Synchronous feature detect": {
+    "status": "PASS"
+  },
+  "Synchronous feature detect fails if feature unsupported": {
+    "status": "FAIL"
+  },
+  "Streaming upload with body containing a String": {
+    "status": "PASS"
+  },
+  "Streaming upload with body containing null": {
+    "status": "PASS"
+  },
+  "Streaming upload with body containing a number": {
+    "status": "PASS"
+  },
+  "Streaming upload should fail on a 401 response": {
+    "status": "FAIL"
+  },
+  "ReadbleStream should be closed on signal.abort": {
+    "status": "PASS"
+  }
+}

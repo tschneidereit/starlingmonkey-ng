@@ -54,6 +54,16 @@ wpt-update *PATTERN:
     @just build
     node tests/wpt-harness/run-wpt.mjs --update-expectations {{PATTERN}}
 
+# Run WPT tests with request restrictions disabled (the non-WPT default).
+wpt-test-permissive *PATTERN:
+    @just build
+    node tests/wpt-harness/run-wpt.mjs --permissive {{PATTERN}}
+
+# Run permissive WPT tests and update `permissive_status` expectations.
+wpt-update-permissive *PATTERN:
+    @just build
+    node tests/wpt-harness/run-wpt.mjs --permissive --update-expectations {{PATTERN}}
+
 # Format all code.
 fmt:
     cargo fmt

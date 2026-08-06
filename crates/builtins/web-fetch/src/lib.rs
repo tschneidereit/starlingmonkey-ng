@@ -5,7 +5,6 @@ pub mod algorithms;
 pub mod body_mixin;
 pub mod body_proxy;
 pub mod byte_string;
-pub mod config;
 pub mod consume;
 pub mod globals;
 pub mod headers;

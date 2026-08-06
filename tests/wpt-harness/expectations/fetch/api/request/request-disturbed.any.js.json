@@ -24,6 +24,7 @@
     "status": "PASS"
   },
   "Request construction failure should not set \"bodyUsed\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   }
 }

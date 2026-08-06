@@ -24,85 +24,112 @@
     "status": "PASS"
   },
   "Adding invalid request header \"Accept-Charset: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"accept-charset: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"ACCEPT-ENCODING: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Accept-Encoding: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Access-Control-Request-Headers: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Access-Control-Request-Method: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Connection: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Content-Length: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Cookie: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Cookie2: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Date: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"DNT: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Expect: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Host: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Keep-Alive: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Origin: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Referer: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Set-Cookie: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"TE: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Trailer: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Transfer-Encoding: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Upgrade: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Via: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Proxy-: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"proxy-a: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"Sec-: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid request header \"sec-b: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding valid no-cors request header \"Accept: OK\"": {
     "status": "PASS"
@@ -132,34 +159,44 @@
     "status": "PASS"
   },
   "Adding invalid no-cors request header \"Content-Type: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid no-cors request header \"Potato: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid no-cors request header \"proxy: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid no-cors request header \"proxya: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid no-cors request header \"sec: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid no-cors request header \"secb: KO\"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Adding invalid no-cors request header \"Empty-Value: \"": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Check that request constructor is filtering headers provided as init parameter": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Check that no-cors request constructor is filtering headers provided as init parameter": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Check that no-cors request constructor is filtering headers provided as part of request parameter": {
-    "status": "PASS"
+    "status": "PASS",
+    "permissive_status": "FAIL"
   },
   "Request should get its content-type from the init request": {
     "status": "PASS"
