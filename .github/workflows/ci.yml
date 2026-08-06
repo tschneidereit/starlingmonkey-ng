@@ -100,13 +100,16 @@ jobs:
       - name: Clone WPT suite
         run: ./scripts/clone-wpt.sh
 
+      - name: Set up WPT suite
+        run: cat deps/wpt-hosts | sudo tee -a /etc/hosts
+
       - name: Run WPT tests
         run: |
           WPT_TARGET=""
           if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
             WPT_TARGET="--target=wasm"
           fi
-          node tests/wpt-harness/run-wpt.mjs $WPT_TARGET
+          node tests/wpt-harness/run-wpt.mjs -v $WPT_TARGET
 
   gc_rooting:
     name: GC Rooting Checks
