@@ -562,6 +562,7 @@ pub(crate) fn response_from_platform<'r>(
     url_list: Vec<Url>,
     method: &str,
     redirect_mode: RequestRedirect,
+    tainting: crate::transport::ResponseTainting,
 ) -> Result<Response<'r>, ExnThrown> {
     // [inlined `HTTP fetch`](https://fetch.spec.whatwg.org/#concept-http-fetch) Step 6.3
     //     "`manual`".2: Otherwise, set _response_ to an `opaque-redirect filtered response` whose
@@ -594,6 +595,33 @@ pub(crate) fn response_from_platform<'r>(
             None,
         );
     }
+    // [inlined `main fetch`](https://fetch.spec.whatwg.org/#concept-main-fetch) Step 14.2: Set
+    //     _response_ to the `filtered response` matching _request_'s `response tainting`:
+    // "`opaque`" → an [opaque filtered
+    // response](https://fetch.spec.whatwg.org/#concept-filtered-response-opaque): type
+    // "`opaque`", `URL list` « », status 0, status message empty, header list « », body null.
+    // The platform response body is dropped here, closing the connection.
+    if tainting == crate::transport::ResponseTainting::Opaque {
+        let record = ResponseRecord {
+            response_type: ResponseType::Opaque,
+            status: 0,
+            status_message: String::new(),
+            url_list: Vec::new(),
+            aborted: false,
+        };
+        return algorithms::create_a_response_object(
+            scope,
+            record,
+            HeaderList::new(),
+            Guard::Immutable,
+            None,
+            None,
+        );
+    }
+
+    // "`basic`" strips only forbidden response headers, which we deliberately expose, and "`cors`"
+    // would narrow the headers to the CORS-safelisted set. Since we don't have a CORS model, there
+    // is no `Access-Control-Expose-Headers` to honor, so both are returned unfiltered as "`basic`".
     let record = ResponseRecord {
         response_type: ResponseType::Basic,
         status: response.status,

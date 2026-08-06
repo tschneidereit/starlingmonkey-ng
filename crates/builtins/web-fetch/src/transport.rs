@@ -9,7 +9,9 @@
 //! (<https://fetch.spec.whatwg.org/#http-redirect-fetch>): it resolves `Location`,
 //! applies the method/body changes for 301/302/303, and re-sends, up to the
 //! redirect limit; `error` mode fails on a redirect; `manual` mode returns the
-//! redirect response as-is. CORS/origin/referrer taint is out of scope.
+//! redirect response as-is. It also inlines `main fetch`'s origin/mode switch
+//! (see [`apply_main_fetch_switch`]), run per hop as the spec's recursion
+//! through `main fetch` would. CORS itself and referrer taint are out of scope.
 
 use platform::http::{Error, OutgoingBody, Request, Response};
 use url::Url;
@@ -21,15 +23,111 @@ use crate::response::is_redirect_status;
 /// count limit.
 const MAX_REDIRECTS: usize = 20;
 
+/// `Response tainting`
+/// (<https://fetch.spec.whatwg.org/#concept-request-response-tainting>), as far
+/// as we model it: it records whether the request (or any redirect
+/// hop) left the requester's origin, and in which mode. "opaque" selects the
+/// `opaque filtered response` when the response object is built; "cors" is
+/// tracked so a redirect back to the original origin does not revert to
+/// "basic", but, with no CORS model, carries no filtering of its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponseTainting {
+    Basic,
+    Cors,
+    Opaque,
+}
+
+/// [inlined `main fetch`](https://fetch.spec.whatwg.org/#concept-main-fetch)
+/// Step 12: the origin/mode switch, deciding whether a hop may proceed and how
+/// it taints the response. The spec runs it once per `main fetch`, and redirects
+/// recurse through `main fetch`, so `send_following_redirects` re-runs it for
+/// the initial URL and for every redirect target.
+///
+/// The request's origin is its client's. For us: the worker location's. Without
+/// one there is nothing to compare against, and in permissive server mode the
+/// browser security policies are off wholesale, so in both cases every hop
+/// proceeds as "basic".
+fn apply_main_fetch_switch(
+    url: &Url,
+    request_origin: Option<&url::Origin>,
+    mode: RequestMode,
+    redirect_mode: RequestRedirect,
+    tainting: &mut ResponseTainting,
+) -> Result<(), Error> {
+    if !crate::config::enforce_request_restrictions() {
+        return Ok(());
+    }
+    let Some(request_origin) = request_origin else {
+        return Ok(());
+    };
+    // [inlined] Step 12, first arm: _request_'s `current URL`'s `origin` is `same origin` with
+    //     _request_'s `origin`, and _request_'s `response tainting` is "`basic`" / _request_'s
+    //     `current URL`'s `scheme` is "`data`" / _request_'s `mode` is "`navigate`" or
+    //     "`websocket`" → set _request_'s `response tainting` to "`basic`" (and run `scheme
+    //     fetch`).
+    // `data:` URLs never reach the transport, "`navigate`" is rewritten to "`same-origin`" by
+    // the `Request` constructor, and there are no WebSockets, so the arm reduces to the origin
+    // check.
+    if *tainting == ResponseTainting::Basic && url.origin() == *request_origin {
+        return Ok(());
+    }
+    match mode {
+        // [inlined] Step 12, second arm: _request_'s `mode` is "`same-origin`" → return a
+        //     `network error`.
+        RequestMode::SameOrigin | RequestMode::Navigate => Err(Error(format!(
+            "cannot fetch {url} in \"same-origin\" mode: not same origin with the requester"
+        ))),
+        // [inlined] Step 12, third arm: _request_'s `mode` is "`no-cors`":
+        RequestMode::NoCors => {
+            // [inlined] Step 12, third arm, 1: If _request_'s `redirect mode` is not
+            //     "`follow`", then return a `network error`.
+            if redirect_mode != RequestRedirect::Follow {
+                return Err(Error(format!(
+                    "cannot fetch {url} in \"no-cors\" mode with a \"{}\" redirect mode",
+                    redirect_mode.as_str()
+                )));
+            }
+            // [inlined] Step 12, third arm, 2: Set _request_'s `response tainting` to
+            //     "`opaque`".
+            *tainting = ResponseTainting::Opaque;
+            // [inlined] Step 12, third arm, 3: Return the result of running `scheme fetch`.
+            Ok(())
+        }
+        // [inlined] Step 12, fourth arm: _request_'s `current URL`'s `scheme` is not an
+        //     `HTTP(S) scheme` → return a `network error`.
+        // Guaranteed here: only HTTP(S) URLs reach the transport, and Step 6 of the redirect
+        // loop rejects non-HTTP(S) `Location`s.
+        // [inlined] Step 12, fifth arm: set _request_'s `response tainting` to "`cors`" (and
+        //     run `HTTP fetch` with the CORS machinery). There is no CORS machinery in this
+        //     runtime — no `Origin` header is sent and no `Access-Control-*` response checks
+        //     are made — so the request proceeds as a plain one; the tainting still records
+        //     that it crossed origins.
+        RequestMode::Cors => {
+            *tainting = ResponseTainting::Cors;
+            Ok(())
+        }
+    }
+}
+
 /// Send `request`, following redirects per `redirect_mode`. Returns the final
-/// response and the URL list (its last entry is the response URL; more than one
-/// entry means the response is redirected).
+/// response, the URL list (its last entry is the response URL; more than one
+/// entry means the response is redirected), and the response tainting the hops
+/// accumulated.
 pub(crate) async fn send_following_redirects(
     mut request: Request,
     redirect_mode: RequestRedirect,
     mode: RequestMode,
     initial_url: Url,
-) -> Result<(Response, Vec<Url>), Error> {
+    request_origin: Option<url::Origin>,
+) -> Result<(Response, Vec<Url>, ResponseTainting), Error> {
+    let mut tainting = ResponseTainting::Basic;
+    apply_main_fetch_switch(
+        &initial_url,
+        request_origin.as_ref(),
+        mode,
+        redirect_mode,
+        &mut tainting,
+    )?;
     let mut url_list = vec![initial_url];
     loop {
         // Build this attempt's request, taking the body: a byte body is kept for replay on a
@@ -66,14 +164,14 @@ pub(crate) async fn send_following_redirects(
         // (inlined)
         // A non-redirect status is the final response.
         if !is_redirect_status(response.status) {
-            return Ok((response, url_list));
+            return Ok((response, url_list, tainting));
         }
         match redirect_mode {
             // [inlined] Step 6.3 "`manual`".2: Otherwise, set _response_ to an `opaque-redirect
             //     filtered response` whose `internal response` is _internalResponse_.
             // ("`manual`".1 applies only to "`navigate`" mode, which does not exist here.)
             // `response_from_platform` builds that filtered response, and drops this body.
-            RequestRedirect::Manual => return Ok((response, url_list)),
+            RequestRedirect::Manual => return Ok((response, url_list, tainting)),
             // [inlined] Step 6.3 "`error`".1: Set _response_ to a `network error`.
             RequestRedirect::Error => {
                 return Err(Error(
@@ -110,7 +208,7 @@ pub(crate) async fn send_following_redirects(
         drop(locations);
         // [inlined] Step 4: If _locationURL_ is null, then return _response_.
         let Some(location) = location else {
-            return Ok((response, url_list));
+            return Ok((response, url_list, tainting));
         };
         // [inlined] Step 5: If _locationURL_ is failure, then return a `network error`.
         // Failure is multiple `Location` headers ([inlined location URL] Step 2 above) or a
@@ -234,8 +332,16 @@ pub(crate) async fn send_following_redirects(
         //     which returned above, so it is always true here.
         // [inlined] Step 22: Return the result of running `main fetch` given _fetchParams_ and
         //     _recursive_.
-        // Recursing through `main fetch` is what re-derives `response tainting`; with no tainting
-        // model, this loop re-sends directly instead.
+        // The recursion through `main fetch` is what re-runs its Step 12 origin/mode switch
+        // against the new URL, enforcing "same-origin" mode across hops and tainting a
+        // response that has crossed origins, so this loop does the same before re-sending.
+        apply_main_fetch_switch(
+            url_list.last().expect("url_list is never empty"),
+            request_origin.as_ref(),
+            mode,
+            redirect_mode,
+            &mut tainting,
+        )?;
         // Drop the redirect response (and its body), closing that connection, then follow.
         drop(response);
     }

@@ -126,6 +126,11 @@ pub mod globals {
         let url = request.current_url();
         let redirect_mode = request.redirect_mode();
         let mode = request.request_mode();
+        // The request's `origin` is "`client`", i.e. the requester's own origin, which is the
+        // worker location's, when one is set. It feeds `main fetch`'s origin/mode switch in
+        // `send_following_redirects`.
+        let request_origin =
+            web_globals::worker_location::current_location_url().map(|url| url.origin());
         let method = platform_request.method.clone();
         // Root the abort state across the host fetch, so the resolve callback can
         // record the delivered response on it. `on_settled` keeps the abort
@@ -137,10 +142,11 @@ pub mod globals {
                 redirect_mode,
                 mode,
                 url,
+                request_origin,
             )
             .await
             {
-                Ok((response, url_list)) => {
+                Ok((response, url_list, tainting)) => {
                     PromiseOutcome::Resolve(Box::new(move |scope: &Scope<'_>| {
                         let response = response_from_platform(
                             scope,
@@ -148,6 +154,7 @@ pub mod globals {
                             url_list,
                             &method,
                             redirect_mode,
+                            tainting,
                         )?;
                         if let Some(state) = &abort_state {
                             state.get(scope).set_response(&response);
