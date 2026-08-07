@@ -128,8 +128,9 @@ fn start_echo_server() -> String {
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
+            // Note: long timeout because GC_ZEAL can make things real slow.
             stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .ok();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
@@ -355,9 +356,9 @@ fn fetch_pipes_a_response_body_through_an_identity_transform() {
 #[test]
 fn fetch_pumps_a_piped_multichunk_body_without_dropping_chunks() {
     // The request-body *pump* path (as opposed to the incoming→outgoing shortcut): a multi-chunk
-    // host response body is piped through an identity TransformStream, and a microtask delay lets
-    // the pipe start pulling before the second `fetch` consumes the transform's readable as its
-    // body. Because the host body has been pulled, the shortcut declines and the body is pumped
+    // host response body is piped through a TransformStream carrying an explicit pass-through
+    // `transform`, which disqualifies it as an identity transform. The native source is therefore
+    // not propagated across it, so the second `fetch` cannot shortcut and must pump the body
     // chunk by chunk. Every sequence-numbered chunk must arrive at the echo server in order.
     let (source, expected) = start_multichunk_server(40);
     let echo = start_echo_server();
@@ -367,13 +368,61 @@ fn fetch_pumps_a_piped_multichunk_body_without_dropping_chunks() {
         (async () => {{
             try {{
                 const response = await fetch("{source}");
+                const piped = response.body.pipeThrough(new TransformStream({{
+                    transform(chunk, controller) {{ controller.enqueue(chunk); }},
+                }}));
+                const echoed = await fetch("{echo}", {{ method: "POST", body: piped, duplex: "half" }});
+                globalThis.__out = await echoed.text();
+            }} catch (e) {{ globalThis.__out = "error:" + e; }}
+        }})();
+        "#
+    ));
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn a_delayed_piped_identity_transform_still_delivers_the_whole_body() {
+    // A pipe left running well ahead of the `fetch` that consumes it must still deliver every
+    // byte. The pipe's first pull parks rather than reading the host body, so this takes the
+    // shortcut where it once took the pump — whichever it picks, all 40 chunks must arrive in
+    // order. (Which path ran is deliberately not content-observable: both leave the donor stream
+    // locked and disturbed, and the pump reads internally so content cannot see its reads.)
+    let (source, expected) = start_multichunk_server(40);
+    let echo = start_echo_server();
+    let out = run_and_get_out(&format!(
+        r#"
+        globalThis.__out = "pending";
+        (async () => {{
+            try {{
+                const response = await fetch("{source}");
                 const piped = response.body.pipeThrough(new TransformStream());
-                // Yield long enough for the pipe to start pulling the host body, so
-                // `take_host_body` declines and the body takes the pump path rather
-                // than the incoming→outgoing shortcut.
                 await new Promise(r => setTimeout(r, 25));
                 const echoed = await fetch("{echo}", {{ method: "POST", body: piped, duplex: "half" }});
                 globalThis.__out = await echoed.text();
+            }} catch (e) {{ globalThis.__out = "error:" + e; }}
+        }})();
+        "#
+    ));
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn a_parked_body_read_resumes_when_the_transform_is_read() {
+    // A pull parked behind an identity transform must be a delay, not a cancellation: with no
+    // `fetch` to claim the body, reading the transform's readable end has to wake the parked pull
+    // and stream the whole body through. If the resume were missed, this would produce an empty
+    // body or hang rather than the 40 chunks.
+    let (source, expected) = start_multichunk_server(40);
+    let out = run_and_get_out(&format!(
+        r#"
+        globalThis.__out = "pending";
+        (async () => {{
+            try {{
+                const response = await fetch("{source}");
+                const piped = response.body.pipeThrough(new TransformStream());
+                // Let the pipe's first pull park before anything reads `piped`.
+                await new Promise(r => setTimeout(r, 25));
+                globalThis.__out = await new Response(piped).text();
             }} catch (e) {{ globalThis.__out = "error:" + e; }}
         }})();
         "#
@@ -441,6 +490,36 @@ fn fetch_abort_during_body_read_rejects_and_closes() {
             controller.abort();
             try {{
                 await reader.read();
+                globalThis.__out = "resolved";
+            }} catch (e) {{
+                globalThis.__out = e.name;
+            }}
+        }})().catch(e => {{ globalThis.__out = "outer:" + e.name; }});
+        "#
+    ));
+    assert_eq!(out, "AbortError");
+}
+
+#[test]
+fn aborting_a_parked_body_read_rejects_rather_than_hanging() {
+    // Aborting while a pull sits parked behind an identity transform must still tear the body
+    // down. The parked pull is settled without closing the stream, which is only safe because
+    // `abort_body` errors the stream in the same turn: were it left readable, the next read would
+    // park again on a transform nothing will ever drive, and never settle — surfacing here as the
+    // untouched "pending" rather than a rejection.
+    let url = start_streaming_server();
+    let out = run_and_get_out(&format!(
+        r#"
+        globalThis.__out = "pending";
+        (async () => {{
+            const controller = new AbortController();
+            const response = await fetch("{url}", {{ signal: controller.signal }});
+            const piped = response.body.pipeThrough(new TransformStream());
+            // Let the pipe's first pull park before aborting.
+            await new Promise(r => setTimeout(r, 25));
+            controller.abort();
+            try {{
+                await new Response(piped).text();
                 globalThis.__out = "resolved";
             }} catch (e) {{
                 globalThis.__out = e.name;
@@ -816,8 +895,9 @@ fn start_capturing_server() -> (String, std::sync::mpsc::Receiver<String>) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
+            // Note: long timeout because GC_ZEAL can make things real slow.
             stream
-                .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .ok();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
@@ -943,8 +1023,9 @@ fn start_byte_capture_server(reply: &'static [u8]) -> (String, std::sync::mpsc::
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
+            // Note: long timeout because GC_ZEAL can make things real slow.
             stream
-                .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .ok();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];

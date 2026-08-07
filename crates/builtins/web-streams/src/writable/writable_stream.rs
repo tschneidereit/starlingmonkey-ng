@@ -132,11 +132,12 @@ pub struct WritableStream {
     /// processed by the underlying sink
     pub(crate) write_requests: std::collections::VecDeque<PromiseSlot>,
     /// If this writable is the writable end of an identity `TransformStream`,
-    /// this holds the transform's readable end. `pipeTo` uses it to propagate
-    /// a native byte source through the identity transform.
+    /// this holds that transform. `pipeTo` uses it to propagate a native byte
+    /// source through the identity transform, and to let that source defer
+    /// reading until the transform's readable end is read.
     /// `None` for a standalone writable or a non-identity transform.
-    pub(crate) identity_transform_readable:
-        Option<Heap<crate::readable::readable_stream::ReadableStreamImpl>>,
+    pub(crate) identity_transform:
+        Option<Heap<crate::transform::transform_stream::TransformStreamImpl>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

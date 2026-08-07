@@ -18,7 +18,8 @@ use js::prelude::HandleValue;
 use js::promise::{PromiseFuture, PromiseOutcome};
 use js::{value, Function, Promise};
 use platform::http::IncomingBody;
-use web_streams::readable::readable_stream::ReadableStream;
+use web_streams::readable::default_controller::ReadableStreamDefaultControllerImpl;
+use web_streams::readable::readable_stream::{ReadableStream, ReadableStreamImpl};
 use web_streams::readable::ReadableStreamDefaultController;
 
 /// Back a new external `ArrayBuffer` with `bytes`, zero-copy when the chunk is
@@ -71,6 +72,11 @@ pub(crate) fn consume_host_body<'r>(
 /// body and hands out one chunk per pull. `current_pull` is the promise of the
 /// in-flight chunk read, kept so an abort can cancel that read (dropping it
 /// closes the host connection).
+///
+/// A pull can be deferred: if this body feeds an identity transform nobody has
+/// read yet, the host body is left whole. If the TS's readable end ends up being
+/// used as an outgoing body (or otherwise as a stream passed to the host), this
+/// body's stream can be used directly. See [`host_pull`].
 #[jsclass(hidden)]
 pub struct HostBodySource {
     #[no_trace]
@@ -78,6 +84,14 @@ pub struct HostBodySource {
     current_pull: Option<Heap<js::promise::Promise>>,
     #[no_trace]
     pulled: bool,
+    /// The `.body` stream this source backs, for asking whether anything
+    /// downstream wants bytes yet.
+    stream: Option<Heap<ReadableStreamImpl>>,
+    /// A deferred pull's promise, resolved once its deferred read has been
+    /// delivered — or when the body goes elsewhere and it never will be.
+    deferred_pull: Option<Heap<js::promise::Promise>>,
+    /// The controller a deferred pull will deliver to.
+    deferred_controller: Option<Heap<ReadableStreamDefaultControllerImpl>>,
 }
 
 #[jsmethods]
@@ -87,19 +101,25 @@ impl HostBodySource {
             host_body: Some(host_body),
             current_pull: None,
             pulled: false,
+            stream: None,
+            deferred_pull: None,
+            deferred_controller: None,
         }
     }
 }
 
 impl HostBodySource<'_> {
-    /// Take the host body if it has not started being read, for the
-    /// incoming→outgoing shortcut. Returns `None` once a pull is in flight or the
-    /// body is already gone.
-    pub(crate) fn take_host_body(&self) -> Option<IncomingBody> {
+    /// Take the host body if it has not started being read.
+    ///
+    /// Returns `None` once a read operation has happened or the body has already been taken.
+    pub(crate) fn take_host_body(&self, scope: &Scope<'_>) -> Option<IncomingBody> {
         if self.data().pulled || self.data().current_pull.is_some() {
             return None;
         }
-        self.data_mut().host_body.take()
+        let host_body = self.data_mut().host_body.take()?;
+        // The body will now be used by a sink directly, obviating the deferred pull.
+        self.settle_deferred_pull(scope, CloseStream::Yes);
+        Some(host_body)
     }
 
     /// Abort the body: cancel the in-flight chunk read (if any) — which drops the
@@ -108,8 +128,40 @@ impl HostBodySource<'_> {
         if let Some(pull) = self.data_mut().current_pull.take_rooted(scope) {
             js::promise::cancel_pending_future(pull);
         }
+        // A deferred pull has no host read to cancel, but its promise must still be
+        // settled, or the stream is left believing a pull is still running. The
+        // stream is not closed here: the caller errors it instead.
+        self.settle_deferred_pull(scope, CloseStream::No);
         self.data_mut().host_body = None;
     }
+
+    /// See [`ReadableStream::deferred_demand`].
+    fn deferred_demand<'r>(&self, scope: &'r Scope<'_>) -> Option<Promise<'r>> {
+        let stream = self.data().stream.get(scope)?;
+        stream.deferred_demand(scope)
+    }
+
+    /// Settle a deferred pull, if there is one, so the stream stops waiting on a
+    /// read that is no longer coming.
+    fn settle_deferred_pull(&self, scope: &Scope<'_>, close: CloseStream) {
+        let Some(pull) = self.data_mut().deferred_pull.take_rooted(scope) else {
+            return;
+        };
+        let controller = self.data_mut().deferred_controller.take_rooted(scope);
+        if let (CloseStream::Yes, Some(controller)) = (close, controller) {
+            let _ = controller.close(scope);
+        }
+        let _ = pull.resolve(scope, HandleValue::undefined());
+    }
+}
+
+/// Whether settling a deferred pull should also close the stream it was pulling
+/// for: it should when the body went elsewhere, but not when the stream is
+/// already being torn down by a cancel or abort.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloseStream {
+    Yes,
+    No,
 }
 
 /// A `Request` or `Response` carrying a body still unread on the host.
@@ -199,30 +251,71 @@ pub(crate) fn host_body_stream<'r>(
     // Record the source so the stream can be recognized as host-backed via
     // `ReadableStream::native_source`.
     let stream = ReadableStream::new_native(scope, state, pull_value, cancel_value)?;
+    // Backlink the stream, so a pull can ask what it is feeding.
+    state.data_mut().stream = Some(Heap::from(stream));
     Ok((stream, state))
 }
 
 /// Underlying-source `pull`: read the next host chunk and enqueue it (or close at
 /// end of body / error on a read failure). Returns a promise resolved once the
 /// chunk has been handled.
+///
+/// Makes use of the deferral machinery described in [`ReadableStream::deferred_demand`]
+/// to avoid needlessly reading from a host stream. If, later on, the body used as an
+/// outgoing stream, this allows it to be forwarded wholesale, skipping all handling
+/// inside StarlingMonkey itself entirely.
 fn host_pull(
     scope: &Scope<'_>,
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let state = HostBodySource::from_jsval_throwing(scope, payload, ())?;
-    state.data_mut().pulled = true;
     let promise = Promise::new_pending(scope)?;
     let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, args.get(0), ())?;
+    if let Some(demand) = state.deferred_demand(scope) {
+        state.data_mut().deferred_pull = Some(Heap::from(promise));
+        state.data_mut().deferred_controller = Some(Heap::from(controller));
+        let resume = Function::new_callback(scope, c"", 0, host_pull_resume, state)?;
+        demand.add_reactions_ignoring_unhandled_rejection(scope, Some(*resume), None)?;
+        return Ok(promise.as_value());
+    }
+    start_host_read(scope, state, controller, promise)?;
+    Ok(promise.as_value())
+}
+
+/// Demand arrived for a deferred pull: perform the host read it deferred.
+fn host_pull_resume(
+    scope: &Scope<'_>,
+    _args: CallbackArgs<'_>,
+    payload: HandleValue<'_>,
+) -> Result<Value, ExnThrown> {
+    let state = HostBodySource::from_jsval_throwing(scope, payload, ())?;
+    let controller = state.data_mut().deferred_controller.take_rooted(scope);
+    let pull = state.data_mut().deferred_pull.take_rooted(scope);
+    // Already settled: the body was claimed for direct forwarding, cancelled, or aborted while
+    // this pull sat deferred.
+    let (Some(controller), Some(promise)) = (controller, pull) else {
+        return Ok(value::undefined());
+    };
+    start_host_read(scope, state, controller, promise)?;
+    Ok(value::undefined())
+}
+
+/// Read the next host chunk into `controller`, resolving `promise` once the chunk
+/// has been handled. Shared by an immediate pull and a deferred one resuming.
+fn start_host_read(
+    scope: &Scope<'_>,
+    state: HostBodySource<'_>,
+    controller: ReadableStreamDefaultController<'_>,
+    promise: Promise<'_>,
+) -> Result<(), ExnThrown> {
+    state.data_mut().pulled = true;
     let Some(host_body) = state.data_mut().host_body.take() else {
-        // The body is already gone: the incoming→outgoing shortcut took it via a native source
-        // propagated across an identity transform. The shortcut locks-and-disturbs the
-        // *transform's* readable, but the original stream stays locked to the pipe feeding the
-        // transform, and that pipe's next read lands here. Close the stream so the pipe winds
-        // down instead of hanging on a chunk that will never arrive.
+        // The body is gone: cancelled, or claimed for direct forwarding. Close the stream so
+        // a reader does not hang waiting for a chunk that will never arrive.
         controller.close(scope)?;
         promise.resolve(scope, HandleValue::undefined())?;
-        return Ok(promise.as_value());
+        return Ok(());
     };
     // Remember the in-flight read so an abort can cancel it.
     state.data_mut().current_pull = Some(Heap::from(promise));
@@ -244,7 +337,7 @@ fn host_pull(
         }))
     };
     promise.spawn(PromiseFuture::new(future));
-    Ok(promise.as_value())
+    Ok(())
 }
 
 /// Enqueue `result`'s chunk into the controller (keeping the host body for the
@@ -302,5 +395,7 @@ fn host_cancel(
 ) -> Result<Value, ExnThrown> {
     let state = HostBodySource::from_jsval_throwing(scope, payload, ())?;
     state.data_mut().host_body = None;
+    // The stream is being torn down, so a deferred pull's demand will never arrive.
+    state.settle_deferred_pull(scope, CloseStream::No);
     Ok(value::undefined())
 }
