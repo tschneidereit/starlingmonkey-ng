@@ -978,14 +978,14 @@ async function ensureWptServer() {
   }
 
   if (config.logLevel > LogLevel.Quiet) {
-    console.info(`Starting WPT server (cmd: ${config.wptRoot}/wpt --no-h2 serve)...`);
+    console.info(`Starting WPT server (cmd: ${config.wptRoot}/wpt serve)...`);
   }
   // The config pins every port so that substituteWptTemplates' static table
   // matches the running server; the default config picks the second HTTP port
   // at random ("auto").
   managedWptServer = spawn(
     path.join(config.wptRoot, "wpt"),
-    ["serve", "--no-h2", "--config", relativePath("wpt-server-config.json")],
+    ["serve", "--config", relativePath("wpt-server-config.json")],
     {
       detached: true,
     },
