@@ -91,14 +91,15 @@ pub(crate) fn outgoing_body_from_stream(
     scope: &Scope<'_>,
     stream: ReadableStream<'_>,
 ) -> OutgoingBody {
-    // The shortcut refuses once the body has ever been pulled: a pipe can have pulled a
-    // chunk into a buffer the shortcut cannot see (a transform's backpressure queue), and
-    // bypassing the stream would drop those bytes. The pump drains the stream in order
-    // instead.
+    // The shortcut refuses once the body has actually been read from: a chunk may sit in a
+    // buffer the shortcut cannot see (a transform's queue), and bypassing the stream would
+    // drop those bytes. The pump drains the stream in order instead. A pipe that has merely
+    // _asked_ for a chunk does not count: that pull is deferred without touching the host body
+    // (see `incoming_body::host_pull`).
     let host_body = stream
         .native_source(scope)
         .and_then(|source| source.cast::<crate::incoming_body::HostBodySource>().ok())
-        .and_then(|source| source.take_host_body());
+        .and_then(|source| source.take_host_body(scope));
     match host_body {
         Some(host_body) => {
             // The bytes are transmitted directly, bypassing the stream, so leave the donor

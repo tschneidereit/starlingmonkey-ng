@@ -207,12 +207,11 @@ impl TransformStream {
             && transformer_dict.flush.is_none()
             && transformer_dict.cancel.is_none()
         {
-            let readable = self.data().readable.get(scope);
             self.data()
                 .writable
                 .get(scope)
                 .data_mut()
-                .identity_transform_readable = Some(Heap::from(readable));
+                .identity_transform = Some(Heap::from(*self));
         }
         Ok(())
     }

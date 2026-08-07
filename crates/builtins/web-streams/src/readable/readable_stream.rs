@@ -81,6 +81,12 @@ pub struct ReadableStream {
     /// effect: it lets a consumer recognize a stream backed by its own native
     /// source. `None` otherwise.
     pub(crate) native_byte_source: Option<Heap<js::object::Object>>,
+    /// The identity `TransformStream` this stream is piped into, recorded by
+    /// `pipeTo` when this stream is backed by a native byte source. Lets that
+    /// source hold off reading until the transform's readable end is read; see
+    /// [`ReadableStream::deferred_demand`]. `None` otherwise.
+    pub(crate) piped_to_identity_transform:
+        Option<Heap<crate::transform::transform_stream::TransformStreamImpl>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -572,6 +578,36 @@ impl ReadableStream {
     /// Record `source` as this stream's native byte source.
     pub fn set_native_source(&self, source: &Object<'_>) {
         self.data_mut().native_byte_source = Some(Heap::from(*source));
+    }
+
+    /// For streams piped to an identity `TransformStream` whose readable end has not
+    /// been read yet, the promise fulfilled once a consumer actually asks for data.
+    /// `None` once that demand has arrived, or if this stream is not piped to such
+    /// a transform.
+    ///
+    /// This allows native underlying stream sources to hold off on performing an
+    /// actual read operation until a `pull` happens on the pipeline's readable end,
+    /// without deviating from the spec. Instead of immediately performing the
+    /// operation, it can subscribe to this promise and get notified once a `pull`
+    /// happens, or on the next tick if one is already pending.
+    ///
+    /// Why is this needed at all? The fact that a `TransformStream`'s writable side
+    /// has a high-water mark of `1` means that a `pull` is enqueued upon the TS's
+    /// creation. When a `ReadableStream` is later piped to the TS, that `pull` is
+    /// applied to it. Without this kind of mechanism, the source would have no
+    /// choice but to immediately perform the operation, only for the result to be
+    /// parked in the `TransformStream`.
+    pub fn deferred_demand<'r>(&self, scope: &'r Scope<'_>) -> Option<Promise<'r>> {
+        let transform = self.data().piped_to_identity_transform.get(scope)?;
+        // Backpressure is set while the readable end holds no demand, and
+        // cleared by the first read of it.
+        if !transform.data().backpressure {
+            return None;
+        }
+        // Bound rather than returned directly, so the `data()` borrow is released
+        // before the promise handle leaves this scope.
+        let demand = transform.data().backpressure_change_promise.get(scope);
+        demand
     }
 
     pub fn controller(&self, scope: &'s Scope<'_>) -> Option<Object<'s>> {

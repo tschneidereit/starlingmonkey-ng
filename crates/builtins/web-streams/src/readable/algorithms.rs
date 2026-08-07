@@ -1100,15 +1100,23 @@ pub(crate) fn readable_stream_pipe_to<'r>(
     // Step 11: Set _source_.`[[disturbed]]` to true.
     source.data_mut().disturbed = true;
 
-    // Not a spec step: if `source` is backed by a native byte source and `dest` is the writable
-    // end of an identity TransformStream, propagate the native source to the transform's readable
-    // end. A later native sink (such as `fetch` using that readable as a request body) can then
-    // hand the native source straight to the sink instead of copying it chunk by chunk through
-    // the transform. No content-visible effect.
+    // Not a spec step: if `source` is backed by a native source and `dest` is the writable
+    // end of an identity `TransformStream`, set everything up to enable taking shortcuts
+    // between native sources and sinks later on:
+    // - Apply the input stream's native source to the TS's readable stream.
+    // - Set the TS on the input stream, needed for `ReadableStream::deferred_demand`
+    //
+    // The first of these gives native sinks access to the native source, while the second
+    // one allows native sources to detect that a `pull` is triggered by a TransformStream,
+    // and defer acting on it until there's actual demand.
     if let Some(host_source) = source.native_source(scope) {
-        let ts_readable = dest.data().identity_transform_readable.get(scope);
-        if let Some(ts_readable) = ts_readable {
-            ts_readable.set_native_source(&host_source);
+        if let Some(transform) = dest.data().identity_transform.get(scope) {
+            transform
+                .data()
+                .readable
+                .get(scope)
+                .set_native_source(&host_source);
+            source.data_mut().piped_to_identity_transform = Some(Heap::from(transform));
         }
     }
 
