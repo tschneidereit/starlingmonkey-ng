@@ -827,19 +827,15 @@ async function runSingleTest(testPath) {
 
     const stdout = result.stdout || "";
     const stderr = result.stderr || "";
-    let output = stdout;
-    if (stderr) {
-      output += "\n--- stderr ---\n" + stderr;
-    }
 
     if (result.error) {
-      return { error: result.error, output };
+      return { error: result.error, stdout, stderr };
     }
     if (result.status !== 0 || result.signal) {
       const reason = result.signal
         ? `killed by signal ${result.signal}`
         : `exited with status ${result.status}`;
-      return { error: new Error(reason), output };
+      return { error: new Error(reason), stdout, stderr };
     }
 
     // Parse results from stdout — look for the WPT_RESULTS_JSON marker.
@@ -847,13 +843,13 @@ async function runSingleTest(testPath) {
     for (const line of lines) {
       if (line.startsWith("Log: WPT_RESULTS_JSON:")) {
         const json = line.slice("Log: WPT_RESULTS_JSON:".length);
-        return { results: JSON.parse(json), output };
+        return { results: JSON.parse(json), stdout, stderr };
       }
     }
 
-    return { error: new Error("No WPT_RESULTS_JSON found in output"), output };
+    return { error: new Error("No WPT_RESULTS_JSON found in output"), stdout, stderr };
   } catch (e) {
-    return { error: e, output: e.stdout || "" };
+    return { error: e, stdout: e.stdout || "", stderr: e.stderr || "" };
   }
 }
 
@@ -1046,12 +1042,16 @@ async function run() {
   };
 
   await runTestsConcurrently(testPaths, (testPath, outcome) => {
-    if (config.logLevel >= LogLevel.Verbose) {
-      console.log(`Running test ${testPath}`);
-    }
-
     const expectations = getExpectedResults(testPath);
-    const { results, error, output, duration } = outcome;
+    const { results, error, stdout, stderr, duration } = outcome;
+
+    // Make sure a test's entire output is written atomically.
+    const lines = [];
+    const emit = () => process.stdout.write(lines.join("\n") + "\n");
+
+    if (config.logLevel >= LogLevel.Verbose) {
+      lines.push(`Running test ${testPath}`);
+    }
 
     const stats = {
       count: 0,
@@ -1067,35 +1067,44 @@ async function run() {
       const hasExpectations = existsSync(expectPath);
 
       if (hasExpectations) {
-        console.log(`UNEXPECTED ERROR: ${testPath} (${duration}ms)`);
-        console.log(`  MESSAGE: ${error.message}`);
-        if (output) {
+        lines.push(`UNEXPECTED ERROR: ${testPath} (${duration}ms)`);
+        lines.push(`  MESSAGE: ${error.message}`);
+        if (config.logLevel > LogLevel.Quiet) {
+          lines.push(runtimeOutputBlocks(stdout, stderr));
+        } else if (stdout || stderr) {
           // Show the tail rather than the head: WPT_RESULTS_JSON would be at the
           // end on success, and crash diagnostics from stderr are appended last.
-          const limit = config.logLevel >= LogLevel.Verbose ? 120 : 30;
-          const lines = output.trim().split("\n");
+          const output = stdout + (stderr ? "\n--- stderr ---\n" + stderr : "");
+          const limit = 30;
+          const outputLines = output.trim().split("\n");
           const tail =
-            lines.length > limit ? lines.slice(-limit).join("\n") : output;
+            outputLines.length > limit
+              ? outputLines.slice(-limit).join("\n")
+              : output;
           const prefix =
-            lines.length > limit ? `... (last ${limit} lines)\n` : "";
-          console.log(`  OUTPUT:\n${prefix}${tail}`);
+            outputLines.length > limit ? `... (last ${limit} lines)\n` : "";
+          lines.push(`  OUTPUT:\n${prefix}${tail}`);
         }
         if (config.tests.updateExpectations) {
-          console.log(`  Removing expectations file ${expectPath}`);
+          lines.push(`  Removing expectations file ${expectPath}`);
           rmSync(expectPath);
           expectationsUpdated++;
         } else {
           unexpectedFailure = true;
-          printSTR(testPath);
+          lines.push(reproLine(testPath));
         }
       } else {
-        console.log(`EXPECTED ERROR: ${testPath} (${duration}ms)`);
+        lines.push(`EXPECTED ERROR: ${testPath} (${duration}ms)`);
       }
 
       totalStats.duration += duration;
       totalStats.missing += Object.keys(expectations).length;
+      emit();
       return;
     }
+
+    // Per-subtest diagnostics, printed after the stat line below.
+    const details = [];
 
     for (const result of results) {
       stats.count++;
@@ -1118,13 +1127,13 @@ async function run() {
 
       if (result.status === 0) {
         if (!expectation || expectation.status === "FAIL") {
-          console.log(
+          details.push(
             `${expectation ? "UNEXPECTED" : "NEW"} PASS\n  NAME: ${result.name}`,
           );
           stats.unexpectedPass++;
         }
       } else if (!expectation || expectation.status === "PASS") {
-        console.log(
+        details.push(
           `${expectation ? "UNEXPECTED" : "NEW"} FAIL\n  NAME: ${result.name}\n  MESSAGE: ${result.message}`,
         );
         stats.unexpectedFail++;
@@ -1134,7 +1143,7 @@ async function run() {
     for (const [name, expectation] of Object.entries(expectations)) {
       if (!expectation.did_run) {
         stats.missing++;
-        console.log(
+        details.push(
           `MISSING TEST\n  NAME: ${name}\n  EXPECTED: ${expectation.status}`,
         );
       }
@@ -1147,12 +1156,13 @@ async function run() {
     totalStats.unexpectedFail += stats.unexpectedFail;
     totalStats.duration += stats.duration;
 
-    console.log(`${testPath.padEnd(pathLength)} ${formatStats(stats)}`);
+    lines.push(`${testPath.padEnd(pathLength)} ${formatStats(stats)}`);
+    lines.push(...details);
 
     if (stats.unexpectedFail + stats.unexpectedPass + stats.missing > 0) {
       if (config.tests.updateExpectations) {
         const expectPath = expectationsPath(testPath);
-        console.log(`  Writing expectations to ${expectPath}`);
+        lines.push(`  Writing expectations to ${expectPath}`);
         // Merge against the file as stored, not against `expectations` (which has
         // already been narrowed to this target), so the other target's statuses survive.
         const newExpectations = mergeExpectations(
@@ -1166,9 +1176,13 @@ async function run() {
         );
         expectationsUpdated++;
       } else {
-        printSTR(testPath);
+        if (config.logLevel > LogLevel.Quiet) {
+          lines.push(runtimeOutputBlocks(stdout, stderr));
+        }
+        lines.push(reproLine(testPath));
       }
     }
+    emit();
   });
 
   // Stop a server this run started, explicitly rather than from the "exit"
@@ -1194,20 +1208,30 @@ async function run() {
       0 ||
     unexpectedFailure
   ) {
-    console.error(
+    console.log(
       "\nUnexpected results. Run with --update-expectations to update.",
     );
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 
 run();
-function printSTR(testPath) {
+
+/// The full output the runtime produced, as fenced blocks per stream. Printed
+/// for unexpected results when the log level asks for it, so a CI log carries
+/// enough to diagnose a result that doesn't reproduce locally.
+function runtimeOutputBlocks(stdout, stderr) {
+  const block = (name, contents) =>
+    `StarlingMonkey ${name}:\n=====\n${contents ? stripTrailingNewline(contents) + "\n" : ""}=====`;
+  return block("stdout", stdout) + "\n" + block("stderr", stderr);
+}
+
+function reproLine(testPath) {
   // Copy the script to a stable name: the file the run used carries a pid, so
   // it would be meaningless (and eventually stale) in a command someone runs
   // later.
   const tmpPath = path.join(config.tmpDir, testPath.replace(/\//g, "_"));
   copyFileSync(runScriptPath(testPath), tmpPath);
   const { command, args } = testCommand(tmpPath, { optimized: false });
-  console.error(`  To reproduce, run $ ${command} ${args.join(" ")}`);
+  return `  To reproduce, run $ ${command} ${args.join(" ")}`;
 }
