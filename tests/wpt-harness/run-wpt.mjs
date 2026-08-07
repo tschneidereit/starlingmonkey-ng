@@ -38,7 +38,6 @@
 
 import { execFileSync, spawn, spawnSync } from "child_process";
 import {
-  copyFileSync,
   existsSync,
   readFileSync,
   writeFileSync,
@@ -86,8 +85,8 @@ const config = {
   // Default automatically adjusted to "target/wasm32-wasip2/debug/starling.wasm" for wasm target.
   runtime: "target/debug/starling",
   target: "native", // "native" or "wasm"
-  wptRoot: process.env.WPT_ROOT || relativePath("../../deps/wpt"),
-  tmpDir: relativePath("../../deps/.wpt-tmp"),
+  wptRoot: process.env.WPT_ROOT || "deps/wpt",
+  tmpDir: "target/tmp/wpt",
   tests: {
     list: relativePath("tests.json"),
     expectations: relativePath("expectations"),
@@ -755,7 +754,7 @@ function spawnCollecting(command, args, { timeout, maxBuffer }) {
 function runScriptPath(testPath) {
   return path.join(
     config.tmpDir,
-    `${config.target}-${process.pid}-${testPath.replace(/\//g, "_")}`,
+    `${config.target}-${testPath.replace(/\//g, "_")}`,
   );
 }
 
@@ -802,12 +801,16 @@ async function runSingleTest(testPath) {
 
   // Write the assembled script to a temp file of its own.
   //
-  // The name carries the test, the target and this process's pid. A single shared name breaks
-  // in two ways: two runs going at once (a wasm suite and a native spot-check, say) overwrite
-  // each other's script between the write and the spawn, and with several tests in flight
-  // within one run they do the same to each other. Either way the results of whichever script
-  // won get reported under another test's name — silently, and looking exactly like a genuine
-  // per-target difference.
+  // The name carries the target and the test, which is what keeps tests in flight within a run
+  // — and a wasm suite alongside a native spot-check — from overwriting each other's script
+  // between the write and the spawn and reporting one test's results under another's name.
+  //
+  // These files are deliberately left behind, so the "To reproduce" command printed for a
+  // failure stays runnable. Naming them by target and test alone bounds that to one file per
+  // test per target, which the directory can carry indefinitely. The name used to carry the
+  // pid as well, isolating concurrent runs of the same target; that made the directory grow
+  // without limit for a case where both runs write the same bytes anyway — the script is a
+  // pure function of the test path and the WPT checkout.
   mkdirSync(config.tmpDir, { recursive: true });
   const tmpFile = runScriptPath(testPath);
   writeFileSync(tmpFile, script);
@@ -915,11 +918,12 @@ function pad(v, n) {
 /** A `wpt serve` instance this process started, so it can be stopped on exit. */
 let managedWptServer = null;
 
-function isWptServerReachable() {
+/** Whether the server answers on one HTTP port (`curl` exits non-zero if not). */
+function isWptPortReachable(port) {
   try {
     execFileSync(
       "curl",
-      ["-s", "-o", "/dev/null", "--max-time", "3", "http://web-platform.test:8000/"],
+      ["-s", "-o", "/dev/null", "--max-time", "3", `http://${WPT_HOST}:${port}/`],
       { stdio: "ignore" },
     );
     return true;
@@ -929,7 +933,22 @@ function isWptServerReachable() {
 }
 
 /**
- * Ensure the WPT server is running on `web-platform.test:8000`. If one is already
+ * Every HTTP port in `WPT_PORTS` must answer, not just the first: those are the
+ * ports `substituteWptTemplates` bakes into `.sub.` tests, and a server missing
+ * one still serves everything else. Short-circuits, so the usual case costs a
+ * single probe.
+ */
+function isWptServerReachable() {
+  return WPT_PORTS.http.every(port => isWptPortReachable(port));
+}
+
+/** The HTTP ports that are not being served, for diagnostics. */
+function unreachableWptPorts() {
+  return WPT_PORTS.http.filter(port => !isWptPortReachable(port));
+}
+
+/**
+ * Ensure the WPT server is running on `web-platform.test`. If one is already
  * reachable (started externally), use it. Otherwise start `wpt serve` and wait
  * for it; it is stopped on process exit. The `web-platform.test` hosts entries
  * must already be present (`just wpt-setup` installs them from `deps/wpt-hosts`).
@@ -937,9 +956,25 @@ function isWptServerReachable() {
 async function ensureWptServer() {
   if (isWptServerReachable()) {
     if (config.logLevel > LogLevel.Quiet) {
-      console.log("Using already-running WPT server at http://web-platform.test:8000/");
+      console.log(`Using already-running WPT server at http://${WPT_HOST}:${WPT_PORTS.http[0]}/`);
     }
     return;
+  }
+
+  // An external server holding the first port but not the rest is reported rather
+  // than used: it cannot be replaced (the port is taken) and its failures are
+  // indistinguishable from test regressions — `.sub.` tests substituting an
+  // unserved port fail with a bare connection error.
+  if (isWptPortReachable(WPT_PORTS.http[0])) {
+    const missing = unreachableWptPorts();
+    console.error(
+      `A WPT server is running on ${WPT_HOST}:${WPT_PORTS.http[0]} but is not serving ` +
+        `port(s) ${missing.join(", ")}, which '.sub.' tests are substituted to use.\n` +
+        `It was most likely started without '--config ${relativePath("wpt-server-config.json")}', ` +
+        `which pins the ports; without it wptserve picks the second HTTP port at random.\n` +
+        `Stop it (e.g. 'pkill -f \"wpt serve\"') and re-run, to let this harness start its own.`,
+    );
+    process.exit(1);
   }
 
   if (config.logLevel > LogLevel.Quiet) {
@@ -981,9 +1016,11 @@ async function ensureWptServer() {
     setTimeout(() => {resolve();}, 1000);
     await promise;
   }
+  const missing = unreachableWptPorts();
   stopWptServer();
   console.error(
-    "WPT server did not become reachable. Ensure the hosts entries exist ('just wpt-setup').",
+    `WPT server did not become reachable on port(s) ${missing.join(", ")}. ` +
+      "Ensure the hosts entries exist ('just wpt-setup').",
   );
   process.exit(1);
 }
@@ -1227,11 +1264,11 @@ function runtimeOutputBlocks(stdout, stderr) {
 }
 
 function reproLine(testPath) {
-  // Copy the script to a stable name: the file the run used carries a pid, so
-  // it would be meaningless (and eventually stale) in a command someone runs
-  // later.
-  const tmpPath = path.join(config.tmpDir, testPath.replace(/\//g, "_"));
-  copyFileSync(runScriptPath(testPath), tmpPath);
-  const { command, args } = testCommand(tmpPath, { optimized: false });
+  // Name the script the run actually used. Its name is stable across runs, so it
+  // stays valid in a command someone runs later; it used to carry a pid, which is
+  // why this once had to copy it to a stable name of its own first.
+  const { command, args } = testCommand(runScriptPath(testPath), {
+    optimized: false,
+  });
   return `  To reproduce, run $ ${command} ${args.join(" ")}`;
 }
