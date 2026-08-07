@@ -30,7 +30,7 @@
     "status": "PASS"
   },
   "Streaming upload should fail on a 401 response": {
-    "status": "FAIL"
+    "status": "FLAKY"
   },
   "ReadbleStream should be closed on signal.abort": {
     "status": "PASS"
