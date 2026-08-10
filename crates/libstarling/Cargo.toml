@@ -15,6 +15,7 @@ debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs"]
 
 [dependencies]
 core-runtime.workspace = true
+encoding.workspace = true
 js.workspace = true
 url.workspace = true
 web-fetch.workspace = true
