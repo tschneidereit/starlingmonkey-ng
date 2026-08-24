@@ -414,7 +414,7 @@ pub(crate) fn fire_an_event(
     // Step 1: If _eventConstructor_ is not given, then let _eventConstructor_ be ``Event``.
     // Step 2: Let _event_ be the result of `creating an event` given _eventConstructor_, in the
     //         `relevant realm` of _target_.
-    let event = Event::new(scope, name.to_string(), None)?;
+    let event = Event::new_untrusted(scope, name.to_string(), None)?;
 
     // Step 3: Initialize _event_'s ``type`` attribute to _e_.
     // (Already set by the Event constructor above.)

@@ -55,7 +55,7 @@ impl Event {
 
     /// <https://dom.spec.whatwg.org/#concept-event-constructor>
     #[constructor]
-    pub fn new(event_type: String, event_init_dict: Option<EventInit>) -> Self {
+    pub fn new_untrusted(event_type: String, event_init_dict: Option<EventInit>) -> Self {
         let mut flags = EventFlags::INITIALIZED;
         if let Some(init) = event_init_dict {
             flags.set(EventFlags::BUBBLES, init.bubbles);
@@ -68,6 +68,13 @@ impl Event {
             time_stamp: performance::now(),
             flags,
         }
+    }
+
+    /// Create a trusted event, treated as platform-, not content-created.
+    ///
+    /// This is essentially https://dom.spec.whatwg.org/#concept-event-create.
+    pub fn new_trusted(event_type: String, event_init_dict: Option<EventInit>) -> Self {
+        Self::new_untrusted(event_type, event_init_dict).trusted()
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-type>
@@ -192,8 +199,18 @@ impl Event {
         }
     }
 
+    /// <https://dom.spec.whatwg.org/#set-the-canceled-flag>
+    ///
+    /// To set the canceled flag, if event's cancelable attribute value is true
+    /// and event's in passive listener flag is unset, then set event's canceled
+    /// flag.
     pub fn cancel(&self) {
-        set_the_canceled_flag(&mut self.data_mut());
+        let flags = &mut self.data_mut().flags;
+        if flags.contains(EventFlags::CANCELABLE)
+            && !flags.contains(EventFlags::IN_PASSIVE_LISTENER)
+        {
+            flags.insert(EventFlags::CANCELED);
+        }
     }
 
     pub fn is_canceled(&self) -> bool {
@@ -258,8 +275,7 @@ impl Event {
             return;
         }
         // Step 2: `Initialize` `this` with _type_, _bubbles_, and _cancelable_.
-        initialize_event(
-            &mut self.data_mut(),
+        self.data_mut().initialize(
             event_type,
             bubbles.unwrap_or(false),
             cancelable.unwrap_or(false),
@@ -316,51 +332,49 @@ impl Event {
     }
 }
 
-/// <https://dom.spec.whatwg.org/#set-the-canceled-flag>
-///
-/// To set the canceled flag, if event's cancelable attribute value is true
-/// and event's in passive listener flag is unset, then set event's canceled
-/// flag.
-fn set_the_canceled_flag(data: &mut EventImpl) {
-    if data.flags.contains(EventFlags::CANCELABLE)
-        && !data.flags.contains(EventFlags::IN_PASSIVE_LISTENER)
-    {
-        data.flags.insert(EventFlags::CANCELED);
+impl EventImpl {
+    pub fn set_trusted(&mut self, trusted: bool) {
+        self.flags.set(EventFlags::TRUSTED, trusted);
+    }
+
+    /// Marks `self` as trusted and returns it.
+    #[js::allow_unrooted]
+    pub(crate) fn trusted(mut self) -> Self {
+        self.set_trusted(true);
+        self
+    }
+
+    /// <https://dom.spec.whatwg.org/#concept-event-initialize>
+    ///
+    /// To initialize an event, with type, bubbles, and cancelable, run these steps:
+    pub(crate) fn initialize(&mut self, event_type: String, bubbles: bool, cancelable: bool) {
+        // Step 1: Set _event_'s `initialized flag`.
+        self.flags.insert(EventFlags::INITIALIZED);
+        // Step 2: Unset _event_'s `stop propagation flag`, `stop immediate propagation flag`, and
+        //         `canceled flag`.
+        self.flags.remove(
+            EventFlags::STOP_PROPAGATION
+                | EventFlags::STOP_IMMEDIATE_PROPAGATION
+                | EventFlags::CANCELED,
+        );
+        // Step 3: Set _event_'s ``isTrusted`` attribute to false.
+        // (Implicit)
+        // Step 4: Set _event_'s `target` to null.
+        self.target = None;
+        // Step 5: Set _event_'s ``type`` attribute to _type_.
+        self.event_type = event_type;
+        // Step 6: Set _event_'s ``bubbles`` attribute to _bubbles_.
+        self.flags.set(EventFlags::BUBBLES, bubbles);
+        // Step 7: Set _event_'s ``cancelable`` attribute to _cancelable_.
+        self.flags.set(EventFlags::CANCELABLE, cancelable);
     }
 }
 
-/// <https://dom.spec.whatwg.org/#concept-event-initialize>
-///
-/// To initialize an event, with type, bubbles, and cancelable, run these steps:
-pub(crate) fn initialize_event(
-    data: &mut EventImpl,
-    event_type: String,
-    bubbles: bool,
-    cancelable: bool,
-) {
-    // Step 1: Set _event_'s `initialized flag`.
-    data.flags.insert(EventFlags::INITIALIZED);
-    // Step 2: Unset _event_'s `stop propagation flag`, `stop immediate propagation flag`, and
-    //         `canceled flag`.
-    data.flags.remove(
-        EventFlags::STOP_PROPAGATION
-            | EventFlags::STOP_IMMEDIATE_PROPAGATION
-            | EventFlags::CANCELED,
-    );
-    // Step 3: Set _event_'s ``isTrusted`` attribute to false.
-    // (Implicit)
-    // Step 4: Set _event_'s `target` to null.
-    data.target = None;
-    // Step 5: Set _event_'s ``type`` attribute to _type_.
-    data.event_type = event_type;
-    // Step 6: Set _event_'s ``bubbles`` attribute to _bubbles_.
-    data.flags.set(EventFlags::BUBBLES, bubbles);
-    // Step 7: Set _event_'s ``cancelable`` attribute to _cancelable_.
-    data.flags.set(EventFlags::CANCELABLE, cancelable);
-}
-
 /// <https://dom.spec.whatwg.org/#dictdef-eventinit>
-#[derive(Default)]
+///
+/// `Copy`, so an inherited dictionary reached by reference can hand its
+/// `EventInit` on by value without cloning three bools.
+#[derive(Default, Clone, Copy)]
 #[webidl_dictionary]
 pub struct EventInit {
     #[webidl(default = false)]

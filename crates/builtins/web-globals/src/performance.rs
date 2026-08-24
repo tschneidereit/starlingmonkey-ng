@@ -46,7 +46,7 @@ fn time_origin() -> &'static TimeOriginSnapshot {
 /// <https://www.w3.org/TR/hr-time-3/#sec-performance>
 #[webidl_interface(extends = EventTarget)]
 pub struct Performance {
-    parent: EventTarget,
+    parent: EventTargetImpl,
 }
 
 pub fn now() -> f64 {

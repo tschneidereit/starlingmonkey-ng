@@ -206,7 +206,26 @@ To store a reference to an instance in a long-lived struct, hold a
 | `T: ToJSValConvertible` | Value returned to JS. |
 | `Result<T, E>` where `E: ThrowException` | `Ok` → value; `Err` → typed JS exception. |
 | `Self` (from `#[static_method]` / `#[method]`) | New JS instance of the same class. |
-| `JSPromise` | JS `Promise`; the future is driven by the event loop. |
+| `PromiseFuture` | JS `Promise` resolved to the result of a Rust future. |
+| `Ref<'_, T>` where `T: ToJSValConvertible + ?Sized` | Value returned to JS, converted from data the class still owns. |
+
+**Returning borrowed data:**
+
+A getter that returns `String` copies the stored bytes into a `String` that
+exists only to be copied again into a JS string and dropped. `&str` can't be
+returned in its place (it would borrow from the `data()` guard, which is a
+temporary) but the guard itself can be narrowed to the field and returned:
+
+```rust
+#[getter]
+pub fn client_id(&self) -> Ref<'_, str> {
+    Ref::map(self.data(), |data| data.client_id.as_str())
+}
+```
+
+The trampoline converts while the guard is alive and drops it after, so the JS
+string is built straight from the stored bytes. `Ref::map` works for any
+projection, not just strings — `Ref<'_, [u8]>` out of a `Vec<u8>`, say.
 
 **Constants:**
 
@@ -241,6 +260,81 @@ This works on any callable that takes arguments: `#[method]`,
 The element type must implement `FromJSVal` and be GC-safe where applicable.
 Use `RestArgs<HandleValue<'_>>` for untyped elements, or take the raw `&CallArgs`
 for untyped access to the whole argument list.
+
+**Promise arguments and dictionary members:**
+
+WebIDL's [`Promise<T>`](https://webidl.spec.whatwg.org/#idl-promise) initially
+accepts values without a typecheck. The input is wrapped into a promise with
+`Promise.resolve(value)`, with the typecheck performed on the resolution value
+once the promise settles. The promise exposed at the callsite resolves to the
+result of the typecheck, or rejects with a type error..
+
+```rust
+// WebIDL `undefined waitUntil(Promise<undefined> f)` — every value converts to
+// `undefined`, so there is nothing to check.
+#[method]
+fn wait_until(&self, scope: &Scope<'_>, f: Promise<'_>) -> Result<(), ExnThrown> { /* … */ }
+
+// WebIDL `undefined take(Promise<Payload> p)` — the value it settles with is
+// checked against `Payload`.
+#[method]
+fn take(&self, p: PromiseOf<'_, Payload<'_>>) { /* … */ }
+
+// Dictionary members work the same way.
+#[webidl_dictionary]
+struct TakeInit<'a> {
+    p: Option<PromiseOf<'a, Payload<'a>>>,
+}
+```
+
+`PromiseOf<'_, T>` derefs to `Promise<'_>`. Note that a `Promise<'_>` *element*
+of a `RestArgs<…>` is an ordinary `FromJSVal` brand check, not this conversion.
+
+**Inherited dictionaries:**
+
+`#[webidl_dictionary(extends = Parent)]` declares an inherited dictionary. It
+holds its parent in a `parent` field and reaches the inherited members through
+it — `Deref` makes that transparent at any depth:
+
+```rust
+#[webidl_dictionary(extends = EventInit)]
+pub struct CustomEventInit<'a> {
+    pub parent: EventInit,
+    pub detail: Option<HandleValue<'a>>,
+}
+
+// `init.detail` and `init.bubbles` both just work.
+```
+
+The parent converts first, then the type's own members lexicographically.
+That order is observable, since every member is a property get that can run an
+author's getter.
+
+**Parameters by reference:**
+
+Any parameter can be taken as `&T` or `Option<&T>`; the trampoline converts an
+owned `T` and lends it for the call. While this doesn't help with calls from JS,
+where the input has to be converted to an owned value regardless, it means that
+calls from Rust can pass a borrow instead of allocating:
+
+```rust
+#[constructor]
+pub fn new(event_type: &str, init: Option<&ExtendableEventInit>) -> Self { /* … */ }
+
+// From Rust: no `.to_string()`.
+ExtendableEventImpl::new("fetch", Some(&ExtendableEventInit::new(true)))
+```
+
+Taking a dictionary by reference is the other reason, since a reference
+deref-coerces up an inheritance chain:
+
+```rust
+#[constructor]
+fn new(event_type: String, init: &FetchEventInit<'_>) -> Self {
+    // `&FetchEventInit` → `&ExtendableEventInit`, which is what this wants.
+    ExtendableEventImpl::new(event_type, Some(init.deref()))
+}
+```
 
 ### `#[jsmodule]`
 
@@ -432,7 +526,7 @@ impl Shape {
 
 #[jsclass(extends = Shape)]
 struct Circle {
-    parent: Shape,      // first field must be the parent type
+    parent: ShapeImpl,  // the parent's data, embedded
     radius: f64,
 }
 
@@ -440,7 +534,7 @@ struct Circle {
 impl Circle {
     #[constructor]
     fn new(color: String, radius: f64) -> Self {
-        Self { parent: Shape::init(color), radius }
+        Self { parent: ShapeImpl::new(color), radius }
     }
 
     #[method]
@@ -450,8 +544,8 @@ impl Circle {
 }
 ```
 
-The parent needs its own `#[jsmethods]` block with a `#[constructor]`: that's
-what generates the `Shape::init` used to build the `parent` field.
+A class embeds its parent's data, so the `parent` field holds the parent's
+`Impl` type, e.g. `ShapeImpl` for `extends = Shape`.
 
 Cast between the two from Rust with `cast`, which checks the JS object's type
 tag in both directions:
@@ -466,18 +560,17 @@ let back: Result<Circle<'s>, _> = shape.cast::<Circle<'_>>(); // narrowing
 
 ## Promise / Async
 
-**NOTE**: This area under heavy construction!
-
-Return `JSPromise` from any method to create a JS `Promise`:
+Return `PromiseFuture` from any method to create a JS `Promise` that resolves 
+to the result of a Rust future:
 
 ```rust
-use js::promise::JSPromise;
+use js::promise::PromiseFuture;
 
 #[jsmethods]
 impl Fetcher {
     #[method]
-    fn fetch(&self, url: String) -> JSPromise {
-        JSPromise::new(async move {
+    fn fetch(&self, url: String) -> PromiseFuture {
+        PromiseFuture::new(async move {
             // ... async work ...
             Ok("response body".to_string())
         })
@@ -489,8 +582,8 @@ The method returns the `Promise` to JS immediately, and the future is queued on
 the event loop. `core_runtime::event_loop::run_to_completion`, which
 `libstarling::run` drives for you, polls it and settles the `Promise` with the
 future's `Ok`/`Err`. Two other constructors cover the cases `new` doesn't:
-`JSPromise::new_void` for futures resolving to `()`, and `JSPromise::from_outcome`
-when settling needs the `JSContext` (as `fetch` does, to build its `Response`).
+`PromiseFuture::new_void` for futures resolving to `()`, and `PromiseFuture::from_value`
+for futures resolving to a value.
 
 ---
 

@@ -45,7 +45,7 @@ impl Animal {
 
 #[jsclass(extends = Animal)]
 struct Dog {
-    parent: Animal,
+    parent: AnimalImpl,
     breed: String,
 }
 
@@ -78,7 +78,7 @@ impl Dog {
 
 #[jsclass(extends = Dog)]
 struct Puppy {
-    parent: Dog,
+    parent: DogImpl,
     age_months: i32,
 }
 

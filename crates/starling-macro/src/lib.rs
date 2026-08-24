@@ -31,7 +31,9 @@ struct AttrOpts {
     /// Optional parent class for inheritance. `#[jsclass(extends = Parent)]`
     /// or `#[webidl_interface(extends = Parent)]` generates a JS class that
     /// inherits from `Parent` (which must also be defined with `#[jsclass]`
-    /// or `#[webidl_interface]`).
+    /// or `#[webidl_interface]`), and requires a `parent: ParentImpl` field
+    /// holding the parent's data. `#[webidl_dictionary(extends = Parent)]`
+    /// requires a `parent: Parent`.
     extends: Option<Ident>,
     /// Inherit the prototype from a built-in JS class by `JSProtoKey`.
     ///
@@ -121,24 +123,38 @@ fn parse_marker_opts(attr: &syn::Attribute, allowed: &[&str]) -> syn::Result<Att
             ));
         }
     };
-    let reject = |present: bool, key: &str| -> syn::Result<()> {
-        if present && !allowed.contains(&key) {
-            Err(syn::Error::new_spanned(
-                attr,
-                format!("`{key}` is not a valid option for this attribute"),
-            ))
-        } else {
-            Ok(())
-        }
-    };
-    reject(opts.name.is_some(), "name")?;
-    reject(opts.length.is_some(), "length")?;
-    reject(opts.extends.is_some(), "extends")?;
-    reject(opts.js_proto.is_some(), "js_proto")?;
-    reject(opts.to_string_tag.is_some(), "to_string_tag")?;
-    reject(opts.hidden, "hidden")?;
-    reject(opts.unforgeable, "unforgeable")?;
+    opts.reject_all_but(allowed, attr)?;
     Ok(opts)
+}
+
+impl AttrOpts {
+    /// Reject every option set on this attribute that isn't in `allowed`.
+    ///
+    /// Every attribute parses the same option set, so each one has to turn away
+    /// the ones that mean nothing to it — silently ignoring `#[getter(length =
+    /// 2)]` or `#[webidl_dictionary(hidden)]` would register the member under
+    /// the wrong shape. Listing the fields once here means a new option can't
+    /// be quietly accepted by every attribute that forgot to name it.
+    fn reject_all_but(&self, allowed: &[&str], span: impl quote::ToTokens) -> syn::Result<()> {
+        let set: [(bool, &str); 7] = [
+            (self.name.is_some(), "name"),
+            (self.length.is_some(), "length"),
+            (self.extends.is_some(), "extends"),
+            (self.js_proto.is_some(), "js_proto"),
+            (self.to_string_tag.is_some(), "to_string_tag"),
+            (self.hidden, "hidden"),
+            (self.unforgeable, "unforgeable"),
+        ];
+        for (present, key) in set {
+            if present && !allowed.contains(&key) {
+                return Err(syn::Error::new_spanned(
+                    &span,
+                    format!("`{key}` is not a valid option for this attribute"),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -206,6 +222,8 @@ struct ClassConfig {
     constants_on_prototype: bool,
     /// JS builtins' methods aren't enumerable, but WebIDL interfaces' are, so we have to use different flags for them.
     method_flags: u16,
+    /// The attribute this configures, for use in error messages.
+    attribute: &'static str,
 }
 
 impl ClassConfig {
@@ -215,6 +233,7 @@ impl ClassConfig {
         auto_to_string_tag: false,
         constants_on_prototype: false,
         method_flags: 0,
+        attribute: "jsclass",
     };
 
     /// Configuration for `#[webidl_interface]`: auto Symbol.toStringTag,
@@ -223,6 +242,7 @@ impl ClassConfig {
         auto_to_string_tag: true,
         constants_on_prototype: true,
         method_flags: 1, // js::class_spec::JSPROP_ENUMERATE
+        attribute: "webidl_interface",
     };
 }
 
@@ -247,12 +267,17 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
     let inner_parent = opts.extends.as_ref().map(|p| format_ident!("{}Impl", p));
 
     if let Some(ref inner_parent_name) = inner_parent {
-        // Rewrite the `parent` field's type from `Parent` to `ParentImpl`
-        if let Fields::Named(ref mut fields) = input.fields {
-            for field in &mut fields.named {
-                if field.ident.as_ref().map(|i| i == "parent").unwrap_or(false) {
-                    field.ty = syn::parse_quote! { #inner_parent_name };
-                }
+        // A class embeds its parent's data, so the `parent` field holds the parent's `Impl`.
+        let extends = opts_extends_ident.as_ref().expect("extends is set");
+        if let Fields::Named(ref fields) = input.fields {
+            if let Err(e) = parent_field(
+                &struct_name,
+                &fields.named,
+                extends,
+                inner_parent_name,
+                config.attribute,
+            ) {
+                return e.to_compile_error().into();
             }
         }
     }
@@ -705,6 +730,21 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
                 type Target = #parent_name<'s>;
                 fn deref(&self) -> &Self::Target {
                     unsafe { ::std::mem::transmute(self) }
+                }
+            }
+
+            // Deref: FooImpl -> ParentImpl
+            impl ::std::ops::Deref for #inner_name {
+                type Target = #inner_parent_name;
+                fn deref(&self) -> &Self::Target {
+                    &self.parent
+                }
+            }
+
+            // Deref: FooImpl -> ParentImpl
+            impl ::std::ops::DerefMut for #inner_name {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.parent
                 }
             }
 
@@ -2118,7 +2158,7 @@ fn is_promise_type(ty: &Type) -> bool {
 /// Whether the return type is `Result<Promise<...>, _>`: a synchronous WebIDL
 /// operation whose declared return is a promise. The `Ok` type is the first
 /// generic argument of the `Result`; it counts as a promise when its final path
-/// segment is `Promise`/`JSPromise` (the wrapper carries a lifetime argument,
+/// segment is `Promise`/`PromiseFuture` (the wrapper carries a lifetime argument,
 /// e.g. `Promise<'r>`, which `is_promise_type`'s bare-identifier match rejects).
 fn is_result_promise_type(ty: &Type) -> bool {
     let Type::Path(tp) = ty else {
@@ -2137,6 +2177,143 @@ fn is_result_promise_type(ty: &Type) -> bool {
         return false;
     };
     is_promise_type(ok_ty)
+}
+
+/// The `T` of a `&T` parameter.
+fn reference_target(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Reference(r) if r.mutability.is_none() => Some(&r.elem),
+        _ => None,
+    }
+}
+
+/// How a `&T` parameter is converted, and how the parameter's own name is then
+/// bound to a borrow of the converted value.
+///
+/// `FromJSVal` always produces an owned value, so the reference is taken from
+/// a local the trampoline holds for the duration of the call. In most cases,
+/// the local's type is `T`, but for `&str` it's `String`, and for `&[T]` it's
+/// `Vec<T>`.
+struct BorrowedParam {
+    /// The type actually converted.
+    convert_ty: Type,
+    /// Whether reaching the referent from it goes through a `Deref`.
+    deref: bool,
+}
+
+impl BorrowedParam {
+    /// `None` for a parameter taken by value, which converts as itself and
+    /// binds its own name directly.
+    fn of(ty: &Type) -> Option<Self> {
+        let referent = reference_target(ty)?;
+        Some(match referent {
+            Type::Slice(slice) => {
+                let element = &slice.elem;
+                Self {
+                    convert_ty: syn::parse_quote!(::std::vec::Vec<#element>),
+                    deref: true,
+                }
+            }
+            Type::Path(tp) if tp.path.is_ident("str") => Self {
+                convert_ty: syn::parse_quote!(::std::string::String),
+                deref: true,
+            },
+            _ => Self {
+                convert_ty: referent.clone(),
+                deref: false,
+            },
+        })
+    }
+
+    /// Bind `name` to a borrow of the converted value in `value`.
+    fn rebind(&self, name: &Ident, value: &Ident, optional: bool) -> proc_macro2::TokenStream {
+        match (optional, self.deref) {
+            (true, true) => quote! { let #name = ::std::option::Option::as_deref(&#value); },
+            (true, false) => quote! { let #name = ::std::option::Option::as_ref(&#value); },
+            (false, true) => quote! { let #name = &*#value; },
+            (false, false) => quote! { let #name = &#value; },
+        }
+    }
+
+    fn annotation(&self, optional: bool) -> proc_macro2::TokenStream {
+        let convert_ty = &self.convert_ty;
+        if optional {
+            quote! { : ::std::option::Option<#convert_ty> }
+        } else {
+            quote! { : #convert_ty }
+        }
+    }
+}
+
+/// Whether an input is a WebIDL `Promise<T>` whose `T` needs no check, which
+/// includes `any` and `undefined`.
+fn is_unchecked_promise_type(ty: &Type) -> bool {
+    last_segment_is(ty, "Promise")
+}
+
+/// Rewrite every lifetime in a type to `'_`.
+///
+/// A value type is lifted out of the method's signature into the trampoline,
+/// where the method's own lifetime parameters aren't in scope: `PromiseOf<'r,
+/// Payload<'r>>` would emit a `Payload<'r>` naming an undeclared `'r`. Every
+/// use site of the rewritten type is a position where `'_` means "infer", and
+/// what it infers to is the scope the value is rooted in — the same scope the
+/// method's lifetime was bound to.
+fn elide_lifetimes(ty: &Type) -> Type {
+    struct Elide;
+    impl syn::visit_mut::VisitMut for Elide {
+        fn visit_lifetime_mut(&mut self, lifetime: &mut syn::Lifetime) {
+            *lifetime = syn::Lifetime::new("'_", lifetime.apostrophe);
+        }
+    }
+    let mut ty = ty.clone();
+    syn::visit_mut::VisitMut::visit_type_mut(&mut Elide, &mut ty);
+    ty
+}
+
+/// How to name a type in a message to script: the last path segment's
+/// identifier, which for a rooted handle (`web_fetch::response::Response<'_>`)
+/// is the interface name script knows it by. Anything not a path falls back to
+/// its source text.
+fn type_display_name(ty: &Type) -> String {
+    match ty {
+        Type::Path(tp) => tp.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+    .unwrap_or_else(|| quote!(#ty).to_string())
+}
+
+/// The `T` of a `PromiseOf<'_, T>` input — a WebIDL `Promise<T>` whose eventual
+/// value is checked against `T`. `T` is the first type argument; the leading
+/// lifetime is the handle's own.
+fn promise_value_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(tp) = ty else {
+        return None;
+    };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "PromiseOf" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
+}
+
+/// The fulfillment reaction that checks a `PromiseOf<'_, T>`'s value against
+/// `T`, for the two places WebIDL converts an input to `Promise<T>`: an
+/// operation's argument and a dictionary member.
+fn promise_value_check(value_ty: &Type) -> proc_macro2::TokenStream {
+    let type_name = type_display_name(value_ty);
+    let value_ty = elide_lifetimes(value_ty);
+    quote! {
+        |__scope, __args, _| {
+            ::js::promise::check_promise_value_type::<#value_ty>(__scope, __args.get(0), #type_name)
+        }
+    }
 }
 
 fn is_integer_type(ty: &Type) -> bool {
@@ -2463,10 +2640,19 @@ fn gen_arg_extractions(
         .map(|(i, (name, ty))| {
             let idx = i as u32;
 
-            // Handle Option<T> — extract the inner type and make it conditional.
-            if is_option_type(ty) {
-                let inner = extract_option_inner_type(ty).expect("Option<T> must have inner type");
-                let inner_extract = gen_typed_arg_getter(&inner, &scope_expr, &args_expr, idx);
+            let optional = is_option_type(ty);
+            let inner =
+                optional.then(|| extract_option_inner_type(ty).expect("Option<T> has an inner type"));
+            let declared = inner.as_ref().unwrap_or(ty);
+            let borrow = BorrowedParam::of(declared);
+            let convert_ty = borrow.as_ref().map_or(declared, |b| &b.convert_ty);
+            let hidden = format_ident!("__arg_owned_{}", idx);
+            let value = if borrow.is_some() { &hidden } else { name };
+            let annotation = borrow.as_ref().map(|b| b.annotation(optional));
+            let rebind = borrow.as_ref().map(|b| b.rebind(name, value, optional));
+
+            if optional {
+                let inner_extract = gen_typed_arg_getter(convert_ty, &scope_expr, &args_expr, idx);
                 let fail = if use_question_mark {
                     quote! { return Err(::js::error::ExnThrown); }
                 } else {
@@ -2478,10 +2664,9 @@ fn gen_arg_extractions(
                 // through the normal path. For primitives that means e.g. `null` → "null" / `0`, for a
                 // dictionary the conversion itself treats `null` as an empty dictionary, and for
                 // a union or sequence (e.g. `HeadersInit`) converting `null` throws.
-                let absent_check = quote! { __val.is_undefined() };
                 return quote! {
                     let __val = #args_expr.get(#idx);
-                    let #name = if #absent_check {
+                    let #value #annotation = if __val.is_undefined() {
                         None
                     } else {
                         match #inner_extract {
@@ -2489,53 +2674,99 @@ fn gen_arg_extractions(
                             Err(::js::error::ExnThrown) => { #fail }
                         }
                     };
+                    #rebind
                 };
             }
 
-            let extract = if is_any_value_type(ty) && idx >= required {
+            let extract = if is_any_value_type(convert_ty) && idx >= required {
                 // An `any` param past the required count: a missing argument is
                 // `undefined`, an ordinary `any` value, so don't throw.
                 quote! { unsafe { ::js::class::get_arg_or_undefined(#scope_expr, #args_expr, #idx) } }
             } else {
-                gen_typed_arg_getter(ty, &scope_expr, &args_expr, idx)
+                gen_typed_arg_getter(convert_ty, &scope_expr, &args_expr, idx)
             };
             if use_question_mark {
-                quote! { let #name = #extract?; }
+                quote! {
+                    let #value #annotation = #extract?;
+                    #rebind
+                }
             } else {
                 quote! {
-                    let #name = match #extract {
+                    let #value #annotation = match #extract {
                         Ok(v) => v,
                         Err(::js::error::ExnThrown) => return false,
                     };
+                    #rebind
                 }
             }
         })
         .collect()
 }
 
-/// Build the `get_*` extraction expression for a single typed argument. Integer
-/// types go through `get_int_arg`, integer-element containers through
-/// `get_arg_with_config`, and everything else through `get_arg`; each yields a
-/// `Result<T, ExnThrown>`. The `any`-optional case (a trailing `any` param past
-/// the required count) is handled by the caller, since it depends on the arg index.
+/// How an input of a given type is converted from JS.
+enum InputConversion<'a> {
+    /// WebIDL `Promise<T>`, doing a type check on the result of awaiting
+    /// `Promise.resolve(value)` instead of on `value` itself.
+    /// See `js::PromiseOf`.
+    CheckedPromise(&'a Type),
+    /// `Promise<any>`/`Promise<undefined>`, wrapped in `Promise.resolve(value)
+    /// as above, but without a type check.
+    UncheckedPromise,
+    /// An integer, whose conversion needs an out-of-range behavior.
+    Integer,
+    /// A container of integers, which forwards that behavior to its elements.
+    IntegerContainer,
+    /// Everything else, converted through `FromJSVal` with no configuration.
+    Plain,
+}
+
+impl<'a> InputConversion<'a> {
+    fn of(ty: &'a Type) -> Self {
+        if let Some(value_ty) = promise_value_type(ty) {
+            Self::CheckedPromise(value_ty)
+        } else if is_unchecked_promise_type(ty) {
+            Self::UncheckedPromise
+        } else if is_integer_type(ty) {
+            Self::Integer
+        } else if is_int_container_type(ty) {
+            Self::IntegerContainer
+        } else {
+            Self::Plain
+        }
+    }
+}
+
+/// Build the `get_*` extraction expression for a single typed argument, one per
+/// [`InputConversion`]; each yields a `Result<T, ExnThrown>`. The `any`-optional
+/// case (a trailing `any` param past the required count) is handled by the
+/// caller, since it depends on the arg index.
 fn gen_typed_arg_getter(
     ty: &Type,
     scope_expr: &proc_macro2::TokenStream,
     args_expr: &proc_macro2::TokenStream,
     idx: u32,
 ) -> proc_macro2::TokenStream {
-    if is_integer_type(ty) {
-        quote! {
+    match InputConversion::of(ty) {
+        InputConversion::CheckedPromise(value_ty) => {
+            let check = promise_value_check(value_ty);
+            quote! {
+                unsafe { ::js::class::get_checked_promise_arg(#scope_expr, #args_expr, #idx, #check) }
+            }
+        }
+        InputConversion::UncheckedPromise => quote! {
+            unsafe { ::js::class::get_unchecked_promise_arg(#scope_expr, #args_expr, #idx) }
+        },
+        InputConversion::Integer => quote! {
             unsafe { ::js::class::get_int_arg(#scope_expr, #args_expr, #idx,
                 ::js::conversion::ConversionBehavior::Default) }
-        }
-    } else if is_int_container_type(ty) {
-        quote! {
+        },
+        InputConversion::IntegerContainer => quote! {
             unsafe { ::js::class::get_arg_with_config::<#ty>(#scope_expr, #args_expr, #idx,
                 ::js::conversion::ConversionBehavior::Default) }
+        },
+        InputConversion::Plain => {
+            quote! { unsafe { ::js::class::get_arg(#scope_expr, #args_expr, #idx) } }
         }
-    } else {
-        quote! { unsafe { ::js::class::get_arg(#scope_expr, #args_expr, #idx) } }
     }
 }
 
@@ -2739,16 +2970,12 @@ fn gen_constructor_body(info: &MethodInfo, type_name: &Ident) -> proc_macro2::To
     // In the construct function, `scope` is `&Scope<'_>` (not owned),
     // so we pass it directly to throw (unlike native functions which
     // own the scope and pass `&scope`).
+    // `map_err` rather than a `match`: matching on `Ok(data)` would bind the
+    // still-unrooted inner data on the stack, which crown rejects.
     let wrapped = match &info.return_style {
         ReturnStyle::ResultVoid | ReturnStyle::ResultValue => {
             quote! {
-                match #call {
-                    Ok(data) => Ok(data),
-                    Err(e) => {
-                        ::js::error::ThrowException::throw(e, scope);
-                        Err(::js::error::ExnThrown)
-                    }
-                }
+                #call.map_err(|e| ::js::error::ThrowException::throw(e, scope))
             }
         }
         _ => quote! { Ok(#call) },
@@ -4513,6 +4740,21 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
 /// value used when the property is missing or `undefined`. Only valid on
 /// non-`Option` fields (use `Option<T>` for "absent means `None`").
 ///
+/// # Inheritance
+///
+/// `#[webidl_dictionary(extends = Parent)]` declares an inherited dictionary.
+/// The struct holds its parent in a field named `parent`, and the members it
+/// inherits are reached through it. `Deref` makes that transparent, so
+/// `init.cancelable` works however deep the chain is.
+///
+/// The parent converts first, per [WebIDL's dictionary conversion][conv]:
+/// inherited dictionaries are converted in order from least to most derived,
+/// each one's own members in lexicographic order. Since the parent's own
+/// conversion does the same for *its* parent, the whole chain lands in spec
+/// order.
+///
+/// [conv]: https://webidl.spec.whatwg.org/#es-dictionary
+///
 /// # Usage
 ///
 /// ```rust,ignore
@@ -4520,6 +4762,12 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
 /// pub struct QueuingStrategyInit<'a> {
 ///     pub high_water_mark: f64,
 ///     pub size: Option<Object<'a>>,
+/// }
+///
+/// #[webidl_dictionary(extends = EventInit)]
+/// pub struct CustomEventInit<'a> {
+///     parent: EventInit,
+///     pub detail: Option<HandleValue<'a>>,
 /// }
 /// ```
 ///
@@ -4532,13 +4780,18 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn webidl_dictionary(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr: proc_macro2::TokenStream = attr.into();
+    let extends = match parse_dictionary_extends(attr) {
+        Ok(extends) => extends,
+        Err(e) => return e.to_compile_error().into(),
+    };
     let input = parse_macro_input!(item as ItemStruct);
     let struct_name = &input.ident;
     let vis = &input.vis;
     let attrs = &input.attrs;
     let generics = &input.generics;
-    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     // Determine the lifetime parameter. WebIDL dictionaries that contain
     // scope-rooted types must have exactly one lifetime parameter.
@@ -4556,6 +4809,19 @@ pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // The `parent` field holds the inherited members and is not looked up as a property of its
+    // own; the parent's conversion fills it.
+    let parent_ty = match extends
+        .as_ref()
+        .map(|extends| {
+            parent_field(&input, fields, extends, extends, "webidl_dictionary").map(|f| &f.ty)
+        })
+        .transpose()
+    {
+        Ok(ty) => ty,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
     // Parse each field into a DictionaryMember.
     let mut members: Vec<DictMember> = Vec::new();
     // Set on a malformed or unknown `#[webidl(...)]` field option, turned into
@@ -4565,6 +4831,9 @@ pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut dict_error: Option<syn::Error> = None;
     for field in fields {
         let ident = field.ident.as_ref().unwrap().clone();
+        if parent_ty.is_some() && ident == "parent" {
+            continue;
+        }
         let ty = field.ty.clone();
 
         // Parse #[webidl(...)] attributes on this field.
@@ -4630,82 +4899,77 @@ pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate field initializers in struct declaration order (not sorted).
     let field_idents: Vec<&Ident> = members.iter().map(|m| &m.ident).collect();
 
-    // The scope parameter in FromJSVal. If the struct has a lifetime, bind it.
-    let scope_lifetime = if let Some(lt) = lifetime {
-        quote! { #lt }
-    } else {
-        quote! { 's }
-    };
-
-    // For structs with a lifetime, the FromJSVal impl binds the struct's
-    // lifetime to the scope's lifetime. For structs without a lifetime,
-    // we use a fresh 's.
-    let from_jsval_impl = if lifetime.is_some() {
+    // WebIDL converts the inherited dictionaries first, least derived first, and the parent's own
+    // conversion does the same for its parent, so the chain arrives in that order.
+    let parent_extraction = parent_ty.map(|ty| {
         quote! {
-            impl<#scope_lifetime, 'v> ::js::conversion::FromJSVal<#scope_lifetime, 'v> for #struct_name<#scope_lifetime> {
-                type Config = ();
+            let parent = <#ty as ::js::conversion::FromJSVal>::from_jsval(scope, val, ())?;
+        }
+    });
+    let parent_init = parent_ty.map(|_| quote! { parent, });
+    let parent_deref = parent_ty.map(|ty| {
+        quote! {
+            impl #impl_generics ::std::ops::Deref for #struct_name #ty_generics #where_clause {
+                type Target = #ty;
+                fn deref(&self) -> &Self::Target {
+                    &self.parent
+                }
+            }
 
-                fn from_jsval(
-                    scope: &#scope_lifetime ::js::prelude::Scope<#scope_lifetime>,
-                    val: ::js::prelude::HandleValue<'v>,
-                    _option: (),
-                ) -> ::std::result::Result<Self, ::js::conversion::ConversionError> {
-                    // WebIDL §3.2.17: If V is undefined or null, treat as empty dict.
-                    // If V is not an object, throw TypeError.
-                    let __obj = if val.get().is_null_or_undefined() {
-                        None
-                    } else if val.is_object() {
-                        Some(
-                            ::js::Object::from_value(scope, *val)
-                                .map_err(|_| ::js::conversion::ConversionError::Failure(
-                                    ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
-                                ))?
-                        )
-                    } else {
-                        return Err(::js::conversion::ConversionError::Failure(
-                            ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
-                        ));
-                    };
-
-                    #(#member_extractions)*
-
-                    Ok(#struct_name {
-                        #(#field_idents),*
-                    })
+            impl #impl_generics ::std::ops::DerefMut for #struct_name #ty_generics #where_clause {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.parent
                 }
             }
         }
-    } else {
-        quote! {
-            impl ::js::conversion::FromJSVal<'_, '_> for #struct_name {
-                type Config = ();
+    });
 
-                fn from_jsval(
-                    scope: &::js::prelude::Scope<'_>,
-                    val: ::js::prelude::HandleValue<'_>,
-                    _option: (),
-                ) -> ::std::result::Result<Self, ::js::conversion::ConversionError> {
-                    let __obj = if val.get().is_null_or_undefined() {
-                        None
-                    } else if val.is_object() {
-                        Some(
-                            ::js::Object::from_value(scope, *val)
-                                .map_err(|_| ::js::conversion::ConversionError::Failure(
-                                    ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
-                                ))?
-                        )
-                    } else {
-                        return Err(::js::conversion::ConversionError::Failure(
-                            ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
-                        ));
-                    };
+    let (impl_generics_for_conv, trait_lifetimes, self_ty, scope_lt, value_lt) = match lifetime {
+        Some(lt) => (
+            quote!(<#lt, 'v>),
+            quote!(#lt, 'v),
+            quote!(#struct_name<#lt>),
+            quote!(#lt),
+            quote!('v),
+        ),
+        None => (
+            quote!(),
+            quote!('_, '_),
+            quote!(#struct_name),
+            quote!('_),
+            quote!('_),
+        ),
+    };
+    let from_jsval_impl = quote! {
+        impl #impl_generics_for_conv ::js::conversion::FromJSVal<#trait_lifetimes> for #self_ty {
+            type Config = ();
 
-                    #(#member_extractions)*
+            fn from_jsval(
+                scope: &#scope_lt ::js::prelude::Scope<#scope_lt>,
+                val: ::js::prelude::HandleValue<#value_lt>,
+                _option: (),
+            ) -> ::std::result::Result<Self, ::js::conversion::ConversionError> {
+                // WebIDL §3.2.17: If V is undefined or null, treat as empty dict. If V is not an
+                // object, throw a TypeError — which is what `from_value` reports, so it is the
+                // only object test needed.
+                let __obj = if val.get().is_null_or_undefined() {
+                    None
+                } else {
+                    Some(
+                        ::js::Object::from_value(scope, *val)
+                            .map_err(|_| ::js::conversion::ConversionError::Failure(
+                                ::std::borrow::Cow::Borrowed(c"dictionary value is not an object"),
+                            ))?
+                    )
+                };
 
-                    Ok(#struct_name {
-                        #(#field_idents),*
-                    })
-                }
+                #parent_extraction
+                #(#member_extractions)*
+
+                Ok(#struct_name {
+                    #parent_init
+                    #(#field_idents),*
+                })
             }
         }
     };
@@ -4748,9 +5012,67 @@ pub fn webidl_dictionary(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         #from_jsval_impl
+        #parent_deref
     };
 
     output.into()
+}
+
+/// Parse `#[webidl_dictionary]`'s optional `extends = Parent` argument.
+///
+/// The options share [`AttrOpts`] with the class attributes, so every other key
+/// parses, and has to be rejected here, or `#[webidl_dictionary(hidden)]`
+/// would be silently accepted and do nothing.
+fn parse_dictionary_extends(attr: proc_macro2::TokenStream) -> syn::Result<Option<Ident>> {
+    if attr.is_empty() {
+        return Ok(None);
+    }
+    let opts: AttrOpts = syn::parse2(attr.clone())?;
+    opts.reject_all_but(&["extends"], attr)?;
+    Ok(opts.extends)
+}
+
+/// The `parent` field that a type declared with `extends = Parent` holds its
+/// parent in, checked to be an `expected`.
+///
+/// Every `extends`, class, interface, or dictionary, embeds the parent in a
+/// field of that name with the parent's type. Checking them here reports a
+/// mismatch against the declaration that caused it, rather than as a missing-field
+/// or type error inside a generated `Deref`/`HasParent`/`FromJSVal` impl.
+fn parent_field<'a>(
+    span: impl quote::ToTokens,
+    fields: &'a syn::punctuated::Punctuated<syn::Field, Token![,]>,
+    extends: &Ident,
+    expected: &Ident,
+    attribute: &str,
+) -> syn::Result<&'a syn::Field> {
+    let Some(field) = fields
+        .iter()
+        .find(|f| f.ident.as_ref().is_some_and(|i| i == "parent"))
+    else {
+        return Err(syn::Error::new_spanned(
+            span,
+            format!(
+                "`#[{attribute}(extends = {extends})]` requires a field `parent: {expected}` to \
+                 hold the inherited state"
+            ),
+        ));
+    };
+    let names_parent = match &field.ty {
+        Type::Path(tp) => tp
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| &s.ident == expected),
+        _ => false,
+    };
+    if !names_parent {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            format!("the `parent` field must be a `{expected}`, matching `extends = {extends}`"),
+        ));
+    }
+    Ok(field)
 }
 
 /// Information about a single dictionary member.
@@ -4799,17 +5121,32 @@ fn gen_dict_member_extraction(member: &DictMember) -> proc_macro2::TokenStream {
         (quote! { let #ident: #ty }, ty, absent)
     };
 
-    // Integer conversions need the explicit `ConversionBehavior::Default` and type annotation,
-    // everything else converts through `()` with the type inferred from the binding.
-    // Optional members wrap the converted value in `Some`.
-    let core = if is_integer_type(conv_ty) {
-        quote! {
+    // The same conversions an argument gets, in the shape a dictionary member needs: a value
+    // expression yielding `Result<_, ConversionError>` rather than a `get_*_arg` call. Optional
+    // members wrap the converted value in `Some`.
+    let core = match InputConversion::of(conv_ty) {
+        // Wrapping here rather than at each read is what lets a promise attribute fed from this
+        // member return the same object every time.
+        InputConversion::CheckedPromise(value_ty) => {
+            let check = promise_value_check(value_ty);
+            quote! {
+                ::js::PromiseOf::new(scope, __prop, #check)
+                    .map_err(|_| ::js::conversion::ConversionError::ExnPending)?
+            }
+        }
+        InputConversion::UncheckedPromise => quote! {
+            ::js::Promise::new_resolved_with_value(scope, __prop)
+                .map_err(|_| ::js::conversion::ConversionError::ExnPending)?
+        },
+        // A container forwards the behavior to its elements, so both spell it the same way.
+        InputConversion::Integer | InputConversion::IntegerContainer => quote! {
             <#conv_ty as ::js::conversion::FromJSVal<'_, '_>>::from_jsval(
                 scope, __prop, ::js::conversion::ConversionBehavior::Default,
             )?
+        },
+        InputConversion::Plain => {
+            quote! { ::js::conversion::FromJSVal::from_jsval(scope, __prop, ())? }
         }
-    } else {
-        quote! { ::js::conversion::FromJSVal::from_jsval(scope, __prop, ())? }
     };
     let convert = if member.optional {
         quote! { Some(#core) }
@@ -5303,6 +5640,17 @@ fn process_webidl_union(input: ItemEnum) -> TokenStream {
 mod tests {
     use super::*;
 
+    /// Parse a type from source, for the type-shape predicates below.
+    fn parse_ty(source: &str) -> Type {
+        syn::parse_str::<Type>(source).expect("test input parses as a type")
+    }
+
+    /// A type as source text, with `quote!`'s inter-token spaces removed so the
+    /// expectations below can be written the way the type is spelled.
+    fn ty_string(ty: &Type) -> String {
+        quote!(#ty).to_string().replace(' ', "")
+    }
+
     /// Without a receiver, the return type alone marks a constructor — the
     /// name is irrelevant.
     #[test]
@@ -5428,6 +5776,86 @@ mod tests {
         assert!(!is_result_promise_type(&parse(
             "Result<Vec<Promise<'r>>, ExnThrown>"
         )));
+    }
+
+    #[test]
+    fn promise_params_match_both_spellings() {
+        let parse = |s: &str| syn::parse_str::<Type>(s).unwrap();
+        assert!(is_unchecked_promise_type(&parse("Promise<'_>")));
+        assert!(is_unchecked_promise_type(&parse("js::Promise<'r>")));
+        // A future is a return type, never an argument, so it must not pick up
+        // the `Promise<T>` argument conversion the way `is_promise_type` does.
+        assert!(!is_unchecked_promise_type(&parse("PromiseFuture")));
+        assert!(!is_unchecked_promise_type(&parse(
+            "PromiseOf<'_, Response<'_>>"
+        )));
+        assert!(!is_unchecked_promise_type(&parse("Vec<Promise<'_>>")));
+    }
+
+    #[test]
+    fn promise_value_type_skips_the_handle_lifetime() {
+        let value_ty = |s: &str| promise_value_type(&parse_ty(s)).map(ty_string);
+        assert_eq!(
+            value_ty("PromiseOf<'_, Response<'_>>").as_deref(),
+            Some("Response<'_>")
+        );
+        assert_eq!(value_ty("js::PromiseOf<'r, i32>").as_deref(), Some("i32"));
+        // Not a checked promise: no value type to extract.
+        assert_eq!(value_ty("Promise<'_>"), None);
+        assert_eq!(value_ty("PromiseOfSorts<'_, i32>"), None);
+    }
+
+    #[test]
+    fn reference_params_expose_their_referent() {
+        let target = |s: &str| reference_target(&parse_ty(s)).map(ty_string);
+        assert_eq!(target("&EventInit").as_deref(), Some("EventInit"));
+        assert_eq!(
+            target("&FetchEventInit<'_>").as_deref(),
+            Some("FetchEventInit<'_>")
+        );
+        assert_eq!(target("EventInit"), None);
+        // A conversion hands back a value nothing else holds, so there is nothing to mutate
+        // through — `&mut` is left to fail as an ordinary type error.
+        assert_eq!(target("&mut EventInit"), None);
+    }
+
+    #[test]
+    fn unsized_referents_convert_as_what_owns_them() {
+        let converts_as =
+            |s: &str| BorrowedParam::of(&parse_ty(s)).map(|b| (ty_string(&b.convert_ty), b.deref));
+        // An unsized referent converts as what owns it, and is reached back through its `Deref`.
+        assert_eq!(
+            converts_as("&str"),
+            Some(("::std::string::String".to_string(), true))
+        );
+        assert_eq!(
+            converts_as("&[u8]"),
+            Some(("::std::vec::Vec<u8>".to_string(), true))
+        );
+        // Everything else converts as itself, and is reached by a plain borrow.
+        assert_eq!(
+            converts_as("&EventInit"),
+            Some(("EventInit".to_string(), false))
+        );
+        assert_eq!(converts_as("&String"), Some(("String".to_string(), false)));
+        // Not a reference at all: converts as itself and binds its own name.
+        assert!(converts_as("EventInit").is_none());
+    }
+
+    #[test]
+    fn dictionary_takes_extends_and_nothing_else() {
+        let parse = |s: &str| parse_dictionary_extends(s.parse().unwrap());
+        assert!(parse("").unwrap().is_none());
+        assert_eq!(
+            parse("extends = EventInit").unwrap().map(|i| i.to_string()),
+            Some("EventInit".to_string())
+        );
+        // The options are shared with the class attributes, so the ones that mean nothing for a
+        // dictionary have to be turned away rather than silently ignored.
+        assert!(parse("hidden").is_err());
+        assert!(parse("js_proto = \"Error\"").is_err());
+        assert!(parse("name = \"Other\"").is_err());
+        assert!(parse("extends = EventInit, hidden").is_err());
     }
 
     #[test]
