@@ -85,6 +85,11 @@ const config = {
   // Default automatically adjusted to "target/wasm32-wasip2/debug/starling.wasm" for wasm target.
   runtime: "target/debug/starling",
   target: "native", // "native" or "wasm"
+  // How the runtime executes each test: "cli" runs it as a one-shot command, "serve" POSTs it to a
+  // long-running server built from the same binary (see wpt-server.js). Serve mode is the
+  // production-shaped configuration: the test runs inside a request handler.
+  mode: "cli", // "cli" or "serve"
+  servePort: 7877,
   wptRoot: process.env.WPT_ROOT || "deps/wpt",
   tmpDir: "target/tmp/wpt",
   tests: {
@@ -106,8 +111,19 @@ const config = {
   // unless --no-precompile is passed. See ensurePrecompiledRuntime.
   precompiled: null,
   usePrecompiled: true,
+  // Pre-initialize the wasm runtime with Wizer before serving it, so the engine and the content
+  // script are already stood up in the snapshot. This harness retires an instance after every
+  // request, so without this each test pays for the whole runtime again.
+  wizen: false,
+  wizened: null,
   logLevel: LogLevel.Quiet,
-  timeout: 30000, // 30 second timeout per test
+  // Per-test timeout for a serial run, scaled by --jobs. This is the outermost of three nested
+  // limits, and has to stay the largest of them or it preempts the ones that can say something
+  // useful: testharness.js times a test out internally at 10s (60s for `META: timeout=long`) and
+  // reports per-subtest TIMEOUT statuses, and serve mode's server backstop
+  // (`WAIT_LIMIT_MS` in wpt-server.js) sits between the two. Reaching *this* one means the
+  // runtime hung with nothing to report, so it is a hard kill.
+  timeout: 30000,
 };
 
 // ---------------------------------------------------------------------------
@@ -131,6 +147,22 @@ const ArgParsers = {
         process.exit(1);
       }
       config.target = val;
+    },
+  },
+  "--mode": {
+    help: `How to run each test: cli or serve (default: ${config.mode})`,
+    cmd: (val) => {
+      if (val !== "cli" && val !== "serve") {
+        console.error(`Unknown --mode value: ${val}. Use "cli" or "serve".`);
+        process.exit(1);
+      }
+      config.mode = val;
+    },
+  },
+  "--serve-port": {
+    help: `Port for --mode=serve (default: ${config.servePort})`,
+    cmd: (val) => {
+      config.servePort = parseInt(val, 10);
     },
   },
   "--wpt-root": {
@@ -171,6 +203,12 @@ const ArgParsers = {
         throw new Error(`--jobs must be a positive integer, got: ${val}`);
       }
       config.jobs = jobs;
+    },
+  },
+  "--wizen": {
+    help: "Pre-initialize the wasm serve-mode runtime with `wasmtime wizer`",
+    cmd: () => {
+      config.wizen = true;
     },
   },
   "--no-precompile": {
@@ -235,6 +273,19 @@ function applyConfig(argv) {
   // When targeting wasm, adjust the runtime path if not explicitly set.
   if (config.target === "wasm" && config.runtime === "target/debug/starling") {
     config.runtime = "target/wasm32-wasip2/debug/starling.wasm";
+  }
+
+  // The native server answers one request at a time: `--serve-isolated` (which serveCommand
+  // passes, so each test does get its own global) has every request enter its own realm and hold
+  // it across awaits, which only works serialized. Sending more in flight than it will serve just
+  // queues them inside the server while inflating the per-test budget, which scales with --jobs.
+  // The wasm server needs none of this: `wasmtime serve` is told to retire each instance after a
+  // single request, so its tests are isolated even in flight.
+  if (config.mode === "serve" && config.target !== "wasm" && config.jobs !== 1) {
+    if (config.logLevel > LogLevel.Quiet) {
+      console.log("The native serve-mode server is serial; running tests one at a time.");
+    }
+    config.jobs = 1;
   }
 
   // The permissive dimension records one `permissive_status` override per
@@ -642,6 +693,64 @@ function mergeExpectations(previous, results) {
 // information — so error reporting in the harness is unchanged.
 const WASMTIME_CODEGEN_FLAGS = ["-C", "native-unwind-info=n"];
 
+// The WASI capabilities the runtime needs: environment (its configuration arrives there in serve
+// mode), and the network/HTTP stack the `fetch` tests exercise.
+const WASI_FLAGS = "inherit-env=y,inherit-network=y,http=y,tcp=y,udp=y,p3=y";
+
+// Pre-initialize the wasm runtime with Wizer, baking the serve-mode WPT harness and its
+// configuration into the snapshot.
+//
+// This is the configuration a deployed server has: the engine is initialized and the content
+// script evaluated at build time, so serving a request does neither. It matters most exactly here,
+// because this harness retires each instance after one request (see `serveCommand`).
+//
+// Rebuilt whenever the runtime or the baked configuration changes, on the same stamp scheme the
+// precompiled artifact uses.
+function ensureWizenedRuntime() {
+  if (config.target !== "wasm" || config.mode !== "serve" || !config.wizen) return null;
+
+  const output = path.join(config.tmpDir, "wizened-" + path.basename(config.runtime));
+  const bakedConfig = `--wpt-mode --legacy-script ${guestServerScript()}`;
+  const stamp = output + ".stamp";
+  const want = `${statSync(config.runtime).mtimeMs}\n${bakedConfig}`;
+  try {
+    if (readFileSync(stamp, "utf-8") === want && existsSync(output)) {
+      return output;
+    }
+  } catch {
+    // No usable stamp; wizen below.
+  }
+
+  console.log("Pre-initializing the wasm runtime with Wizer (once for this run) ...");
+  try {
+    mkdirSync(config.tmpDir, { recursive: true });
+    execFileSync(
+      "wasmtime",
+      [
+        "wizer",
+        `-S${WASI_FLAGS},cli=y`,
+        "-Wcomponent-model-async=y",
+        // The component's `wizer-initialize` export is declared by a world of its own, so the
+        // component type still names it after the snapshot. Dropping the core function (the
+        // default) would leave that declaration dangling and the component unloadable.
+        "--keep-init-func=true",
+        "--dir=.::/",
+        "--env",
+        `STARLINGMONKEY_CONFIG=${bakedConfig}`,
+        "-o",
+        output,
+        config.runtime,
+      ],
+      { stdio: "pipe" },
+    );
+    writeFileSync(stamp, want);
+    return output;
+  } catch (e) {
+    console.warn(`  Wizening failed, serving the un-snapshotted runtime: ${e.message}`);
+    return null;
+  }
+}
+
 // Compile the wasm runtime ahead of time, once, and run the tests against the
 // result.
 //
@@ -656,7 +765,8 @@ const WASMTIME_CODEGEN_FLAGS = ["-C", "native-unwind-info=n"];
 function ensurePrecompiledRuntime() {
   if (config.target !== "wasm" || !config.usePrecompiled) return null;
 
-  const output = path.join(config.tmpDir, path.basename(config.runtime) + ".cwasm");
+  const runtime = config.wizened ?? config.runtime;
+  const output = path.join(config.tmpDir, path.basename(runtime) + ".cwasm");
   let version = "";
   try {
     version = execFileSync("wasmtime", ["--version"], { encoding: "utf-8" }).trim();
@@ -664,7 +774,7 @@ function ensurePrecompiledRuntime() {
     return null;
   }
   const stamp = output + ".stamp";
-  const want = `${version}\n${statSync(config.runtime).mtimeMs}\n${WASMTIME_CODEGEN_FLAGS.join(" ")}`;
+  const want = `${version}\n${statSync(runtime).mtimeMs}\n${WASMTIME_CODEGEN_FLAGS.join(" ")}`;
   try {
     if (readFileSync(stamp, "utf-8") === want && existsSync(output)) {
       return output;
@@ -683,7 +793,7 @@ function ensurePrecompiledRuntime() {
         ...WASMTIME_CODEGEN_FLAGS,
         "-W",
         "component-model-async=y",
-        config.runtime,
+        runtime,
         "-o",
         output,
       ],
@@ -758,23 +868,33 @@ function runScriptPath(testPath) {
   );
 }
 
-// Build the command that runs `scriptFile`.
+/// The runtime flags that carry the run's restriction dimension. Every mode that starts a runtime
+/// has to pass these: expectation lookup switches to `permissive_status` on `--permissive`, so a
+/// mode that silently kept the restrictions on would check permissive expectations against a
+/// restricted runtime — and `--update-expectations` would then write those results into the
+/// `permissive_status` fields, corrupting them for the runs that do disable the restrictions.
+function restrictionFlags() {
+  return config.permissive ? ["--enforce-fetch-restrictions=false"] : [];
+}
+
+// Build the command that runs `scriptFile` as a one-shot command: the runtime binary directly on
+// native, and the same component under `wasmtime run` on wasm — the component exports
+// `wasi:cli/run` alongside `wasi:http/handler`, so this is the very binary serve mode uses.
 //
-// `optimized` selects the flags the harness runs with — ahead-of-time compiled
-// runtime, no native unwind information.
-function testCommand(scriptFile, { optimized }) {
-  const restrictionFlags = config.permissive
-    ? ["--enforce-fetch-restrictions=false"]
-    : [];
+// `optimized` selects the flags a measured run uses (ahead-of-time compiled runtime, no native
+// unwind information); `reproLine` turns it off so the command it prints stays runnable by hand.
+function testCommand(scriptFile, { optimized = true } = {}) {
+  const runtimeArgs = [
+    "--legacy-script",
+    "--wpt-mode",
+    ...restrictionFlags(),
+    scriptFile,
+  ];
   if (config.target !== "wasm") {
-    return {
-      command: config.runtime,
-      args: ["--legacy-script", "--wpt-mode", ...restrictionFlags, scriptFile],
-    };
+    return { command: config.runtime, args: runtimeArgs };
   }
-  // wasmtime sees the guest filesystem, where --dir=.::/ maps the host CWD to
-  // /, so the script has to be named by its path relative to the CWD. A host
-  // path fails with "Error reading script".
+  // wasmtime sees the guest filesystem, where --dir=.::/ maps the host CWD to /, so the script
+  // has to be named by its path relative to the CWD. A host path fails with "Error reading script".
   const wasiPath = "/" + path.relative(process.cwd(), scriptFile);
   const precompiled = optimized ? config.precompiled : null;
   return {
@@ -786,11 +906,10 @@ function testCommand(scriptFile, { optimized }) {
       "--dir=.::/",
       "--dir=.",
       "--dir=/tmp",
-      "-Sinherit-env=y,inherit-network=y,http=y,tcp=y,udp=y,p3=y",
+      `-S${WASI_FLAGS}`,
       "-Wcomponent-model-async=y",
       precompiled ?? config.runtime,
-      "--legacy-script",
-      "--wpt-mode",
+      ...runtimeArgs.slice(0, -1),
       wasiPath,
     ],
   };
@@ -815,7 +934,11 @@ async function runSingleTest(testPath) {
   const tmpFile = runScriptPath(testPath);
   writeFileSync(tmpFile, script);
 
-  const { command, args } = testCommand(tmpFile, { optimized: true });
+  if (config.mode === "serve") {
+    return runTestOnServer(script);
+  }
+
+  const { command, args } = testCommand(tmpFile);
   try {
 
     const result = await spawnCollecting(command, args, {
@@ -909,6 +1032,165 @@ function formatStats(stats) {
 
 function pad(v, n) {
   return (v + "").padStart(n);
+}
+
+// ---------------------------------------------------------------------------
+// Serve mode (`--mode=serve`): one runtime server, one request per test
+// ---------------------------------------------------------------------------
+//
+// The runtime runs `wpt-server.js` as its content script, which registers a `fetch` handler that
+// evaluates the assembled test script a request carries and answers with its results. Nothing
+// here is WPT-specific on the runtime side: it is the ordinary serve path, which is the point —
+// this exercises the tests inside a request handler, the configuration that ships.
+//
+// The same component provides command mode's `wasi:cli/run`, so both modes run the one binary.
+
+const SERVE_HOST = "127.0.0.1";
+let serveUrl = null;
+let managedServer = null;
+
+/// The serve-mode harness script, as the guest sees it under the `--dir=.::/` mapping.
+function guestServerScript() {
+  return "/" + path.relative(process.cwd(), relativePath("wpt-server.js"));
+}
+
+/// How to start the runtime as a server, and how to recognize that it is listening.
+function serveCommand() {
+  const serverScript = relativePath("wpt-server.js");
+  if (config.target !== "wasm") {
+    return {
+      command: config.runtime,
+      args: [
+        "--serve",
+        String(config.servePort),
+        "--wpt-mode",
+        // Each request in its own global, so one test's top-level declarations are not still
+        // there for the next. Without it tests collide and the run is simply wrong; the wasm
+        // server asks its host for the same property with `--max-instance-reuse-count` below.
+        "--serve-isolated",
+        "--legacy-script",
+        ...restrictionFlags(),
+        serverScript,
+      ],
+      ready: /serving on (http:\/\/[\d.]+:\d+)/,
+    };
+  }
+  // `wasmtime serve` passes the guest no arguments, so the runtime's configuration goes through
+  // the environment — except on a wizened runtime, which already holds an initialized engine with
+  // the harness evaluated, and so needs neither the configuration nor the script.
+  //
+  // No `restrictionFlags()` here: `--permissive` runs are native-only (applyConfig rejects the
+  // combination), and a wizened runtime takes no configuration at all to carry them in.
+  const precompiled = config.precompiled;
+  const wizened = config.wizened !== null;
+  return {
+    command: "wasmtime",
+    args: [
+      "serve",
+      ...WASMTIME_CODEGEN_FLAGS,
+      ...(precompiled ? ["--allow-precompiled"] : []),
+      "--dir=.::/",
+      "--dir=.",
+      "--dir=/tmp",
+      `-S${WASI_FLAGS},cli=y`,
+      "-Wcomponent-model-async=y",
+      ...(wizened
+        ? []
+        : [
+            "--env",
+            `STARLINGMONKEY_CONFIG=--wpt-mode --legacy-script ${guestServerScript()}`,
+          ]),
+      // One request per instance, so each test gets a fresh global — what a fresh process gives
+      // command mode. WASIp3 components default to 128 requests per instance, so this is load
+      // bearing, and it holds under concurrency: an instance is retired after its one request.
+      "--max-instance-reuse-count",
+      "1",
+      "--addr",
+      `${SERVE_HOST}:${config.servePort}`,
+      precompiled ?? config.wizened ?? config.runtime,
+    ],
+    ready: /Serving HTTP on (http:\/\/[\d.]+:\d+)/,
+  };
+}
+
+/// Start the runtime in serve mode; resolve once it is listening.
+function startServer() {
+  const { command, args, ready } = serveCommand();
+  return new Promise((resolve, reject) => {
+    if (config.logLevel > LogLevel.Quiet) {
+      console.log(`Starting ${config.target} serve-mode runtime: ${command} ${args.join(" ")}`);
+    }
+    managedServer = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    const timer = setTimeout(
+      () => reject(new Error(`serve-mode runtime did not start within 60s. Output:\n${output}`)),
+      60000,
+    );
+    // The readiness line goes to stderr for both runtimes; watch stdout too, so a runtime that
+    // logs it elsewhere still starts rather than hanging until the timeout.
+    const watch = (chunk) => {
+      output += chunk.toString();
+      const match = output.match(ready);
+      if (match && !serveUrl) {
+        serveUrl = match[1];
+        clearTimeout(timer);
+        if (config.logLevel > LogLevel.Quiet) {
+          console.log(`serve-mode runtime is ready at ${serveUrl}`);
+        }
+        resolve();
+      }
+      if (config.logLevel >= LogLevel.VeryVerbose) {
+        process.stderr.write(`runtime: ${chunk}`);
+      }
+    };
+    managedServer.stderr.on("data", watch);
+    managedServer.stdout.on("data", watch);
+    managedServer.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    managedServer.on("exit", (code) => {
+      clearTimeout(timer);
+      if (!serveUrl) {
+        reject(new Error(`serve-mode runtime exited (${code}) before listening. Output:\n${output}`));
+      }
+    });
+  });
+}
+
+function stopServer() {
+  if (managedServer) {
+    try {
+      managedServer.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+    managedServer = null;
+  }
+}
+
+/// Run one test by POSTing its assembled script to the serve-mode runtime.
+async function runTestOnServer(script) {
+  try {
+    // The budget scales with --jobs like command mode's: a request queued behind the other
+    // in-flight tests is not a hang.
+    const response = await fetch(serveUrl, {
+      method: "POST",
+      body: script,
+      signal: AbortSignal.timeout(config.timeout * Math.max(1, config.jobs)),
+    });
+    const body = await response.text();
+    if (!response.ok) {
+      return {
+        error: new Error(`serve-mode runtime returned HTTP ${response.status}`),
+        stdout: body,
+        stderr: "",
+      };
+    }
+    return { results: JSON.parse(body), stdout: body, stderr: "" };
+  } catch (e) {
+    return { error: e, stdout: "", stderr: String(e?.message ?? e) };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,6 +1327,7 @@ function stopWptServer() {
 }
 
 process.on("exit", stopWptServer);
+process.on("exit", stopServer);
 
 async function run() {
   if (!applyConfig(process.argv)) {
@@ -1058,7 +1341,11 @@ async function run() {
   }
   const pathLength = testPaths.reduce((len, p) => Math.max(p.length, len), 0);
 
+  config.wizened = ensureWizenedRuntime();
   config.precompiled = ensurePrecompiledRuntime();
+  if (config.mode === "serve") {
+    await startServer();
+  }
   const suiteStart = Date.now();
 
   const concurrency = config.jobs > 1 ? `, ${config.jobs} at a time` : "";
@@ -1228,6 +1515,7 @@ async function run() {
   // paths below force the issue with process.exit, but a fully green run
   // would hang here.)
   stopWptServer();
+  stopServer();
 
   // Report the suite's wall-clock time, not the sum of the per-test durations:
   // with tests running concurrently that sum exceeds the elapsed time, and it
@@ -1264,6 +1552,10 @@ function runtimeOutputBlocks(stdout, stderr) {
 }
 
 function reproLine(testPath) {
+  if (config.mode === "serve") {
+    // Needs a serve-mode runtime running; `just wpt-test-*-serve` starts one.
+    return `  To reproduce, run $ curl --data-binary @${runScriptPath(testPath)} ${serveUrl ?? `http://${SERVE_HOST}:${config.servePort}`}`;
+  }
   // Name the script the run actually used. Its name is stable across runs, so it
   // stays valid in a command someone runs later; it used to carry a pid, which is
   // why this once had to copy it to a stable name of its own first.

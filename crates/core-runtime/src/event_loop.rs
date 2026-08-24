@@ -18,9 +18,9 @@
 //!    [`EventLoop::step`] in a loop and, when idle, races the next timer
 //!    deadline against a readiness notification. Platform differences are
 //!    confined to the sleep function and the executor:
-//!    - [`wasi`]: `wasi:clocks/monotonic-clock.wait-for` for sleep,
+//!    - `wasi`: `wasi:clocks/monotonic-clock.wait-for` for sleep,
 //!      `wasip3::wit_bindgen::spawn` as executor.
-//!    - [`native`]: the caller provides a proper async sleep (e.g.
+//!    - `native`: the caller provides a proper async sleep (e.g.
 //!      `tokio::time::sleep`) and executor (e.g.
 //!      `tokio::runtime::Runtime::block_on`). This keeps the core runtime
 //!      free of any specific async runtime dependency.
@@ -48,31 +48,6 @@
 //! [`Task::trace`]. The [`EventLoop`] is registered as a SpiderMonkey
 //! extra-roots tracer so that all live tasks are traced during both minor
 //! and major GC.
-//!
-//! # Example: implementing a custom task
-//!
-//! ```rust,ignore
-//! struct MyTask { /* ... */ }
-//!
-//! impl Task for MyTask {
-//!     fn kind(&self) -> &'static str { "my-task" }
-//!
-//!     fn run(self: Box<Self>, scope: &Scope<'_>, _id: TaskId) -> Result<(), ()> {
-//!         // Do JS work using `scope`
-//!         Ok(())
-//!     }
-//!
-//!     fn trace(&self, _trc: *mut JSTracer) {
-//!         // Trace any Heap<*mut JSObject> fields here
-//!     }
-//! }
-//!
-//! // Queue it:
-//! let id = event_loop.queue(Box::new(MyTask { /* ... */ }));
-//!
-//! // Later, when the task is ready:
-//! event_loop.signal_ready(id);
-//! ```
 
 pub mod interest;
 pub mod timer;
@@ -106,15 +81,12 @@ thread_local! {
     static CURRENT_EVENT_LOOP: Cell<Option<*const EventLoop>> = const { Cell::new(None) };
 }
 
-/// Run a closure with `event_loop` installed as the thread's active loop.
+/// Run a closure with `event_loop` installed as the thread's active loop, which is how JS
+/// callbacks reach it ([`with_active_event_loop`]). The previous value is restored afterwards, so
+/// calls nest.
 ///
-/// Saves and restores the previous value so calls may be
-/// nested. While the closure runs, JS callbacks reach the loop through
-/// [`with_active_event_loop`].
-///
-/// The shared borrow of `event_loop` outlives `f`, and the installed pointer
-/// is only dereferenced within `f`'s dynamic extent, so this is safe: the
-/// loop cannot be dropped or moved while it is installed.
+/// Safe because the shared borrow outlives `f` and the installed pointer is only dereferenced
+/// within `f`: the loop can be neither dropped nor moved while installed.
 pub fn with_event_loop<R>(event_loop: &EventLoop, f: impl FnOnce(&EventLoop) -> R) -> R {
     /// Restores the previous active loop and `future` owner.
     struct Restore {
@@ -229,15 +201,8 @@ pub trait Task {
     /// `"promise"`, `"fetch"`). Used for debugging and diagnostics only.
     fn kind(&self) -> &'static str;
 
-    /// Execute the task's work.
-    ///
-    /// Receives a `&Scope<'_>` for interacting with JavaScript and the
-    /// task's [`TaskId`] (useful for re-queuing, e.g. `setInterval`).
-    /// The task is consumed (`self: Box<Self>`) — repeating tasks should
-    /// re-queue themselves inside this method.
-    ///
-    /// Returns `Ok(())` on success or `Err(())` if a JS exception was
-    /// thrown (the caller is responsible for reporting it).
+    /// Execute the task's work, reporting a thrown JS exception through `Err` for the caller to
+    /// report. The task is consumed, so a repeating one re-queues itself here, under `id`.
     fn run(self: Box<Self>, scope: &Scope<'_>, id: TaskId) -> Result<(), ExnThrown>;
 
     /// Trace any GC-managed pointers held by this task.
@@ -279,7 +244,7 @@ static TIMER_ID_COUNTER_KEY: u8 = 0;
 /// The event loop task registry.
 ///
 /// Owns all queued tasks and tracks which are ready to run. Platform
-/// drivers ([`native`], [`wasi`]) call into this struct to advance the
+/// drivers (`native`, `wasi`) call into this struct to advance the
 /// loop.
 ///
 /// The `EventLoop` is stored on the [`Runtime`](crate::runtime::Runtime)
@@ -307,8 +272,9 @@ pub struct EventLoop {
     /// Scratch buffer for [`step`](Self::step)'s per-batch dispatch list,
     /// reused across steps so the hot path stays allocation-free.
     batch_buf: RefCell<Vec<(Option<Instant>, TaskId)>>,
-    /// Set by [`request_stop`](Self::request_stop); consumed by
-    /// [`run_to_completion`] to end this loop after its current step.
+    /// Set by [`request_stop`](Self::request_stop) to end this loop after its current step,
+    /// overriding all other signals of event loop activity, such as pending async tasks and
+    /// timers, or active interest.
     stop_requested: Cell<bool>,
     /// External keep-alive interest. When positive, the event loop stays
     /// alive even with an empty task queue.
@@ -456,8 +422,8 @@ impl EventLoop {
 
     /// Release a one-shot JS timer's id after it fired.
     ///
-    /// Mirrors HTML's "remove global's map of setTimeout and setInterval
-    /// IDs[id]" task substep for non-repeating timers.
+    /// Mirrors HTML's "remove global's map of `setTimeout` and `setInterval`
+    /// `IDs[id]`" task substep for non-repeating timers.
     pub fn js_timer_fired(&self, timer_id: u64) {
         self.js_timers.borrow_mut().remove(&timer_id);
     }
@@ -589,30 +555,27 @@ impl EventLoop {
         self.has_pending() || self.has_interest() || js::promise::has_pending_futures(self.loop_id)
     }
 
-    /// Returns `true` if any external interest or async-promise future (a
-    /// `fetch`, a Component Model stream/future pump, an async import) is still
-    /// in flight — the loop's *non-timer* work.
-    ///
-    /// This is [`is_alive`](Self::is_alive) minus [`has_pending`](Self::has_pending):
-    /// it deliberately ignores bare timer tasks (`setTimeout`/`setInterval`).
-    /// The async-export trailing-work driver uses it to keep driving while a
-    /// stream/future pump is still running, yet stop once only timers remain —
-    /// timers never gate an async export's subtask completion (they are not
-    /// canonical-ABI waitables, so wit-bindgen's `FutureState` never counts them
-    /// as outstanding work).
-    pub fn has_async_work(&self) -> bool {
-        self.has_interest() || js::promise::has_pending_futures(self.loop_id)
+    /// Whether any futures backed by external async tasks are active in this event loop.
+    /// This includes things like filesystem or network I/O.
+    pub fn has_active_external_async_tasks(&self) -> bool {
+        js::promise::has_pending_futures(self.loop_id)
     }
 
-    /// Returns an [`EventListener`] future that resolves when the event
-    /// loop is notified of new readiness (a task became ready, a timer
-    /// was queued, etc.).
-    ///
-    /// The returned listener must be `.await`ed. If the event was already
-    /// notified before the listener was created, the first listener to
-    /// poll will complete immediately.
+    /// An [`EventListener`] resolving on the next readiness notification: a task became ready, a
+    /// timer was queued. It must be awaited, and completes on its first poll if the notification
+    /// arrived before it was created.
     pub fn notified(&self) -> EventListener<()> {
         self.notify.listen()
+    }
+
+    /// Drop this loop's still-pending async-promise futures, cancelling the host I/O each has in
+    /// flight and unregistering its rooted promise box.
+    ///
+    /// Every driver that abandons a loop with futures still pending must call this *while the
+    /// JSContext is alive*: left in place, the boxes outlive the engine and are freed during
+    /// thread-local teardown, where `finishRoots` traces memory that is already gone.
+    pub fn cancel_pending_futures(&self) {
+        js::promise::cancel_pending_futures_for(self.loop_id);
     }
 
     /// Request that this loop's [`run_to_completion`] return after the
@@ -625,31 +588,17 @@ impl EventLoop {
 /// Request that the active loop's [`run_to_completion`] return after the
 /// current step completes, even if tasks, timers, or futures remain.
 ///
-/// WPT mode calls this from the test's completion callback (`done()`): a finished WPT test may leave
-/// a live `setInterval` running, which would otherwise keep the loop alive and hang the process.
-/// The request targets the loop running the caller's JS; with no active loop it is dropped: there
-/// is nothing it could meaningfully stop, and a thread-global flag would instead stop whichever
-/// unrelated loop stepped next on this thread.
+/// WPT mode calls this from a test's `done()`, since a finished test may leave a `setInterval`
+/// running that would keep the loop alive and hang the process. It targets the loop running the
+/// caller's JS and is dropped when there is none: nothing to stop, and a thread-global flag would
+/// instead stop whichever unrelated loop stepped next.
 pub fn request_stop() {
     with_active_event_loop(|el| el.request_stop());
 }
 
-/// Run the event loop to completion asynchronously.
+/// Run the event loop until it has nothing left: no tasks, no interest, no futures in flight.
 ///
-/// This is the single, platform-agnostic event loop driver. On each
-/// iteration it creates a fresh [`RootScope`] from `raw_cx` (dropping it
-/// before any await point), calls [`EventLoop::step`], and acts on the
-/// outcome:
-///
-/// - [`StepOutcome::Done`] → return.
-/// - [`StepOutcome::Progressed`] → immediately loop again.
-/// - [`StepOutcome::Idle`] → race the next timer deadline against a
-///   notification from the event loop. The `sleep` parameter abstracts
-///   the platform timer: on native it is a `thread::sleep`-based future;
-///   on wasm32 it is `wasi:clocks/monotonic-clock.wait-for`.
-///
-/// The [`CURRENT_EVENT_LOOP`] thread-local is set during each `step()`
-/// call and cleared before any await.
+/// [`run_until`] with a stop condition that never fires.
 ///
 /// # Safety
 ///
@@ -666,18 +615,57 @@ pub async unsafe fn run_to_completion<S, F>(
     unsafe { run_until(raw_cx, event_loop, sleep, |_| false).await }
 }
 
-/// Like [`run_to_completion`], but additionally returns once `should_stop`
-/// reports true — checked with the step's rooting scope after every step —
-/// leaving the loop's remaining work (tasks, timers, futures, interest) in
-/// place for a later driver.
+/// The prefix [`trace_idle`] writes before its tag.
+pub const IDLE_TRACE: &str = "starling: event loop idle ";
+
+/// Report that the loop identified by `tag` is about to become idle.
 ///
-/// The serve path uses this to send a response as soon as the `fetch`
-/// event's `respondWith` promise settles, driving `waitUntil` work and body
-/// pumps afterwards, concurrently with (and beyond) the response write.
+/// Mostly useful for testing, where the test harness can use the output as a signal that it can
+/// start sending another request which must be handled by the same instance—which only happens
+/// if that instance is idle.
+///
+/// Must be called immediately before the `await` that hands control back to the host, to minimize
+/// the delay between printing the message and the instance becoming eligible for reuse.
+///
+/// Off unless `STARLING_TRACE_IDLE` is set, read once because this sits in the loop's hot path.
+pub fn trace_idle(tag: impl std::fmt::Display) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("STARLING_TRACE_IDLE").is_some()) {
+        eprintln!("{IDLE_TRACE}{tag}");
+    }
+}
+
+/// Drive `event_loop` until `evaluation`'s content script has finished evaluating, including
+/// awaited (and only those) async functions and promises.
 ///
 /// # Safety
 ///
-/// Same contract as [`run_to_completion`].
+/// `raw_cx` must be a valid JSContext pointer that remains valid for the
+/// lifetime of this future (i.e. the `Runtime` must not be dropped).
+pub async unsafe fn run_until_evaluated<S, F>(
+    raw_cx: *mut js::native::RawJSContext,
+    event_loop: &EventLoop,
+    sleep: S,
+    evaluation: &crate::ScriptEvaluation,
+) where
+    S: Fn(Duration) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    unsafe {
+        run_until(raw_cx, event_loop, sleep, |scope| {
+            evaluation.is_finished(scope)
+        })
+        .await
+    }
+}
+
+/// Runs the event loop in an async loop, calling `should_stop` each turn, and returns when it
+/// returns true.
+///
+/// # Safety
+///
+/// `raw_cx` must be a valid JSContext pointer that remains valid for the
+/// lifetime of this future (i.e. the `Runtime` must not be dropped).
 pub async unsafe fn run_until<S, F>(
     raw_cx: *mut js::native::RawJSContext,
     event_loop: &EventLoop,
@@ -696,14 +684,10 @@ pub async unsafe fn run_until<S, F>(
         let caller_stop = should_stop(&scope);
         drop(scope);
 
-        // A step may request the loop end — e.g. WPT mode once a test's completion callback fired —
-        // even though a leftover `setInterval` keeps `is_alive` true. Consume the request and return.
-        if event_loop.stop_requested.replace(false) {
-            // Drop this loop's still-pending futures while the JSContext is alive: each cancels its
-            // in-flight host I/O and unregisters its rooted promise box, so engine teardown's
-            // `finishRoots` doesn't trace a freed box (a shutdown crash for a test stopped with a
-            // cancelled/disturbed body read still in flight).
-            js::promise::cancel_pending_futures_for(event_loop.loop_id);
+        // A step may request the loop end, e.g. in WPT mode once a test's completion callback
+        // fired even though there are still async tasks, such as timers, pending.
+        if event_loop.stop_requested.get() {
+            event_loop.cancel_pending_futures();
             return;
         }
 
@@ -774,6 +758,8 @@ pub async unsafe fn run_until<S, F>(
                     }
                 });
 
+                // Immediately before the await below, so nothing of this loop's runs in between.
+                trace_idle(format_args!("loop:{}", event_loop.loop_id));
                 // Race: first one to complete wins.
                 futures_lite::future::or(
                     futures_lite::future::or(timer_wait, notified),
@@ -811,44 +797,28 @@ fn handle_and_clear_exception(scope: &Scope<'_>) {
 }
 
 impl EventLoop {
-    /// Advance the event loop by one step.
-    ///
-    /// A single step:
-    /// 1. Asserts that the microtask queue is empty.
-    /// 2. Asserts that there are no pending JS exceptions.
-    /// 3. Advances timers.
-    /// 4. Runs all currently-ready tasks (draining microtasks and checking
-    ///    for exceptions after each).
-    ///
-    /// Returns a [`StepOutcome`] telling the driver what to do next.
+    /// Advance the event loop by one step: advance timers, then run the tasks that are ready,
+    /// draining microtasks and checking for exceptions after each. The [`StepOutcome`] tells the
+    /// driver what to do next.
     pub fn step(&self, scope: &Scope<'_>) -> StepOutcome {
-        // 1. Assert that there are no pending microtasks.
         debug_assert!(
             !js::jobs::has_pending_jobs(scope),
             "Pending microtask detected"
         );
-
-        // 2. Assert that there are no pending exceptions.
         debug_assert!(
             !js::exception::is_pending(scope),
             "Pending JS exception detected"
         );
-
-        // 3. Advance timers.
         self.advance_timers();
 
-        // 4. Run the tasks that are ready, one batch per step. A task that
-        //    becomes ready while the batch runs (a zero-delay interval re-queueing
-        //    itself, a timer expiring during a long handler) runs on the next step:
-        //    re-popping inside this loop would let a perpetually-ready task pin the
-        //    loop inside a single `step` forever, starving the driver's await branch
-        //    (where async-promise futures are polled and the platform reactor turns).
+        // One batch per step: a task that becomes ready while the batch runs — a zero-delay
+        // interval re-queueing itself, a timer expiring during a long handler — waits for the
+        // next one. Re-popping here would let a perpetually-ready task pin the loop inside a
+        // single `step`, starving the driver's await branch, where async-promise futures are
+        // polled and the platform reactor turns.
         //
-        //    Dispatch order: ready non-timer tasks first (in allocation order),
-        //    then expired timers by deadline, with allocation order breaking deadline
-        //    ties.
-        //
-        //    The batch buffer is reused across steps to keep this path allocation-free.
+        // Ready non-timer tasks go first in allocation order, then expired timers by deadline,
+        // ties broken the same way. The batch buffer is reused to keep the path allocation-free.
         let mut batch = self.batch_buf.take();
         batch.extend(
             self.tasks
@@ -901,15 +871,14 @@ impl EventLoop {
 
     /// Trace all live tasks for GC.
     ///
-    /// Called by SpiderMonkey's GC through the extra-roots-tracer
-    /// mechanism. Each task's [`Task::trace`] method is invoked so that
-    /// any `Heap<*mut JSObject>` fields are properly marked.
+    /// Called by SpiderMonkey's GC through the extra-roots-tracer mechanism, running every task's
+    /// [`Task::trace`] so their `Heap<*mut JSObject>` fields are marked.
     ///
     /// # Safety
     ///
-    /// `trc` must be a valid `JSTracer` pointer provided by SpiderMonkey.
-    /// GC only runs at JS allocation points, and no `tasks` borrow is ever
-    /// held across a call into JS, so the borrow here cannot conflict.
+    /// `trc` must be a valid `JSTracer` pointer provided by SpiderMonkey. GC only runs at JS
+    /// allocation points, and no `tasks` borrow is held across a call into JS, so the borrow here
+    /// cannot conflict.
     pub unsafe fn trace(&self, trc: *mut JSTracer) {
         for entry in self.tasks.borrow().iter() {
             entry.task.trace(trc);

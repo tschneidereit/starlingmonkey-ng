@@ -34,27 +34,101 @@ use web_streams::readable::readable_stream::ReadableStream;
 
 use crate::incoming_body::HostBackedBodyOwner;
 
+/// A running tally of how outgoing bodies reached the transport.
+///
+/// Whether a host body is handed to the wire whole or pumped through JS chunk by chunk is
+/// deliberately not observable from content — both deliver the same bytes, leave the donor stream
+/// locked and disturbed, and read only internally. That also means losing the shortcut is invisible:
+/// every byte would start travelling through JS and nothing would fail. These counters are the one
+/// place that difference is visible, so a test can hold the choice in place.
+///
+/// Whether an in-memory body's owner let go of its buffer on the way out is invisible the same way:
+/// the same bytes reach the wire either way, and only how long the buffer outlives them differs.
+pub mod paths_taken {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Bodies handed to the transport whole, host body and all.
+    pub static SHORTCUT: AtomicUsize = AtomicUsize::new(0);
+    /// Bodies pumped through JS, chunk by chunk.
+    pub static PUMPED: AtomicUsize = AtomicUsize::new(0);
+    /// Byte bodies handed over as the only reference left to their buffer.
+    pub static SOLE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    /// Byte bodies whose owner still held a reference of its own when it handed them over.
+    pub static SHARED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    /// `(shortcut, pumped)` since the last [`reset`].
+    pub fn counts() -> (usize, usize) {
+        (
+            SHORTCUT.load(Ordering::Relaxed),
+            PUMPED.load(Ordering::Relaxed),
+        )
+    }
+
+    /// `(sole, shared)` since the last [`reset`], counting non-empty byte bodies only.
+    pub fn byte_counts() -> (usize, usize) {
+        (
+            SOLE_BYTES.load(Ordering::Relaxed),
+            SHARED_BYTES.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Start counting again. Callers that compare counts must not run concurrently with other
+    /// traffic on the same process.
+    pub fn reset() {
+        SHORTCUT.store(0, Ordering::Relaxed);
+        PUMPED.store(0, Ordering::Relaxed);
+        SOLE_BYTES.store(0, Ordering::Relaxed);
+        SHARED_BYTES.store(0, Ordering::Relaxed);
+    }
+
+    pub(super) fn note(body: &platform::http::OutgoingBody) {
+        match body {
+            platform::http::OutgoingBody::Host(_) => &SHORTCUT,
+            platform::http::OutgoingBody::Stream(_) => &PUMPED,
+            // Empty ones sit out: there is no buffer to hold on to, and `Bytes::is_unique` answers
+            // for the static one an empty body carries as though it were shared.
+            platform::http::OutgoingBody::Bytes(bytes) if !bytes.is_empty() => {
+                if bytes.is_unique() {
+                    &SOLE_BYTES
+                } else {
+                    &SHARED_BYTES
+                }
+            }
+            // Neither route, and nothing held: an empty body or none at all.
+            _ => return,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// The body to send on the wire for a host-backed owner.
 ///
-/// An in-memory byte source is sent as-is; a body still unread on the host is handed straight
-/// through without materializing a stream first); a `ReadableStream` body is handed to the host
-/// by [`outgoing_body_from_stream`]; otherwise there is no
-/// body.
-pub(crate) fn outgoing_body(
+/// With `start_reading` false a `ReadableStream` body is canceled instead of being read, which
+/// would call its underlying source's `pull()` method.
+pub(crate) fn consume_outgoing_body(
     scope: &Scope<'_>,
     object: &impl HostBackedBodyOwner,
-) -> platform::http::OutgoingBody {
-    if let Some(crate::algorithms::BodySource::Bytes(bytes)) =
-        object.body_record().map(|body| body.source)
-    {
-        return platform::http::OutgoingBody::Bytes(bytes);
+    start_reading: bool,
+) -> OutgoingBody {
+    let body = outgoing_body_inner(scope, object, start_reading);
+    paths_taken::note(&body);
+    body
+}
+
+fn outgoing_body_inner(
+    scope: &Scope<'_>,
+    object: &impl HostBackedBodyOwner,
+    start_reading: bool,
+) -> OutgoingBody {
+    if let Some(bytes) = object.take_byte_source() {
+        return OutgoingBody::Bytes(bytes);
     }
     if let Some(host_body) = object.take_host_body() {
-        return platform::http::OutgoingBody::Host(host_body);
+        return OutgoingBody::Host(host_body);
     }
     match object.body_stream(scope) {
-        Some(stream) => outgoing_body_from_stream(scope, stream),
-        None => platform::http::OutgoingBody::Bytes(bytes::Bytes::new()),
+        Some(stream) => outgoing_body_from_stream(scope, stream, start_reading),
+        None => OutgoingBody::Bytes(bytes::Bytes::new()),
     }
 }
 
@@ -81,8 +155,9 @@ impl OutgoingBodyPump {
 
 /// Turn a body's materialized `ReadableStream` into a [`OutgoingBody`].
 ///
-/// A host body that has never been read is handed straight through, anything
-/// else is processed using a `DefaultReader`.
+/// A host body that has never been read is handed straight through; anything
+/// else is pumped through a `DefaultReader`, or cancelled unsent where
+/// `start_reading` is false.
 ///
 /// By this point the request/response is committed to being sent, so a failure
 /// to start reading cannot be thrown to the caller. It becomes a body that
@@ -90,6 +165,7 @@ impl OutgoingBodyPump {
 pub(crate) fn outgoing_body_from_stream(
     scope: &Scope<'_>,
     stream: ReadableStream<'_>,
+    start_reading: bool,
 ) -> OutgoingBody {
     // The shortcut refuses once the body has actually been read from: a chunk may sit in a
     // buffer the shortcut cannot see (a transform's queue), and bypassing the stream would
@@ -109,6 +185,16 @@ pub(crate) fn outgoing_body_from_stream(
                 .lock_and_disturb(scope)
                 .expect("If this happens, there's a bug in the runtime");
             OutgoingBody::Host(host_body)
+        }
+        // Cancelled rather than left alone: nothing will read this stream now, and cancelling is
+        // what makes it release whatever it draws from — an upstream response feeding a transform,
+        // say. It runs the handler's `cancel()`, not its `pull()`, so no content is produced.
+        None if !start_reading => {
+            let promise = stream.cancel_internal(scope, HandleValue::undefined());
+            // Rejects if `cancel()` throws. The response carries no body either way and there is no
+            // caller left to tell, so mark it handled rather than announcing an unhandled rejection.
+            let _ = promise.set_any_is_handled(scope);
+            OutgoingBody::Consumed
         }
         None => pump_body_from_stream(scope, stream).unwrap_or_else(|_| {
             // The pump could not be started, so the exception it left pending has no caller to
@@ -228,6 +314,9 @@ fn spawn_send(scope: &Scope<'_>, state: &OutgoingBodyPump<'_>, item: Send) {
     let _ = promise.set_any_is_handled(scope);
     let state = RootedHeap::new(*state);
     let is_chunk = matches!(item, Send::Chunk(_));
+    // Ensure the event loop stays alive until the receiver accepts the chunk or error.
+    let interest =
+        core_runtime::event_loop::with_active_event_loop(|el| el.acquire_interest_handle());
     let future = async move {
         let mut sender = sender;
         let accepted = match item {
@@ -238,15 +327,33 @@ fn spawn_send(scope: &Scope<'_>, state: &OutgoingBodyPump<'_>, item: Send) {
             }
         };
         PromiseOutcome::Resolve(Box::new(move |scope: &Scope<'_>| {
-            // For an accepted chunk, restore the sender and read the next
-            // one. A refused chunk means the receiver is gone (the peer
-            // stopped reading the body after a client disconnect) so the
-            // pump stops. For an error, the sender drops here either way
-            // (closing the channel after the queued error).
-            if is_chunk && accepted {
+            drop(interest);
+            if is_chunk {
                 let state = state.get(scope);
-                state.data_mut().sender = Some(sender);
-                let _ = read_next(scope, &state);
+                if accepted {
+                    // For an accepted chunk, restore the sender and read the next
+                    // one.
+                    state.data_mut().sender = Some(sender);
+                    let _ = read_next(scope, &state);
+                } else {
+                    // A refused chunk means the receiver is gone: the peer stopped reading the
+                    // body, typically because the client disconnected. Cancel the stream, and
+                    // transitively the underlying source, so it can stop producing chunks.
+                    let reader = state.data().reader.get(scope);
+                    match reader.cancel(scope, None) {
+                        // Cancelling rejects if the underlying source's `cancel()` throws.
+                        // There is no caller left to report that to: the body is already
+                        // undeliverable. Mark it handled so it is not announced as an unhandled
+                        // rejection on top.
+                        Ok(promise) => {
+                            let _ = promise.set_any_is_handled(scope);
+                        }
+                        Err(_) => js::exception::report_and_clear(
+                            scope,
+                            "cancelling an abandoned response body",
+                        ),
+                    }
+                }
             }
             Ok(HandleValue::undefined())
         }))

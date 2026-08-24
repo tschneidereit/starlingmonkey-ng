@@ -29,7 +29,7 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
         global.handle(),
         c"evalScript",
         Some(eval_script_native),
-        1,
+        2,
         0,
     )
     .expect("failed to define evalScript");
@@ -53,11 +53,14 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
     .expect("failed to define __wptDone");
 }
 
-/// JSNative implementation of `evalScript(source)`.
+/// JSNative implementation of `evalScript(source, url)`.
 ///
 /// Evaluates the given string as a script in a non-syntactic scope, making
 /// top-level `let`/`const` bindings visible to subsequent calls. This is
 /// how the WPT harness loads `META: script=...` dependencies.
+///
+/// `url` names the script in stack traces and error messages; it is what tells
+/// a failure in a META dependency apart from one in the test itself.
 unsafe extern "C" fn eval_script_native(
     raw_cx: *mut RawJSContext,
     argc: u32,
@@ -77,8 +80,22 @@ unsafe extern "C" fn eval_script_native(
             Err(_) => return false,
         };
 
+    // The harness passes the script's URL; fall back to the function's own name when it is absent
+    // (a hand-written `evalScript(source)` call). The argument count is what says "absent": the
+    // conversion is WebIDL's DOMString one, which turns a missing argument into the *string*
+    // "undefined" rather than failing, and traces attributed to a script called "undefined" read
+    // as corrupted rather than as an eval'd script.
+    let filename = if argc >= 2 {
+        match String::from_jsval(&scope, Handle::from_raw(args.get(1)), ()) {
+            Ok(filename) => filename,
+            Err(_) => return false,
+        }
+    } else {
+        "evalScript".to_string()
+    };
+
     // Evaluate in non-syntactic scope.
-    match js::compile::evaluate_non_syntactic(&scope, &source, "evalScript", 1) {
+    match js::compile::evaluate_non_syntactic(&scope, &source, &filename, 1) {
         Ok(rval) => {
             args.rval().set(rval.get());
             true

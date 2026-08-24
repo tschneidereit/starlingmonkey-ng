@@ -11,11 +11,15 @@ edition.workspace = true
 test = false
 
 [dependencies]
-libstarling.workspace = true
 core-runtime.workspace = true
 js.workspace = true
 url.workspace = true
 web-globals.workspace = true
+
+[dev-dependencies]
+# Only the integration tests need the full runtime. A regular dependency would be a cycle:
+# `libstarling` registers these globals for `--wpt-mode`. Cargo allows the dev-dependency cycle.
+libstarling.workspace = true
 
 [lints]
 workspace = true

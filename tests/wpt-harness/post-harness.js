@@ -12,8 +12,12 @@
 // Tell testharness.js we'll call done() explicitly when ready.
 setup({ explicit_done: true });
 
-// Register the completion callback that fires after done() is called.
-// This handler serializes the test results as JSON to stdout.
+// Register the completion callback that fires after done() is called. This handler serializes the
+// test results as JSON and hands them to `__wptReportResults`, the sink the running mode installed:
+// command mode's (from pre-harness.js) prints them for the runner to read off stdout, serve mode's
+// (from wpt-server.js) delivers them into the response carrying this test. Calling it
+// unconditionally keeps mode knowledge out of here — and makes a missing sink a loud TypeError
+// rather than results quietly going nowhere.
 add_completion_callback(function(tests, harness_status, asserts) {
   let results = tests.map(function(t) {
     return {
@@ -22,10 +26,5 @@ add_completion_callback(function(tests, harness_status, asserts) {
       message: t.message || null
     };
   });
-  // Print results as JSON — the orchestrator reads this from stdout.
-  console.log("WPT_RESULTS_JSON:" + JSON.stringify(results));
-  // Stop the event loop now that results are out: a finished test may have left a live setInterval
-  // (or other pending timer) running, which would otherwise keep the process alive until the
-  // harness timeout.
-  if (typeof __wptDone === "function") __wptDone();
+  globalThis.__wptReportResults(JSON.stringify(results));
 });

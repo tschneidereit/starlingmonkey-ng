@@ -13,9 +13,12 @@
 //! whose platform-specific items are re-exported here.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use crate::http_native::IncomingBody;
+pub use crate::http_native::{incoming_body_channel, IncomingBody, IncomingBodySender};
 #[cfg(target_arch = "wasm32")]
-pub use crate::http_wasm::IncomingBody;
+pub use crate::http_wasm::{
+    build_outgoing_response, read_incoming_request, AbandonBody, BodyDone, BodySendOutcome,
+    IncomingBody,
+};
 
 /// An outgoing HTTP request.
 pub struct Request {
@@ -33,6 +36,73 @@ pub struct Request {
     pub body: OutgoingBody,
 }
 
+/// A body chunk a [`Remaining`] budget can trim.
+pub trait BodyChunk {
+    /// How many bytes the chunk carries.
+    fn byte_len(&self) -> usize;
+    /// Shorten the chunk to its first `len` bytes.
+    fn truncate_to(&mut self, len: usize);
+}
+
+impl BodyChunk for bytes::Bytes {
+    fn byte_len(&self) -> usize {
+        self.len()
+    }
+
+    fn truncate_to(&mut self, len: usize) {
+        self.truncate(len);
+    }
+}
+
+impl BodyChunk for Vec<u8> {
+    fn byte_len(&self) -> usize {
+        self.len()
+    }
+
+    fn truncate_to(&mut self, len: usize) {
+        self.truncate(len);
+    }
+}
+
+/// The content a length-framed body may still send, held by whichever transport writes that body.
+/// A response is framed by the `Content-Length` it declares, so content past that never goes on
+/// the wire, and content short of it leaves the message unfinished.
+///
+/// `None` where no length was declared.
+pub struct Remaining(Option<u64>);
+
+impl Remaining {
+    pub fn new(declared_length: Option<u64>) -> Self {
+        Remaining(declared_length)
+    }
+
+    /// Trim `chunk` so that it doesn't cause the total body length to exceed the declared length.
+    /// `None` once no bytes can be sent anymore at all.
+    pub fn take<T: BodyChunk>(&mut self, mut chunk: T) -> Option<T> {
+        let Some(remaining) = self.0.as_mut() else {
+            return Some(chunk);
+        };
+        if *remaining == 0 {
+            return None;
+        }
+        let taken = chunk
+            .byte_len()
+            .min(usize::try_from(*remaining).unwrap_or(usize::MAX));
+        *remaining -= taken as u64;
+        chunk.truncate_to(taken);
+        Some(chunk)
+    }
+
+    /// Whether the body sent so far is shorter than the declared length.
+    pub fn is_unfilled(&self) -> bool {
+        self.0.is_some_and(|remaining| remaining > 0)
+    }
+}
+
+/// The transport's end of a streamed outgoing body: the receiving half of [`body_channel`], named
+/// so a transport can hold one without naming the channel crate itself.
+pub type OutgoingBodyReceiver = futures_channel::mpsc::Receiver<Result<Vec<u8>, Error>>;
+
 /// An outgoing request body: an in-memory byte sequence, a stream of chunks fed
 /// from elsewhere (such as a JS `ReadableStream` pumped through a channel), or
 /// a host response body handed straight through.
@@ -42,14 +112,15 @@ pub enum OutgoingBody {
     Bytes(bytes::Bytes),
     /// Chunks delivered on a bounded channel; a final `Err` aborts the body, and
     /// the channel closing ends it. Created via [`body_channel`].
-    Stream(futures_channel::mpsc::Receiver<Result<Vec<u8>, Error>>),
+    Stream(OutgoingBodyReceiver),
     /// A host response body handed straight to the outgoing request. Used for
     /// incoming bodies that are directly used as outgoing ones, or when
     /// piped through an identity `TransformStream`. In that case, handling of the
     /// body is unobservable by JS and can take a shortcut.
     Host(IncomingBody),
-    /// A stream body already consumed by a previous send (a redirect cannot
-    /// replay it).
+    /// No body to send, because none is left or none was ever produced: a stream
+    /// body consumed by a previous send (a redirect cannot replay it), or one
+    /// deliberately not produced because nobody would read it.
     Consumed,
 }
 

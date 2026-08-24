@@ -8,27 +8,44 @@ edition.workspace = true
 
 [lib]
 # No unit tests; skip building the (SpiderMonkey-sized) lib test harness binary.
+# The integration tests in `tests/` link the lib and are unaffected.
 test = false
 
 [features]
 debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs", "fetch-event/debugmozjs"]
 
 [dependencies]
+bytes.workspace = true
 core-runtime.workspace = true
+event-listener.workspace = true
+futures-lite.workspace = true
+futures-util.workspace = true
+http.workspace = true
 js.workspace = true
+platform.workspace = true
 fetch-event.workspace = true
 url.workspace = true
 web-fetch.workspace = true
 web-globals.workspace = true
+wpt-support.workspace = true
 web-streams.workspace = true
 web-url.workspace = true
 cpp-builtins.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-channel.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 tokio.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasip3.workspace = true
+
+[dev-dependencies]
+futures-channel.workspace = true
+serve-test-support.workspace = true
 
 [lints]
 workspace = true

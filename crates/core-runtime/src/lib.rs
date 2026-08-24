@@ -54,30 +54,116 @@ pub fn run(
     }
 }
 
+/// The content script's source and the filename to report it under: the `-e` string when there is
+/// one, otherwise the file at `script_path`.
+///
+/// Public because the serve path re-evaluates it: with `--serve-isolated` each request gets a
+/// fresh global, which needs the script run in it to register a handler.
+pub fn content_script(config: &config::RuntimeConfig) -> Result<(String, String), String> {
+    if let Some(ref eval) = config.eval_script {
+        return Ok((eval.clone(), "<eval>".to_string()));
+    }
+    let path = &config.script_path;
+    let source =
+        std::fs::read_to_string(path).map_err(|e| format!("Error reading script '{path}': {e}"))?;
+    Ok((source, path.clone()))
+}
+
 /// Initialize the runtime and evaluate the script (the synchronous portion of an
 /// invocation), draining initial microtasks. Returns the runtime and its
 /// invocation, with the invocation **unregistered** from the GC tracer: it is
 /// registered only for the eval phase here, then unregistered before being moved
 /// out (the registry holds a raw pointer that the move would invalidate). The
 /// caller re-registers at the final location, drives the loop, then unregisters.
-/// Shared by [`setup`] and [`setup_for_serve`].
+/// Evaluate a content script into `scope` — as a module or as a classic script, per `module_mode`
+/// — with `event_loop` active, and drain the microtasks it queued.
+///
+/// Shared by the process-wide startup path and the per-request one, since `--serve-isolated`
+/// re-evaluates the same script into a fresh global for every request. What follows the evaluation
+/// has to be the same either way: microtasks drained even when no event-loop task is queued (a
+/// promise reaction the script's top level queued still has to run), with the loop kept active
+/// while they drain, since a microtask may itself call `setTimeout`.
+///
+/// Returns the module's evaluation promise while it is still pending — a module with a top-level
+/// `await` has not finished running, and whatever it registers is not registered yet. A classic
+/// script, and a module that completed synchronously, return `None`: there is nothing left to
+/// wait for. See [`ScriptEvaluation`].
+///
+/// # Safety
+///
+/// `scope`'s realm must be entered and, in module mode, the module loader must have been
+/// initialized by [`Runtime::init`].
+pub unsafe fn evaluate_content_script(
+    scope: &js::gc::scope::Scope<'_>,
+    event_loop: &event_loop::EventLoop,
+    source: &str,
+    filename: &str,
+    module_mode: bool,
+) -> Result<ScriptEvaluation, String> {
+    let eval_result = event_loop::with_event_loop(event_loop, |_| {
+        if module_mode {
+            // SAFETY: the caller guarantees the module loader was initialized.
+            unsafe { module::evaluate_module(scope, source, filename) }
+        } else {
+            js::compile::evaluate_with_filename(scope, source, filename, 1)
+        }
+    });
+
+    let Ok(value) = eval_result else {
+        let exn = ExnThrown::capture(scope);
+        return Err(format!("Script evaluation failed with error {exn}"));
+    };
+    if exception::is_pending(scope) {
+        let exn = ExnThrown::capture(scope);
+        return Err(format!("Script evaluation failed with error {exn}"));
+    }
+
+    // `ModuleEvaluate` hands back the evaluation promise, which a top-level `await` leaves
+    // pending. A classic script's completion value is whatever it evaluated to, and is not one.
+    let evaluation = js::Object::from_value(scope, value)
+        .ok()
+        .and_then(|object| object.cast::<js::Promise>().ok());
+
+    event_loop::with_event_loop(event_loop, |_| {
+        event_loop::run_microtasks(scope);
+    });
+
+    // Read after the drain: the microtasks above are often exactly what settles it.
+    let pending = evaluation
+        .filter(|promise| promise.is_pending())
+        .map(js::gc::handle::RootedHeap::new);
+    Ok(ScriptEvaluation { pending })
+}
+
+/// What a content script left running: its evaluation promise, if a top-level `await` means it is
+/// still going. [`ScriptEvaluation::is_finished`] is how a driver tells that startup is over —
+/// the script's own work, and not the timers it may have started along the way.
+pub struct ScriptEvaluation {
+    pending: Option<js::gc::handle::RootedHeap<js::promise::Promise>>,
+}
+
+impl ScriptEvaluation {
+    /// Whether the script has finished evaluating.
+    pub fn is_finished(&self, scope: &js::gc::scope::Scope<'_>) -> bool {
+        self.pending
+            .as_ref()
+            .is_none_or(|promise| !promise.get(scope).is_pending())
+    }
+}
+
 fn init_and_eval(
     config: config::RuntimeConfig,
-) -> Result<(std::rc::Rc<Runtime>, invocation::InvocationState), String> {
+) -> Result<
+    (
+        std::rc::Rc<Runtime>,
+        invocation::InvocationState,
+        ScriptEvaluation,
+    ),
+    String,
+> {
     let runtime = Runtime::init(&config);
 
-    let (source, filename) = if let Some(ref eval) = config.eval_script {
-        (eval.clone(), "<eval>".to_string())
-    } else {
-        let path = &config.script_path;
-        let source = match std::fs::read_to_string(path) {
-            Ok(source) => source,
-            Err(e) => {
-                return Err(format!("Error reading script '{}': {}", path, e));
-            }
-        };
-        (source, path.clone())
-    };
+    let (source, filename) = content_script(&config)?;
 
     let invocation = invocation::InvocationState::new();
 
@@ -86,38 +172,31 @@ fn init_and_eval(
     // freed or moved-from slot.
     unsafe { runtime.register_invocation(&invocation) };
 
-    {
-        let scope = runtime.default_global();
-
-        let eval_result = event_loop::with_event_loop(invocation.event_loop(), |_| {
-            if config.module_mode() {
-                // SAFETY: the module loader was initialized by `Runtime::init`.
-                unsafe { module::evaluate_module(&scope, &source, &filename) }
-            } else {
-                js::compile::evaluate_with_filename(&scope, &source, &filename, 1)
-            }
-        });
-
-        if eval_result.is_err() || exception::is_pending(&scope) {
+    let scope = runtime.default_global();
+    // SAFETY: the default global's realm is entered, and `Runtime::init` above initialized the
+    // module loader.
+    let evaluated = unsafe {
+        evaluate_content_script(
+            &scope,
+            invocation.event_loop(),
+            &source,
+            &filename,
+            config.module_mode(),
+        )
+    };
+    let evaluation = match evaluated {
+        Ok(evaluation) => evaluation,
+        Err(message) => {
             runtime.unregister_invocation(&invocation);
-            let exn = ExnThrown::capture(&scope);
-            return Err(format!("Script evaluation failed with error {exn}"));
+            return Err(message);
         }
-
-        // Always drain microtasks first — promise reactions (e.g. from
-        // `Promise.resolve().then(...)`) must run even if no event-loop
-        // tasks are queued. Keep the event loop active while draining: a
-        // microtask may itself call `setTimeout`/`queueMicrotask`, which need
-        // the current event loop set.
-        event_loop::with_event_loop(invocation.event_loop(), |_| {
-            event_loop::run_microtasks(&scope);
-        });
-    }
+    };
+    drop(scope);
 
     // Unregister before moving `invocation` out: the move invalidates the raw
     // pointer the registry holds. The caller re-registers at the final address.
     runtime.unregister_invocation(&invocation);
-    Ok((runtime, invocation))
+    Ok((runtime, invocation, evaluation))
 }
 
 /// Perform the synchronous portion of a runtime invocation: initialize the
@@ -139,7 +218,9 @@ fn init_and_eval(
 pub fn setup(
     config: config::RuntimeConfig,
 ) -> Result<Option<(std::rc::Rc<Runtime>, invocation::InvocationState)>, String> {
-    let (runtime, invocation) = init_and_eval(config)?;
+    // Command mode drives the loop to completion, so the script's evaluation needs no separate
+    // wait: its promise is one more thing the loop settles on the way.
+    let (runtime, invocation, _evaluation) = init_and_eval(config)?;
     if !invocation.event_loop().is_alive() {
         return Ok(None);
     }
@@ -153,7 +234,14 @@ pub fn setup(
 /// serving, then keep the runtime alive for the accept loop.
 pub fn setup_for_serve(
     config: config::RuntimeConfig,
-) -> Result<(std::rc::Rc<Runtime>, invocation::InvocationState), String> {
+) -> Result<
+    (
+        std::rc::Rc<Runtime>,
+        invocation::InvocationState,
+        ScriptEvaluation,
+    ),
+    String,
+> {
     init_and_eval(config)
 }
 

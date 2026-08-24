@@ -56,6 +56,41 @@ pub fn register_global_initializer(init: GlobalInitFn) {
     });
 }
 
+/// Callback type for re-establishing state that cannot survive a snapshot.
+type ResumeFixupFn = fn();
+
+thread_local! {
+    static RESUME_FIXUPS: RefCell<Vec<ResumeFixupFn>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Register a function to run when an instance resumes from a [Wizer](https://github.com/bytecodealliance/wizer)
+/// snapshot, to re-establish state the snapshot could not carry.
+///
+/// Some builtin state is bound to the process that took the snapshot rather than to the one running
+/// — a monotonic-clock baseline, a random seed, a cached timezone. The builtin holding it is the
+/// only thing that knows, so it registers the repair here instead of the snapshot mechanism
+/// enumerating builtins it should not have to know about (which is also what keeps this crate from
+/// depending on the builtins crates).
+///
+/// Registration is idempotent. [`run_resume_fixups`] runs them.
+pub fn register_resume_fixup(fixup: ResumeFixupFn) {
+    RESUME_FIXUPS.with(|fixups| {
+        let mut fixups = fixups.borrow_mut();
+        if !fixups.contains(&fixup) {
+            fixups.push(fixup);
+        }
+    });
+}
+
+/// Run every fixup registered with [`register_resume_fixup`]. Called once by a resumed instance,
+/// before it does any work that would observe the state being repaired.
+pub fn run_resume_fixups() {
+    let fixups = RESUME_FIXUPS.with(|fixups| fixups.borrow().clone());
+    for fixup in fixups {
+        fixup();
+    }
+}
+
 /// Clear all registered global initializers (used between tests that need
 /// disjoint initializer sets).
 pub fn clear_global_initializers() {

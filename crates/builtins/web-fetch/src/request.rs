@@ -681,6 +681,10 @@ impl Request {
         // (disturbs) the input's body.
         // Done last, so a construction that threw above leaves the input untouched.
         if let Some(input_request) = input_request {
+            // Emptied as well as flagged: the body record copied at step 6 shares the input's
+            // bytes, so the input's own handle on them holds the buffer for a body it can no
+            // longer read.
+            let _ = input_request.take_byte_source();
             if let Some(body) = input_request.data_mut().body.as_mut() {
                 body.source_disturbed = true;
             }
@@ -689,6 +693,12 @@ impl Request {
     }
 
     /// Build a `Request` for an incoming server request from its parsed parts.
+    ///
+    /// This is the "creating a `Request` object" of
+    /// [Create Fetch Event and Dispatch](https://w3c.github.io/ServiceWorker/#create-fetch-event-and-dispatch)
+    /// step 17.4.3, which supplies the `Headers` guard ("immutable", set below) and the `signal`,
+    /// which is that step's _abortController_'s signal, which the caller owns so it can signal
+    /// abort at step 17.4.20.
     pub fn from_incoming(
         scope: &Scope<'_>,
         method: &str,
@@ -696,6 +706,7 @@ impl Request {
         headers: HeaderList,
         body: Option<platform::http::IncomingBody>,
         length: Option<u64>,
+        signal: AbortSignal,
     ) -> Result<Self, ExnThrown> {
         let parsed = parse_url(url, None)
             .ok_or_else(|| throw_type_error(scope, c"invalid incoming request URL"))?;
@@ -711,10 +722,6 @@ impl Request {
             source_disturbed: false,
         });
         let headers = Headers::from_list(scope, headers, Guard::Immutable)?;
-        // Every Request has a non-null `signal` (the getter and `clone()` rely on it). The serve
-        // path doesn't abort requests yet, so this one simply never fires; it mirrors the
-        // constructor's `signal: null` path (a dependent signal from « »).
-        let signal = create_dependent_abort_signal(scope, &[])?;
         Ok(Self {
             request: record,
             body: body_record,
@@ -1007,12 +1014,13 @@ impl Request<'_> {
         if !has_accept {
             headers.push(("Accept".to_string(), "*/*".to_string()));
         }
-        let body = crate::outgoing_body::outgoing_body(scope, self);
         // [inlined `HTTP-network-or-cache fetch`](https://fetch.spec.whatwg.org/#concept-http-network-or-cache-fetch):
         // if the body is null and the method is `POST` or `PUT`,
         // the Content-Length is 0; if the body is non-null with a non-null source, it is the
         // body's length. A body whose source is null (a `ReadableStream`) has no known length and
         // gets none, so it is sent chunked.
+        //
+        // Read before the body is taken, which empties a byte source of its bytes.
         let content_length = match self.data().body.as_ref() {
             None => (method == "POST" || method == "PUT").then_some(0),
             Some(body) => match &body.source {
@@ -1020,6 +1028,7 @@ impl Request<'_> {
                 BodySource::Null => None,
             },
         };
+        let body = crate::outgoing_body::consume_outgoing_body(scope, self, true);
         if let Some(content_length) = content_length {
             if !has_content_length {
                 headers.push(("Content-Length".to_string(), content_length.to_string()));
@@ -1086,6 +1095,17 @@ impl HostBackedBodyOwner for Request<'_> {
 
     fn body_record(&self) -> Option<Body> {
         self.data().body.clone()
+    }
+
+    fn take_byte_source(&self) -> Option<bytes::Bytes> {
+        let mut data = self.data_mut();
+        let body = data.body.as_mut()?;
+        let BodySource::Bytes(bytes) = &mut body.source else {
+            return None;
+        };
+        let bytes = std::mem::take(bytes);
+        body.source_disturbed = true;
+        Some(bytes)
     }
 
     fn body_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>> {

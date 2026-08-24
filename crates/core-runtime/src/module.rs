@@ -395,13 +395,31 @@ pub unsafe fn init_module_loader(rt: *mut js::native::JSRuntime, base_path: Path
     });
 }
 
+/// Drop the cached module objects, so the next `import` of a path compiles and evaluates it afresh.
+///
+/// The registry is keyed by path and holds module objects belonging to the global they were
+/// evaluated in. A caller that serves each request from a *new* global (`--serve-isolated`) has to
+/// clear it between requests: otherwise the second request links against the first request's
+/// already-evaluated modules, their top-level side effects (registering a `fetch` handler, say)
+/// never run again in the new global, and whatever state they hold outlives the isolation
+/// boundary.
+///
+/// The resolver and base path are deliberately left in place — they are per-thread setup from
+/// [`init_module_loader`], not per-evaluation state.
+///
+/// Must be called while the `JSContext` is still alive, because `Heap::drop()` fires GC write
+/// barriers.
+pub fn clear_module_registry() {
+    MODULE_REGISTRY.with(|reg| reg.borrow_mut().clear());
+}
+
 /// Clear all module state (registry, resolver, base path).
 ///
 /// Must be called while the `JSContext` is still alive, because
 /// `Heap::drop()` fires GC write barriers. Called automatically
 /// by `Runtime::drop`.
 pub fn clear_module_state() {
-    MODULE_REGISTRY.with(|reg| reg.borrow_mut().clear());
+    clear_module_registry();
     BASE_PATH.with(|bp| *bp.borrow_mut() = None);
     RESOLVER.with(|r| *r.borrow_mut() = None);
 }
@@ -688,6 +706,7 @@ pub unsafe fn register_source_module(
 ///
 /// - `cx` must be a valid `JSContext` pointer.
 /// - [`init_module_loader`] must have been called first.
+// TODO: mark this as safe: it's no less safe than `evaluate_with_filename`, really
 pub unsafe fn evaluate_module<'s>(
     scope: &'s Scope<'_>,
     source: &str,

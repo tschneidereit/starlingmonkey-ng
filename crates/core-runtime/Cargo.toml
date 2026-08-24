@@ -13,7 +13,7 @@ profilemozjs = ['js/profilemozjs']
 
 [dependencies]
 clap.workspace = true
-event-listener = "5"
+event-listener.workspace = true
 futures-lite = "2"
 js.workspace = true
 oxc_resolver.workspace = true

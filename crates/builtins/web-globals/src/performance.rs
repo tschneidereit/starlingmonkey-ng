@@ -14,6 +14,7 @@ use js::Object;
 
 use crate::events::event_target::{EventTarget, EventTargetImpl};
 
+#[derive(Clone, Copy)]
 struct TimeOriginSnapshot {
     /// The monotonic clock instant when the time origin was captured.
     instant: Instant,
@@ -22,23 +23,42 @@ struct TimeOriginSnapshot {
     epoch_ms: f64,
 }
 
-static TIME_ORIGIN: std::sync::OnceLock<TimeOriginSnapshot> = std::sync::OnceLock::new();
+/// Held behind a lock rather than in a `OnceLock` because it has to be *replaceable*: a time
+/// origin cannot survive a Wizer snapshot. Its monotonic instant belongs to the process that took
+/// the snapshot, while a resumed instance starts a fresh monotonic clock — so the origin sits in
+/// that instance's future, and `now()` saturates to zero for as long as it takes to catch up.
+/// [`reset_time_origin`] re-establishes it on resume.
+static TIME_ORIGIN: std::sync::RwLock<Option<TimeOriginSnapshot>> = std::sync::RwLock::new(None);
 
-fn init_time_origin() {
-    let _ = TIME_ORIGIN.get_or_init(|| {
-        let instant = Instant::now();
-        let epoch_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock is before Unix epoch")
-            .as_secs_f64()
-            * 1_000.;
-        TimeOriginSnapshot { instant, epoch_ms }
-    });
+fn capture_time_origin() -> TimeOriginSnapshot {
+    let instant = Instant::now();
+    let epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_secs_f64()
+        * 1_000.;
+    TimeOriginSnapshot { instant, epoch_ms }
 }
 
-fn time_origin() -> &'static TimeOriginSnapshot {
-    init_time_origin();
-    TIME_ORIGIN.get().unwrap()
+fn init_time_origin() {
+    let _ = time_origin();
+}
+
+/// Re-establish the time origin at the current instant.
+///
+/// For an embedder resuming a pre-initialized (Wizer) snapshot: the origin captured while the
+/// snapshot was taken is meaningless in the resumed instance, so it is re-taken once execution
+/// really begins. Idempotent, and a no-op for anyone who never snapshots.
+pub fn reset_time_origin() {
+    *TIME_ORIGIN.write().expect("time origin lock poisoned") = Some(capture_time_origin());
+}
+
+fn time_origin() -> TimeOriginSnapshot {
+    if let Some(origin) = *TIME_ORIGIN.read().expect("time origin lock poisoned") {
+        return origin;
+    }
+    let mut origin = TIME_ORIGIN.write().expect("time origin lock poisoned");
+    *origin.get_or_insert_with(capture_time_origin)
 }
 
 /// The `Performance` interface.
@@ -92,10 +112,8 @@ impl Performance {
 /// Register the `Performance` class on `global` and install the singleton
 /// `performance` instance as a property on it.
 pub fn add_to_global<'s>(scope: &'s Scope<'_>, global: Object<'s>) {
-    // TODO: We should make this more robust for cases like
-    // runtime snapshotting and resuming (wizer)
-    // We could possibly capture initialization duration and then
-    // at resumption set time origin to current time minus initialization duration
+    // An embedder that snapshots the initialized runtime (Wizer) captures a time origin belonging
+    // to the snapshotting process; it calls `reset_time_origin` on resume to re-establish one.
     init_time_origin();
 
     Performance::add_to_global(scope, global);
