@@ -5,7 +5,7 @@
 
 use futures_lite::StreamExt;
 use wasip3::http::types::{
-    Fields, Method, Request as WasiRequest, Response as WasiResponse, Scheme,
+    ErrorCode, Fields, Method, Request as WasiRequest, Response as WasiResponse, Scheme,
 };
 use wasip3::{wit_bindgen, wit_future, wit_stream};
 
@@ -33,6 +33,12 @@ struct BodyParts {
 /// Split `body` into the pieces the host needs. A host body is handed
 /// straight through, trailers and all. A body-less request/response
 /// gets no stream at all.
+///
+/// Handing a host body over is also handing over the only place its send could be bounded: the
+/// host reads that stream itself, for as long as the peer keeps feeding it, so `body_timeout` does
+/// not reach one. Keeping hold of it would mean copying every chunk of every proxied body through
+/// the guest, which costs far more than it buys — how long a transfer the host is itself pumping
+/// may take is the host's to limit.
 fn body_contents(body: OutgoingBody) -> (BodyParts, TrailersWriter) {
     let (trailers_tx, trailers_rx) = wit_future::new(|| Ok(None));
     let (contents, piped_trailers, writer) = match body {
@@ -56,48 +62,214 @@ fn body_contents(body: OutgoingBody) -> (BodyParts, TrailersWriter) {
     )
 }
 
+/// How a body's send ended, reported through [`BodyDone`]. The distinctions
+/// mirror the ones the native transport reads off its own socket write, so the
+/// serve path can raise the same aborts (a spent clock, a lost connection) on
+/// both targets.
+pub enum BodySendOutcome {
+    /// Every chunk was handed to the host.
+    Sent,
+    /// The body ended before the `Content-Length` the response declared for it.
+    Truncated,
+    /// The `timeout` given to [`spawn_body_writer`] cut the send.
+    TimedOut,
+    /// The send failed: the host dropped the stream's read end (the connection
+    /// is gone), or a streamed chunk was itself an error.
+    Failed(String),
+}
+
+/// Resolves once a body's writer task has ended, with how it ended — or with
+/// `None` for a task cancelled before it could say (instance teardown).
+pub struct BodyDone(futures_channel::oneshot::Receiver<BodySendOutcome>);
+
+impl std::future::Future for BodyDone {
+    type Output = Option<BodySendOutcome>;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<BodySendOutcome>> {
+        std::pin::Pin::new(&mut self.0).poll(cx).map(|r| r.ok())
+    }
+}
+
 /// Feed the owned body (in-memory, or streamed through the channel) to its
 /// wit stream from a spawned task, then write the trailers: `Ok(None)` on a
 /// clean end, an `ErrorCode` when a streamed chunk errored. The trailers
 /// future is the only abort signal a wit stream's consumer can observe, so
 /// an aborted body must not look like a clean (truncated) one.
+///
+/// `timeout` bounds the write: a handler that never ends its stream would
+/// otherwise hold the wit stream open for the life of the instance. Running
+/// out is an abort like any other, error trailers and all. It belongs here
+/// rather than with the caller watching the same clock, because only this task
+/// can end the stream.
+///
+/// The returned [`BodyDone`] resolves when the send is over, with its
+/// [`BodySendOutcome`]. A caller with no use for that (the request path) just
+/// drops it.
 fn spawn_body_writer(
     writer_body: Option<(BodyStreamWriter, OutgoingBody)>,
     trailers_tx: TrailersWriter,
-) {
-    wit_bindgen::spawn(async move {
-        let mut error: Option<Error> = None;
+    timeout: Option<std::time::Duration>,
+    declared_length: Option<u64>,
+) -> (BodyDone, AbandonBody) {
+    let (done_tx, done_rx) = futures_channel::oneshot::channel::<BodySendOutcome>();
+    let (abandon_tx, abandon_rx) = futures_channel::oneshot::channel::<()>();
+    wit_bindgen::spawn_local(async move {
+        let mut outcome = BodySendOutcome::Sent;
         if let Some((mut body_tx, body)) = writer_body {
-            match body {
-                OutgoingBody::Bytes(bytes) => {
-                    // Zero-copy when the bytes are uniquely owned and Vec-backed.
-                    let _ = body_tx.write_all(Vec::from(bytes)).await;
-                }
-                OutgoingBody::Stream(mut receiver) => {
-                    while let Some(result) = receiver.next().await {
-                        match result {
-                            Ok(chunk) => {
-                                let _ = body_tx.write_all(chunk).await;
-                            }
-                            Err(e) => {
-                                error = Some(e);
-                                break;
-                            }
+            let mut remaining = crate::http::Remaining::new(declared_length);
+            let write = async {
+                match body {
+                    OutgoingBody::Bytes(bytes) => {
+                        // Zero-copy when the bytes are uniquely owned and Vec-backed.
+                        if !body_tx.write_all(Vec::from(bytes)).await.is_empty() {
+                            return BodySendOutcome::Failed(HOST_STOPPED_READING.to_string());
                         }
+                        BodySendOutcome::Sent
                     }
+                    OutgoingBody::Stream(mut receiver) => {
+                        write_stream_body(&mut body_tx, &mut receiver, abandon_rx, &mut remaining)
+                            .await
+                    }
+                    OutgoingBody::Host(_) | OutgoingBody::Consumed => BodySendOutcome::Sent,
                 }
-                OutgoingBody::Host(_) | OutgoingBody::Consumed => {}
-            }
+            };
+            outcome = match timeout {
+                None => write.await,
+                Some(limit) => {
+                    let expired = async {
+                        wasip3::clocks::monotonic_clock::wait_for(
+                            limit.as_nanos().min(u64::MAX as u128) as u64,
+                        )
+                        .await;
+                        BodySendOutcome::TimedOut
+                    };
+                    futures_lite::future::or(write, expired).await
+                }
+            };
+            // Ends the stream either way, and before the trailers below go out: a consumer must
+            // not see the abort reason while the body still looks open. `write` only borrows the
+            // writer, so a lost race hands it back here.
             drop(body_tx);
         }
-        let trailers = match error {
-            None => Ok(None),
-            Some(e) => Err(wasip3::http::types::ErrorCode::InternalError(Some(
-                e.to_string(),
+        let trailers = match &outcome {
+            BodySendOutcome::Sent => Ok(None),
+            BodySendOutcome::Truncated => Err(ErrorCode::InternalError(Some(
+                "the response body ended before the `Content-Length` it declared".to_string(),
             ))),
+            BodySendOutcome::TimedOut => Err(ErrorCode::InternalError(Some(
+                "the response body was not fully sent within the response-body or \
+                 end-to-end timeout"
+                    .to_string(),
+            ))),
+            BodySendOutcome::Failed(message) => Err(wasip3::http::types::ErrorCode::InternalError(
+                Some(message.clone()),
+            )),
         };
+        // The outcome goes out before the trailers: a host slow to take them
+        // must not delay the serve path's word that the body phase is over.
+        let _ = done_tx.send(outcome);
         let _ = trailers_tx.write(trailers).await;
     });
+    (BodyDone(done_rx), AbandonBody(abandon_tx))
+}
+
+/// A `write_all` that hands back unwritten values hit a dropped read end: the host has torn the
+/// response down, so the connection (or the request) is gone.
+const HOST_STOPPED_READING: &str = "the host stopped reading the response body";
+
+/// How an abandoned body's send is reported.
+const ABANDONED_BODY: &str =
+    "the event loop finished while the response body was still open, so the body can never \
+     complete; ending it without the terminating chunk";
+
+/// The outcome of finishing sending a body.
+fn outcome_at_end(remaining: &crate::http::Remaining) -> BodySendOutcome {
+    if remaining.is_unfilled() {
+        BodySendOutcome::Truncated
+    } else {
+        BodySendOutcome::Sent
+    }
+}
+
+/// Feed a streamed body's chunks to the host as they arrive, until the stream ends, one of them
+/// fails, the declared length is full, or [`AbandonBody`] is signaled.
+async fn write_stream_body(
+    body_tx: &mut BodyStreamWriter,
+    receiver: &mut crate::http::OutgoingBodyReceiver,
+    mut abandoned: futures_channel::oneshot::Receiver<()>,
+    remaining: &mut crate::http::Remaining,
+) -> BodySendOutcome {
+    loop {
+        let chunk = futures_lite::future::or(async { Some(receiver.next().await) }, async {
+            // A dropped sender is no signal: the caller simply had no use for one.
+            if std::pin::Pin::new(&mut abandoned).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            None
+        })
+        .await;
+        match chunk {
+            Some(Some(Ok(chunk))) => {
+                // Content past the declared length would leave the host framing a message it has
+                // no room for, so the body ends here instead.
+                let Some(chunk) = remaining.take(chunk) else {
+                    return BodySendOutcome::Sent;
+                };
+                if !body_tx.write_all(chunk).await.is_empty() {
+                    return BodySendOutcome::Failed(HOST_STOPPED_READING.to_string());
+                }
+            }
+            Some(Some(Err(e))) => return BodySendOutcome::Failed(e.to_string()),
+            Some(None) => return outcome_at_end(remaining),
+            None => return finish_abandoned_body(body_tx, receiver, remaining).await,
+        }
+    }
+}
+
+/// Finish a body whose pump can no longer run, taking only what the channel already holds: those
+/// chunks were put there before the loop ran out, and nothing can add to them now.
+///
+/// If they end the body, the response was complete after all and the signal merely arrived a moment
+/// early. If they do not, the handler left a body that will never be finished, and the send is
+/// reported failed — which ends the stream as an abort, so the client sees the truncation rather
+/// than a complete-looking response (RFC 9112 §7.1).
+async fn finish_abandoned_body(
+    body_tx: &mut BodyStreamWriter,
+    receiver: &mut crate::http::OutgoingBodyReceiver,
+    remaining: &mut crate::http::Remaining,
+) -> BodySendOutcome {
+    // `poll_once` takes only what is ready. A pending read means the channel is still open with
+    // nothing in it, which is the abandoned-body case.
+    while let Some(ready) = futures_lite::future::poll_once(receiver.next()).await {
+        match ready {
+            None => return outcome_at_end(remaining),
+            Some(Ok(chunk)) => {
+                let Some(chunk) = remaining.take(chunk) else {
+                    return BodySendOutcome::Sent;
+                };
+                if !body_tx.write_all(chunk).await.is_empty() {
+                    return BodySendOutcome::Failed(HOST_STOPPED_READING.to_string());
+                }
+            }
+            Some(Err(e)) => return BodySendOutcome::Failed(e.to_string()),
+        }
+    }
+    BodySendOutcome::Failed(ABANDONED_BODY.to_string())
+}
+
+/// Tells a streamed body's writer that nothing can produce another chunk: the event loop feeding it
+/// has run out of work, so a writer still waiting on the pump would wait forever. The writer takes
+/// what the channel already holds and then ends the body — see [`finish_abandoned_body`].
+///
+/// Dropping one instead says nothing; a caller that never learns of such a state simply drops it.
+pub struct AbandonBody(futures_channel::oneshot::Sender<()>);
+
+impl AbandonBody {
+    pub fn abandon(self) {
+        let _ = self.0.send(());
+    }
 }
 
 /// Map a method name onto a `wasi:http` method.
@@ -195,7 +367,8 @@ pub async fn send(request: Request) -> Result<Response, Error> {
     // Write the body we own (in-memory or channel-streamed) and the trailers once the
     // request exists, so the host is ready to read from the stream. A host-piped body has no
     // writer here: the host reads its stream directly.
-    spawn_body_writer(body.writer, trailers_tx);
+    // No timeout: the serve timeouts bound responses, not an outgoing request's body.
+    drop(spawn_body_writer(body.writer, trailers_tx, None, None));
 
     // Send the request via the outgoing HTTP client.
     let response = wasip3::http::client::send(wasi_request)
@@ -213,7 +386,7 @@ pub async fn send(request: Request) -> Result<Response, Error> {
     let (result_tx, result_rx) = wit_future::new(|| Ok(()));
     let (body_stream, trailers) = WasiResponse::consume_body(response, result_rx);
     // The result future is unused; resolve it so it is not left dangling.
-    wit_bindgen::spawn(async move {
+    wit_bindgen::spawn_local(async move {
         let _ = result_tx.write(Ok(())).await;
     });
 
@@ -228,9 +401,11 @@ pub async fn send(request: Request) -> Result<Response, Error> {
 }
 
 /// Read an incoming `wasi:http` request into its parts (method, full URL, headers, body).
+///
+/// Returns `Err` for a field the host accepted that `http` cannot represent.
 pub async fn read_incoming_request(
     request: WasiRequest,
-) -> (String, String, Vec<(String, String)>, IncomingBody) {
+) -> Result<(String, String, http::HeaderMap, IncomingBody), ErrorCode> {
     let method = string_of_method(request.get_method());
     let scheme = match request.get_scheme() {
         Some(Scheme::Https) => "https".to_string(),
@@ -244,20 +419,15 @@ pub async fn read_incoming_request(
         .get_path_with_query()
         .unwrap_or_else(|| "/".to_string());
     let url = format!("{scheme}://{authority}{path}");
-    let headers = request
-        .get_headers()
-        .copy_all()
-        .into_iter()
-        .map(|(name, value)| (name, crate::http::isomorphic_decode(&value)))
-        .collect();
+    let headers = http::HeaderMap::try_from(request.get_headers())?;
 
     // Take the body's stream without reading it.
     let (result_tx, result_rx) = wit_future::new(|| Ok(()));
     let (body_stream, trailers) = WasiRequest::consume_body(request, result_rx);
-    wit_bindgen::spawn(async move {
+    wit_bindgen::spawn_local(async move {
         let _ = result_tx.write(Ok(())).await;
     });
-    (
+    Ok((
         method,
         url,
         headers,
@@ -265,30 +435,57 @@ pub async fn read_incoming_request(
             stream: body_stream,
             trailers: Some(trailers),
         },
-    )
+    ))
 }
 
 /// Build a `wasi:http` response from parts.
 ///
 /// The body is written from a spawned task: an in-memory body inline,
 /// a host body handed straight through, a stream body forwarded chunk by chunk.
+///
+/// The returned [`BodyDone`] resolves once the body is out of the guest's
+/// hands. That is right away for a host body, which has no writer because the
+/// host drains that stream itself. `body_timeout` bounds the send (see
+/// [`spawn_body_writer`]).
+///
+/// `declared_length` is used as the `Content-Length` header, and enforced for guest-produced
+/// streams.
 pub fn build_outgoing_response(
     status: u16,
-    headers: Vec<(String, String)>,
+    headers: http::HeaderMap,
     body: OutgoingBody,
-) -> WasiResponse {
-    let header_entries: Vec<(String, Vec<u8>)> = headers
-        .iter()
-        .map(|(name, value)| (name.clone(), crate::http::isomorphic_encode(value)))
-        .collect();
-    let fields = Fields::from_list(&header_entries).unwrap_or_else(|_| Fields::new());
+    body_timeout: Option<std::time::Duration>,
+    declared_length: Option<u64>,
+) -> (WasiResponse, BodyDone, AbandonBody) {
+    let fields = Fields::new();
+    for (name, value) in &headers {
+        // Appended one at a time rather than converted with `Fields::try_from`, which goes through
+        // the all-or-nothing `Fields::from_list`. The host's rules are stricter than
+        // `prepare_wire_response`'s, since it also reserves the connection-management names it
+        // writes itself, such as `keep-alive`, and a handler is free to set one, as is an upstream
+        // whose response is being proxied. Building the fields entry by entry keeps one refusal
+        // from silently emptying the whole response's headers.
+        if let Err(e) = fields.append(name.as_str(), value.as_bytes()) {
+            eprintln!(
+                "serve: dropping the response header `{name}`, which the host refused: {e:?}"
+            );
+        }
+    }
 
     let (body, trailers_tx) = body_contents(body);
     let (response, _result) = WasiResponse::new(fields, body.contents, body.trailers);
-    let _ = response.set_status_code(status);
+    // The caller has already mapped the status onto the range HTTP allows, but what `wasi:http`
+    // will put on the wire is the host's call and may be narrower still. Leaving a refusal
+    // unhandled would send the response under `Response`'s default status, which is a wrong answer
+    // rather than a failed one, so a refused status degrades to a 500.
+    if response.set_status_code(status).is_err() {
+        eprintln!("the host refused status {status}; answering with a 500 instead");
+        let _ = response.set_status_code(500);
+    }
 
-    spawn_body_writer(body.writer, trailers_tx);
-    response
+    let (body_done, abandon) =
+        spawn_body_writer(body.writer, trailers_tx, body_timeout, declared_length);
+    (response, body_done, abandon)
 }
 
 /// A body read lazily from the host's incoming `wasi:http` body stream: an HTTP
@@ -342,16 +539,12 @@ impl IncomingBody {
         }
     }
 
-    /// The body's stream has ended: resolve the trailers future to find out
-    /// whether it ended cleanly or the peer aborted it, and surface an abort as
-    /// an error so a truncated body is not mistaken for a complete one.
+    /// The body's stream has ended: resolve the trailers future to learn whether
+    /// it ended cleanly or the peer aborted it, surfacing an abort as an error so
+    /// a truncated body is not mistaken for a complete one.
     ///
-    /// Only valid once the stream has been reported closed.
-    ///
-    /// This follows the documentation for `wasi:http`'s `consume-body`:
-    ///    Once the stream is reported as closed, callers should await the returned
-    ///    future to determine whether the body was received successfully. The future
-    ///    will only resolve after the stream is reported as closed.
+    /// Only valid once the stream has been reported closed, per `wasi:http`'s
+    /// `consume-body` docs — the future does not resolve before then.
     async fn end_of_body(&mut self) -> Result<(), Error> {
         let Some(trailers) = self.trailers.take() else {
             return Ok(());

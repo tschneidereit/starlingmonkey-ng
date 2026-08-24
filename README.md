@@ -107,8 +107,32 @@ Options:
       --wpt-mode                     Enable WPT (Web Platform Tests) mode
       --init-location <URL>          Override the location URL for initialization
       --strip-path-prefix <PREFIX>   Strip this prefix from script paths
+      --serve <PORT>                 Serve HTTP on this port, dispatching fetch events
+      --serve-isolated               Handle each served request in its own global
+      --dispatch-timeout <SECONDS>   Give up on a request whose respondWith hasn't settled (0 = no limit)
+      --response-body-timeout <SECONDS>   Cut a response body not fully sent by then, truncating it visibly (0 = no limit)
+      --waituntil-timeout <SECONDS>   Stop driving a served request's leftover waitUntil work (0 = no limit)
+      --end-to-end-timeout <SECONDS>   Wall-clock ceiling over all of a request's phases together (0 = no limit)
+      --request-read-timeout <SECONDS>   Give up on a client that stopped sending (default 30, 0 = no limit)
+      --keepalive-timeout <SECONDS>   Close an idle kept-alive connection (default 30, 0 = no limit)
+      --max-connection-buffer-size <BYTES>   The maximum number of bytes the server will read from the client's connection at once. (default ca 400KiB, minimum 8KiB)
+      --max-request-headers <COUNT>   Cap the number of header fields (default 128)
+      --max-request-body-bytes <BYTES>   Cap a request body (default 512MiB)
+      --max-body-drain-bytes <BYTES>   Spend at most this reading a body the handler ignored (default 256KiB)
+      --max-connections <COUNT>      Serve at most this many connections at once (default 1024)
   -h, --help                         Print help
 ```
+
+The serve timeouts are unlimited by default, except under `--wpt-mode`, where the
+per-phase ones default to 120s. The per-phase timeouts each bound their own phase,
+while `--end-to-end-timeout` caps the whole request regardless of how the phases
+divide it.
+
+The `--max-…` limits, `--request-read-timeout` and `--keepalive-timeout` bound
+guest controlled allocation and wait times.
+
+All transport related limits exist in native builds only, since on wasm, the host
+runtime enforces equivalent limits.
 
 **Module mode** (default) — strict mode, `import`/`export` supported, `this`
 is `undefined` at the top level.

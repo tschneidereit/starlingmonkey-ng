@@ -23,9 +23,16 @@ clap = { version = "4.5.60", features = ["derive"] }
 core-runtime = { path = "crates/core-runtime" }
 data-url = "0.3"
 encoding_rs = "0.8"
+event-listener = "5"
 form_urlencoded = "1.2"
 futures-channel = "0.3"
 futures-lite = "2"
+futures-util = "0.3"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 js = { path = "crates/js" }
 libstarling = { path = "crates/libstarling" }
 oxc_allocator = "0.142.0"
@@ -35,12 +42,13 @@ oxc_resolver = "11"
 oxc_span = "0.142.0"
 platform = { path = "crates/platform" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+serve-test-support = { path = "crates/serve-test-support" }
 starling-macro = { path = "crates/starling-macro" }
 tokio = { version = "1", features = ["rt", "time", "net", "io-util"] }
 url = "2.5.8"
 uuid = { version = "1.23", features = ["v4"] }
-wasip3 = { version = "0.7.0", features = ["http-compat"] }
-wit-bindgen = { version = "=0.60.0", features = ["macros"] }
+wasip3 = { version = "0.8.0", features = ["http-compat"] }
+wit-bindgen = { version = "=0.61.0", features = ["macros"] }
 wpt-support = { path = "crates/wpt-support" }
 
 # bindgen = { version = "0.72", default-features = false, features = [

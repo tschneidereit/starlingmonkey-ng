@@ -1112,11 +1112,20 @@ pub(crate) fn readable_stream_pipe_to<'r>(
     // and defer acting on it until there's actual demand.
     if let Some(host_source) = source.native_source(scope) {
         if let Some(transform) = dest.data().identity_transform.get(scope) {
-            transform
-                .data()
-                .readable
-                .get(scope)
-                .set_native_source(&host_source);
+            // Only when this pipe will close the destination behind it. Handing the native source
+            // on says "the whole of what comes out of this transform is that one body", and a sink
+            // that takes it up bypasses the transform entirely — so anything written into the
+            // transform afterwards would go to a readable end nobody reads, stalling its writer and
+            // never reaching the wire. This pipe holds the writer lock until it is done and then
+            // closes the destination, so nothing can follow it; `preventClose` is precisely the
+            // author saying they intend to write more, and disqualifies the claim.
+            if !prevent_close {
+                transform
+                    .data()
+                    .readable
+                    .get(scope)
+                    .set_native_source(&host_source);
+            }
             source.data_mut().piped_to_identity_transform = Some(Heap::from(transform));
         }
     }

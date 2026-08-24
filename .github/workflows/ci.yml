@@ -28,6 +28,7 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Cargo tests: {native, wasm32-wasip2} × {debug+debugmozjs, release}
+  # The wasm recipes also run the serve end-to-end suite (`just test-serve-wasm`).
   # ---------------------------------------------------------------------------
   test:
     name: Test (${{ matrix.target }}, ${{ matrix.profile }})
@@ -36,6 +37,11 @@ jobs:
       matrix:
         target: [native, wasm32-wasip2]
         profile: [debug, release]
+        include:
+          - { target: native, profile: debug, recipe: test }
+          - { target: native, profile: release, recipe: test-release }
+          - { target: wasm32-wasip2, profile: debug, recipe: test-wasm }
+          - { target: wasm32-wasip2, profile: release, recipe: test-wasm-release }
     runs-on: ubuntu-latest
     env:
       WASMTIME_BACKTRACE_DETAILS: '1'
@@ -48,22 +54,11 @@ jobs:
           target: ${{ matrix.target }}
 
       - name: Run tests
-        run: |
-          TARGET_FLAG=""
-          FEATURE_FLAG=""
-          RELEASE_FLAG=""
-          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
-            TARGET_FLAG="--target wasm32-wasip2"
-          fi
-          if [[ "${{ matrix.profile }}" == "debug" ]]; then
-            FEATURE_FLAG="--features debugmozjs"
-          else
-            RELEASE_FLAG="--release"
-          fi
-          cargo test --workspace $TARGET_FLAG $FEATURE_FLAG $RELEASE_FLAG
-          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
-            cargo test --workspace --examples $TARGET_FLAG $FEATURE_FLAG $RELEASE_FLAG
-          fi
+        run: just ${{ matrix.recipe }}
+
+      - name: Run example tests
+        if: matrix.target == 'wasm32-wasip2'
+        run: just ${{ matrix.recipe }} --examples
 
   # ---------------------------------------------------------------------------
   # WPT suite: {native, wasm32-wasip2}
@@ -89,33 +84,26 @@ jobs:
         with:
           node-version: "lts/*"
 
-      - name: Build
-        run: |
-          TARGET_FLAG=""
-          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
-            TARGET_FLAG="--target wasm32-wasip2"
-          fi
-          cargo build --features debugmozjs $TARGET_FLAG
-
       - name: Clone WPT suite
         run: ./scripts/clone-wpt.sh
 
       - name: Set up WPT suite
         run: cat deps/wpt-hosts | sudo tee -a /etc/hosts
 
+      # The recipes build the runtime before running the harness.
       - name: Run WPT tests
         run: |
-          WPT_TARGET=""
           if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
-            WPT_TARGET="--target=wasm"
+            just wpt-test-wasm -v
+          else
+            just wpt-test -v
           fi
-          node tests/wpt-harness/run-wpt.mjs -v $WPT_TARGET
 
       # The permissive dimension is native-only: the request-restrictions
       # switch gates code shared between the targets.
       - name: Run WPT tests (permissive)
         if: matrix.target == 'native'
-        run: node tests/wpt-harness/run-wpt.mjs -v --permissive
+        run: just wpt-test-permissive -v
 
   gc_rooting:
     name: GC Rooting Checks
@@ -140,5 +128,4 @@ jobs:
           ./scripts/check-crown.sh --workspace --examples
 
       - name: GC Zeal tests
-        run: |
-          ./scripts/test-gc-zeal.sh --zeal full --examples --workspace
+        run: just gc-zeal --zeal full --examples --workspace

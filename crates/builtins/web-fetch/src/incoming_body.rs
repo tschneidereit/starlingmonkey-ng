@@ -169,7 +169,7 @@ enum CloseStream {
 /// Both keep the same quartet of fields — the body record, the unread host body,
 /// the `.body` stream it materializes into, and that stream's native source — so
 /// the operations over them ([`materialize_host_body`], [`clone_body_onto`],
-/// [`crate::outgoing_body::outgoing_body`]) are written here once rather than
+/// [`crate::outgoing_body::consume_outgoing_body`]) are written here once rather than
 /// once per interface. The
 /// accessors are deliberately fine-grained rather than one `&mut`-fields
 /// accessor, because a caller must not hold a borrow of the object's data across
@@ -183,8 +183,15 @@ pub(crate) trait HostBackedBodyOwner {
     /// Store the stream the host body materialized into, and its native source.
     fn set_host_body_stream(&self, stream: ReadableStream<'_>, source: HostBodySource<'_>);
 
-    /// The body record, if this object has a body.
+    /// The body record, if this object has a body. A copy: a [`BodySource::Bytes`] it carries is
+    /// refcounted, so holding the copy holds the buffer.
+    ///
+    /// [`BodySource::Bytes`]: crate::algorithms::BodySource::Bytes
     fn body_record(&self) -> Option<crate::algorithms::Body>;
+
+    /// Take the body's in-memory bytes, leaving it marked as read. The emptied source stays a byte
+    /// source, so a `.body` asked for later still materializes the consumed stream it would have.
+    fn take_byte_source(&self) -> Option<bytes::Bytes>;
 
     /// The `.body` stream, once materialized.
     fn body_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>>;

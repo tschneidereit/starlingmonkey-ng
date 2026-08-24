@@ -701,6 +701,17 @@ impl crate::incoming_body::HostBackedBodyOwner for Response<'_> {
         self.data().body.clone()
     }
 
+    fn take_byte_source(&self) -> Option<bytes::Bytes> {
+        let mut data = self.data_mut();
+        let body = data.body.as_mut()?;
+        let BodySource::Bytes(bytes) = &mut body.source else {
+            return None;
+        };
+        let bytes = std::mem::take(bytes);
+        body.source_disturbed = true;
+        Some(bytes)
+    }
+
     fn body_stream<'r>(
         &self,
         scope: &'r Scope<'_>,
@@ -745,9 +756,14 @@ impl Response<'_> {
     /// serve path. An in-memory byte source is sent as-is; an unread host network body (a `fetch`
     /// response used directly as the reply) is handed straight through; a materialized body stream
     /// goes through [`crate::outgoing_body::outgoing_body_from_stream`], as an outgoing request's
-    /// does.
-    pub fn take_send_body(&self, scope: &Scope<'_>) -> platform::http::OutgoingBody {
-        crate::outgoing_body::outgoing_body(scope, self)
+    /// does, or is canceled without sending if `start_reading` is false (see
+    /// [`crate::outgoing_body::consume_outgoing_body`]).
+    pub fn take_send_body(
+        &self,
+        scope: &Scope<'_>,
+        start_reading: bool,
+    ) -> platform::http::OutgoingBody {
+        crate::outgoing_body::consume_outgoing_body(scope, self, start_reading)
     }
 
     /// <https://fetch.spec.whatwg.org/#body-unusable>

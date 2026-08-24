@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
+
+[package]
+name = "serve-test-support"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+# Deliberately dependency-free: the wasm serve end-to-end suite lives here so that running it
+# builds only this crate and the component, not the native engine.
+
+[lib]
+# No unit tests; the integration test in `tests/` links the lib.
+test = false
+
+[lints]
+workspace = true

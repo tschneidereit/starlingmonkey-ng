@@ -5,6 +5,25 @@ use core_runtime::event_loop::run_to_completion;
 // Re-export everything from core-runtime.
 pub use core_runtime::*;
 
+/// Native HTTP serve mode (the `--serve` flag).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod serve_native;
+
+/// The per-request dispatch core shared by the serve modes.
+mod serve_common;
+
+/// Wasm HTTP serve mode: the body of the `wasi:http/handler` export.
+#[cfg(target_arch = "wasm32")]
+pub mod serve_wasm;
+
+/// Sleep for `duration` on the WASIp3 monotonic clock — the timer every event-loop driver on wasm32
+/// awaits, here rather than repeated at each of them.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn wasm_sleep(duration: std::time::Duration) {
+    let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
+    wasip3::clocks::monotonic_clock::wait_for(nanos).await;
+}
+
 /// Register all built-in global initializers.
 ///
 /// This must be called before `Runtime::init()` to ensure built-in web
@@ -18,17 +37,26 @@ pub fn register_builtins() {
     runtime::register_global_initializer(|scope, global| unsafe {
         cpp_builtins::install(scope.cx_mut().raw_cx(), global.handle());
     });
+
+    // `performance`'s time origin is a monotonic-clock reading, which belongs to whichever process
+    // took the Wizer snapshot: a resumed instance reads `performance.now()` as zero until its own
+    // clock catches up. Registered alongside the builtin itself, so the snapshot machinery does not
+    // have to know which builtins keep state that cannot cross one.
+    runtime::register_resume_fixup(web_globals::performance::reset_time_origin);
 }
 
-/// Apply CLI options that take effect before the runtime is initialized.
-///
-/// Currently this just installs the worker location URL parsed from
-/// `--init-location`. Shared between the native and wasm32 entry points.
+/// Apply CLI options that take effect before the runtime is initialized: the worker location URL
+/// from `--init-location`, and the WPT test globals from `--wpt-mode`. Shared between the native
+/// and wasm32 entry points, and between the CLI and HTTP ones — a WPT run under `--serve` needs
+/// the same globals a command-mode run does.
 fn apply_pre_init_config(config: &config::RuntimeConfig) -> Result<(), String> {
     if let Some(location) = config.init_location.as_deref() {
         let url = url::Url::parse(location)
             .map_err(|e| format!("Invalid --init-location URL {location:?}: {e}"))?;
         web_globals::worker_location::set_init_location(url);
+    }
+    if config.wpt_mode {
+        runtime::register_global_initializer(wpt_support::add_to_global);
     }
     Ok(())
 }
@@ -41,6 +69,9 @@ fn apply_pre_init_config(config: &config::RuntimeConfig) -> Result<(), String> {
 pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
     apply_pre_init_config(&config)?;
     register_builtins();
+    if let Some(port) = config.serve {
+        return serve_native::serve(config, port);
+    }
     core_runtime::run(config, drive_event_loop_native)
 }
 
@@ -55,6 +86,18 @@ pub fn run(config: config::RuntimeConfig) -> Result<(), String> {
 pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
     apply_pre_init_config(&config)?;
     register_builtins();
+
+    // `--serve` has no meaning for this entry point. Serving on wasm is the `wasi:http/handler`
+    // export (see `serve_wasm`), which the host invokes directly — the component exports both, and
+    // running it as a command is the host having picked the other one. Say so rather than running
+    // the script once and exiting, which looks like the server immediately gave up.
+    if config.serve.is_some() {
+        return Err(
+            "--serve is not supported when running as a command: serve the component with a \
+             wasi:http host (e.g. `wasmtime serve`), which invokes its wasi:http/handler export"
+                .to_string(),
+        );
+    }
 
     let (runtime, mut invocation) = match core_runtime::setup(config)? {
         Some(pair) => pair,
@@ -82,11 +125,7 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
     // SAFETY: `raw_cx` is valid for the duration of the await — `scope`
     // keeps the `Runtime` alive and the realm entered.
     unsafe {
-        run_to_completion(raw_cx, el, |dur| async move {
-            let nanos = dur.as_nanos().min(u64::MAX as u128) as u64;
-            wasip3::clocks::monotonic_clock::wait_for(nanos).await;
-        })
-        .await;
+        run_to_completion(raw_cx, el, wasm_sleep).await;
     }
 
     drop(scope);

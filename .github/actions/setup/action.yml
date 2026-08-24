@@ -16,6 +16,14 @@ runs:
         sudo apt-get update
         sudo apt-get install -y build-essential python3 m4 libclang-dev llvm
 
+    - name: Install just
+      shell: bash
+      run: |
+        mkdir -p "$HOME/.just/bin"
+        curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+          | bash -s -- --to "$HOME/.just/bin"
+        echo "$HOME/.just/bin" >> "$GITHUB_PATH"
+
     - name: Install Rust toolchain
       shell: bash
       run: rustup show
