@@ -152,6 +152,34 @@ impl EventTarget {
         event.data_mut().flags.remove(EventFlags::TRUSTED);
 
         // Step 3: Return the result of `dispatching` _event_ to `this`.
-        Ok(algorithms::dispatch(scope, &event, self))
+        Ok(algorithms::dispatch(
+            scope,
+            &event,
+            self,
+            algorithms::ScriptStackState::NonEmpty,
+        ))
+    }
+
+    /// Dispatches `event` on `self` without marking it as untrusted.
+    ///
+    /// Use this when implementing other builtins that need to dispatch events as part of
+    /// their function.
+    pub fn dispatch_trusted(
+        &self,
+        scope: &Scope<'_>,
+        event: Event<'_>,
+        script_stack_state: algorithms::ScriptStackState,
+    ) {
+        // Clients can use `event.is_canceled()` to check if the event was canceled.
+        let _ = algorithms::dispatch(scope, &event, self, script_stack_state);
+    }
+
+    /// Whether any listener for `event_type` would be invoked by a dispatch. Listeners already
+    /// removed are still in the list until dispatch prunes them, and do not count.
+    pub fn has_listener_for(&self, event_type: &str) -> bool {
+        self.data()
+            .event_listener_list
+            .iter()
+            .any(|listener| !listener.removed && listener.event_type == event_type)
     }
 }

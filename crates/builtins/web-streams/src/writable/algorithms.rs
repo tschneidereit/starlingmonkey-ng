@@ -10,6 +10,7 @@ use js::heap::RootedTraceableBox;
 use js::native::Value;
 use js::prelude::{CallbackArgs, HandleValue, OptionHeapExt};
 use js::{value, Function, Promise};
+use web_globals::events::algorithms::ScriptStackState;
 use web_globals::signals::abort_controller::AbortController;
 
 use crate::algorithms::{
@@ -399,10 +400,14 @@ pub(crate) fn set_up_writable_stream_default_writer(
 
 /// <https://streams.spec.whatwg.org/#writable-stream-abort>
 /// WritableStreamAbort(stream, reason) performs the following steps:
+///
+/// Step 2 signals abort on the stream's own controller, running the sink's abort algorithms, so
+/// `script_stack_state` is threaded in from the caller (see [`ScriptStackState`]).
 pub(crate) fn writable_stream_abort<'r>(
     scope: &'r Scope<'_>,
     stream: &WritableStream<'_>,
     reason: HandleValue<'_>,
+    script_stack_state: ScriptStackState,
 ) -> Promise<'r> {
     // Step 1: If _stream_.`[[state]]` is "`closed`" or "`errored`", return `a promise resolved
     //         with` undefined.
@@ -416,12 +421,14 @@ pub(crate) fn writable_stream_abort<'r>(
     // Step 2: `Signal abort` on _stream_.`[[controller]]`.`[[abortController]]` with _reason_.
     let controller = stream.controller(scope);
     let abort_controller: AbortController<'_> = controller.data().abort_controller.get(scope);
-    abort_controller.abort(scope, reason).unwrap_or_else(|_| {
-        // The spec doesn't define what to do if signaling abort throws, but we shouldn't let that
-        // prevent the stream from transitioning to erroring and rejecting the promise returned by
-        // this method, so we catch and ignore any exception.
-        js::exception::clear(scope);
-    });
+    abort_controller
+        .abort(scope, reason, script_stack_state)
+        .unwrap_or_else(|_| {
+            // The spec doesn't define what to do if signaling abort throws, but we shouldn't let
+            // that prevent the stream from transitioning to erroring and rejecting the promise
+            // returned by this method, so we catch and ignore any exception.
+            js::exception::clear(scope);
+        });
 
     // Step 3: Let _state_ be _stream_.`[[state]]`.
     let state = stream.data().state;
@@ -998,12 +1005,13 @@ pub(crate) fn writable_stream_default_writer_abort<'r>(
     scope: &'r Scope<'_>,
     writer: &WritableStreamDefaultWriter<'_>,
     reason: HandleValue<'_>,
+    script_stack_state: ScriptStackState,
 ) -> Promise<'r> {
     // Step 1: Let _stream_ be _writer_.`[[stream]]`.
     // Step 2: Assert: _stream_ is not undefined.
     let stream = writer_stream(scope, writer).expect("writer has a stream");
     // Step 3: Return ! `WritableStreamAbort`(_stream_, _reason_).
-    writable_stream_abort(scope, &stream, reason)
+    writable_stream_abort(scope, &stream, reason, script_stack_state)
 }
 
 /// <https://streams.spec.whatwg.org/#writable-stream-default-writer-close>

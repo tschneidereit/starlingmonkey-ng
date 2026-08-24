@@ -11,6 +11,7 @@ use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::Promise;
+use web_globals::events::algorithms::ScriptStackState;
 
 /// <https://streams.spec.whatwg.org/#default-writer-class>
 #[webidl_interface]
@@ -80,7 +81,10 @@ impl WritableStreamDefaultWriter {
         }
         // Step 2: Return ! `DefaultWriterAbort`(`this`, _reason_).
         Ok(algorithms::writable_stream_default_writer_abort(
-            scope, self, reason,
+            scope,
+            self,
+            reason,
+            ScriptStackState::NonEmpty,
         ))
     }
 

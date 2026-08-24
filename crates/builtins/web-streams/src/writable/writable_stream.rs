@@ -20,6 +20,7 @@ use js::gc::scope::Scope;
 use js::native::Value;
 use js::prelude::HandleValue;
 use js::Promise;
+use web_globals::events::algorithms::ScriptStackState;
 
 /// A traced slot holding a `Promise`.
 ///
@@ -258,7 +259,12 @@ impl WritableStream {
             return Promise::new_rejected_with_pending_error(scope);
         }
         // Step 2: Return ! `WritableStreamAbort`(`this`, _reason_).
-        Ok(algorithms::writable_stream_abort(scope, self, reason))
+        Ok(algorithms::writable_stream_abort(
+            scope,
+            self,
+            reason,
+            ScriptStackState::NonEmpty,
+        ))
     }
 
     /// <https://streams.spec.whatwg.org/#writablestream-close>
