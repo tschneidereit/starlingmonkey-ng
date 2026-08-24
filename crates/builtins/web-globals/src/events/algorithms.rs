@@ -16,7 +16,6 @@ use js::{Function, Object};
 
 use super::event::Event;
 use super::event_target::{EventListener, EventTarget, EventTargetImpl};
-use crate::events::event::EventFlags;
 use crate::signals::abort_signal::AbortSignal;
 use crate::signals::algorithms as signal_algorithms;
 
@@ -274,6 +273,36 @@ pub(crate) fn remove_an_event_listener_by_id(target: &EventTarget<'_>, id: u64) 
     target.data_mut().event_listener_list.retain(|l| l.id != id);
 }
 
+/// Whether the JavaScript execution context stack is empty, for [clean up after running script] to
+/// test before performing a microtask checkpoint. Depends on who started the work, so is threaded
+/// in from there.
+///
+/// With an empty stack the checkpoint runs inside the dispatch, so a microtask a listener queued
+/// still sees the `dispatch flag` set. For `ExtendableEvent` subclasses, such as `FetchEvent`,
+/// that makes it legal to extend the event's lifetime in a promise reaction job.
+///
+/// [clean up after running script]: https://html.spec.whatwg.org/multipage/webappapis.html#clean-up-after-running-script
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptStackState {
+    /// No script frames on the stack: dispatch was triggered by a builtin, such as an incoming
+    /// `Request` triggering dispatch of a `FetchEvent`.
+    Empty,
+    /// Script frames on the stack: dispatch was triggered by `dispatchEvent()`, `abort()`, etc.
+    NonEmpty,
+}
+
+impl ScriptStackState {
+    /// [Clean up after running script] step 3: if the JavaScript execution context stack is now
+    /// empty, perform a microtask checkpoint. Run after every `call a user object's operation`.
+    ///
+    /// [Clean up after running script]: https://html.spec.whatwg.org/multipage/webappapis.html#clean-up-after-running-script
+    pub fn clean_up_after_running_script(self, scope: &Scope<'_>) {
+        if self == Self::Empty {
+            js::jobs::run_jobs(scope);
+        }
+    }
+}
+
 /// <https://dom.spec.whatwg.org/#concept-event-dispatch>
 ///
 /// To dispatch an event to a target, with an optional legacy target override
@@ -281,7 +310,12 @@ pub(crate) fn remove_an_event_listener_by_id(target: &EventTarget<'_>, id: u64) 
 ///
 /// This is a simplified implementation handling only AT_TARGET dispatch
 /// (no shadow DOM, no capturing/bubbling phase, no activation behavior).
-pub(crate) fn dispatch(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'_>) -> bool {
+pub(crate) fn dispatch(
+    scope: &Scope<'_>,
+    event: &Event<'_>,
+    target: &EventTarget<'_>,
+    script_stack_state: ScriptStackState,
+) -> bool {
     // Step 1: Set _event_'s `dispatch flag`.
     event.start_dispatching();
 
@@ -290,7 +324,7 @@ pub(crate) fn dispatch(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarge
     // Step 6: Simplified — set target and invoke at AT_TARGET only.
     event.data_mut().target = Some(Heap::from(*target));
 
-    invoke_listeners(scope, event, target);
+    invoke_listeners(scope, event, target, script_stack_state);
 
     // Step 7: Set _event_'s ``eventPhase`` attribute to ``NONE``.
     // (Omitted)
@@ -316,7 +350,12 @@ pub(crate) fn dispatch(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarge
 ///
 /// Based on the "inner invoke" algorithm:
 /// <https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke>
-fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'_>) {
+fn invoke_listeners(
+    scope: &Scope<'_>,
+    event: &Event<'_>,
+    target: &EventTarget<'_>,
+    script_stack_state: ScriptStackState,
+) {
     if event.is_propagation_stopped() {
         return;
     }
@@ -382,16 +421,15 @@ fn invoke_listeners(scope: &Scope<'_>, event: &Event<'_>, target: &EventTarget<'
                 let listener = &target.data().event_listener_list[pos];
                 listener.callback.get(scope)
             };
-            let callback_val = scope.root_value(callback.as_value());
-            let this_val = scope.root_value(target.as_value());
-            let event_val = scope.root_value(event.as_value());
 
-            if Function::call(scope, this_val, callback_val, &[event_val]).is_err() {
+            if Function::call(scope, target, callback, &[event]).is_err() {
                 // Per the spec, exceptions from event listeners are "reported"
                 // but do not stop event dispatch.
                 js::exception::report_and_clear(scope, "event listener");
             }
         }
+
+        script_stack_state.clean_up_after_running_script(scope);
 
         event.set_in_passive_listener(false);
 
@@ -410,20 +448,20 @@ pub(crate) fn fire_an_event(
     scope: &Scope<'_>,
     name: &str,
     target: &EventTarget<'_>,
+    script_stack_state: ScriptStackState,
 ) -> Result<bool, ExnThrown> {
     // Step 1: If _eventConstructor_ is not given, then let _eventConstructor_ be ``Event``.
     // Step 2: Let _event_ be the result of `creating an event` given _eventConstructor_, in the
     //         `relevant realm` of _target_.
-    let event = Event::new_untrusted(scope, name.to_string(), None)?;
+    let event = Event::new_trusted(scope, name.to_string(), None)?;
 
     // Step 3: Initialize _event_'s ``type`` attribute to _e_.
     // (Already set by the Event constructor above.)
 
     // Step 4: Initialize any other IDL attributes of _event_ as described in the invocation of
     //         this algorithm. This also allows for the ``isTrusted`` attribute to be set to false.
-    event.data_mut().flags.insert(EventFlags::TRUSTED);
 
     // Step 5: Return the result of `dispatching` _event_ at _target_, with _legacy target override
     //         flag_ set if set.
-    Ok(dispatch(scope, &event, target))
+    Ok(dispatch(scope, &event, target, script_stack_state))
 }

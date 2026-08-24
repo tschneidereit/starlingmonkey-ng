@@ -40,6 +40,7 @@ use crate::writable::default_writer::{
     WritableStreamDefaultWriter, WritableStreamDefaultWriterImpl,
 };
 use crate::writable::writable_stream::{WritableStream, WritableStreamImpl, WritableStreamState};
+use web_globals::events::algorithms::ScriptStackState;
 
 // ---------------------------------------------------------------------------
 // Private accessors bridging the polymorphic `[[controller]]`/`[[reader]]`
@@ -1246,6 +1247,11 @@ unsafe impl js::heap::Trace for PipeAction {
     unsafe fn trace(&self, _trc: *mut js::native::JSTracer) {}
 }
 
+/// The pipe's shutdown actions never run on an empty stack: they are reached either from a promise
+/// reaction driving the pipe, or from the abort algorithm the signal invokes, and both are already
+/// inside a JS invocation.
+const PIPE_SCRIPT_STACK_STATE: ScriptStackState = ScriptStackState::NonEmpty;
+
 fn pipe_source<'r>(scope: &'r Scope<'_>, state: PipeState<'_>) -> ReadableStream<'r> {
     state.data().source.get(scope)
 }
@@ -1675,7 +1681,7 @@ fn pipe_run_action<'r>(scope: &'r Scope<'_>, state: PipeState<'_>) -> Promise<'r
         PipeAction::AbortDest => {
             let dest = pipe_dest(scope, state);
             let e: Handle<'_, Value> = state.data().action_error.get(scope);
-            writable_stream_abort(scope, &dest, e)
+            writable_stream_abort(scope, &dest, e, PIPE_SCRIPT_STACK_STATE)
         }
         PipeAction::CancelSource => {
             let source = pipe_source(scope, state);
@@ -1699,7 +1705,7 @@ fn pipe_build_abort_actions_promise<'r>(scope: &'r Scope<'_>, state: PipeState<'
     if !state.data().prevent_abort {
         let dest = pipe_dest(scope, state);
         let p = if dest.data().state == WritableStreamState::Writable {
-            writable_stream_abort(scope, &dest, error)
+            writable_stream_abort(scope, &dest, error, PIPE_SCRIPT_STACK_STATE)
         } else {
             resolved_undefined_promise(scope)
         };

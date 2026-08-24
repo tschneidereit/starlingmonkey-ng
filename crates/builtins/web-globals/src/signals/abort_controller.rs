@@ -13,6 +13,7 @@ use js::prelude::HandleValue;
 
 use super::abort_signal::{AbortSignal, AbortSignalImpl};
 use super::algorithms;
+use crate::events::algorithms::ScriptStackState;
 
 /// <https://dom.spec.whatwg.org/#interface-abortcontroller>
 #[webidl_interface]
@@ -41,10 +42,25 @@ impl AbortController {
     }
 
     /// <https://dom.spec.whatwg.org/#dom-abortcontroller-abort>
-    #[method(length = 0)]
-    pub fn abort(&self, scope: &Scope<'_>, reason: HandleValue<'_>) -> Result<(), ExnThrown> {
+    #[method(name = "abort", length = 0)]
+    pub fn js_abort(&self, scope: &Scope<'_>, reason: HandleValue<'_>) -> Result<(), ExnThrown> {
+        self.abort(scope, reason, ScriptStackState::NonEmpty)
+    }
+
+    /// [Signal abort] on this controller's signal.
+    ///
+    /// If `script_stack_state` is [`ScriptStackState::Empty`], a microtask checkpoint will be
+    /// performed after each abort reaction.
+    ///
+    /// [Signal abort]: https://dom.spec.whatwg.org/#abortcontroller-signal-abort
+    pub fn abort(
+        &self,
+        scope: &Scope<'_>,
+        reason: HandleValue<'_>,
+        script_stack_state: ScriptStackState,
+    ) -> Result<(), ExnThrown> {
         // Step 1: Signal abort on this with reason if it is given.
         let signal: AbortSignal<'_> = self.data().signal.get(scope);
-        algorithms::signal_abort(scope, &signal, reason)
+        algorithms::signal_abort(scope, &signal, reason, script_stack_state)
     }
 }

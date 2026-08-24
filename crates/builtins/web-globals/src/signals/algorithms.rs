@@ -17,6 +17,7 @@ use js::Function;
 use super::abort_signal::{AbortAlgorithm, AbortSignal, AbortSignalImpl};
 use crate::dom_exception::DOMException;
 use crate::events;
+use crate::events::algorithms::ScriptStackState;
 use crate::events::event_target::EventTarget;
 
 /// Create a new "AbortError" DOMException as a JS value without throwing it.
@@ -119,6 +120,7 @@ pub(crate) fn signal_abort(
     scope: &Scope<'_>,
     signal: &AbortSignal<'_>,
     reason: HandleValue<'_>,
+    script_stack_state: ScriptStackState,
 ) -> Result<(), ExnThrown> {
     // Step 1: If _signal_ is `aborted`, then return.
     if !signal.data().abort_reason.is_undefined() {
@@ -155,12 +157,12 @@ pub(crate) fn signal_abort(
     }
 
     // Step 5: `Run the abort steps` for _signal_.
-    run_the_abort_steps(scope, signal)?;
+    run_the_abort_steps(scope, signal, script_stack_state)?;
 
     // Step 6: `For each` _dependentSignal_ of _dependentSignalsToAbort_, `run the abort steps` for
     //         _dependentSignal_.
     for dependent in &dependent_signals_to_abort {
-        run_the_abort_steps(scope, dependent)?;
+        run_the_abort_steps(scope, dependent, script_stack_state)?;
     }
 
     Ok(())
@@ -169,7 +171,11 @@ pub(crate) fn signal_abort(
 /// <https://dom.spec.whatwg.org/#run-the-abort-steps>
 ///
 /// To run the abort steps for an AbortSignal _signal_.
-fn run_the_abort_steps(scope: &Scope<'_>, signal: &AbortSignal<'_>) -> Result<(), ExnThrown> {
+fn run_the_abort_steps(
+    scope: &Scope<'_>,
+    signal: &AbortSignal<'_>,
+    script_stack_state: ScriptStackState,
+) -> Result<(), ExnThrown> {
     // Snapshot the abort algorithms, then run step two before step 1 to avoid reentrant signals
     // creating loops.
     enum Pending<'s> {
@@ -211,12 +217,13 @@ fn run_the_abort_steps(scope: &Scope<'_>, signal: &AbortSignal<'_>) -> Result<()
                 {
                     js::exception::report_and_clear(scope, "abort algorithm");
                 }
+                script_stack_state.clean_up_after_running_script(scope);
             }
         }
     }
 
     // Step 3: `Fire an event` named ``abort`` at _signal_.
-    events::algorithms::fire_an_event(scope, "abort", signal)?;
+    events::algorithms::fire_an_event(scope, "abort", signal, script_stack_state)?;
     Ok(())
 }
 
@@ -325,7 +332,7 @@ impl Task for AbortTimeoutTask {
         // `Queue a global task` [...] to `signal abort` given _signal_ and a new
         // "``TimeoutError``" ``DOMException``.
         let reason = create_timeout_error(scope)?;
-        signal_abort(scope, &signal, reason)
+        signal_abort(scope, &signal, reason, ScriptStackState::Empty)
     }
 
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
