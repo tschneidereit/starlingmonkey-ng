@@ -532,6 +532,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
+name = "fetch-event"
+version = "0.3.0"
+dependencies = [
+ "core-runtime",
+ "futures-lite",
+ "js",
+ "libstarling",
+ "tokio",
+ "web-fetch",
+ "web-globals",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1573,6 +1586,7 @@ version = "0.3.0"
 dependencies = [
  "core-runtime",
  "cpp-builtins",
+ "fetch-event",
  "js",
  "tokio",
  "url",

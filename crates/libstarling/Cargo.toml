@@ -11,11 +11,12 @@ edition.workspace = true
 test = false
 
 [features]
-debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs"]
+debugmozjs = ['js/debugmozjs', "cpp-builtins/debugmozjs", "fetch-event/debugmozjs"]
 
 [dependencies]
 core-runtime.workspace = true
 js.workspace = true
+fetch-event.workspace = true
 url.workspace = true
 web-fetch.workspace = true
 web-globals.workspace = true
