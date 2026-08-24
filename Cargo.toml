@@ -50,6 +50,7 @@ wpt-support = { path = "crates/wpt-support" }
 # ] }
 
 # Builtins
+fetch-event = { path = "crates/builtins/fetch-event" }
 simple-http = { path = "crates/builtins/simple-http" }
 web-fetch = { path = "crates/builtins/web-fetch" }
 web-globals = { path = "crates/builtins/web-globals" }

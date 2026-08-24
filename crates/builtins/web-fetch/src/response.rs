@@ -731,18 +731,14 @@ impl crate::incoming_body::HostBackedBodyOwner for Response<'_> {
 }
 
 impl Response<'_> {
-    /// The response's status and a copy of its header list — for serializing a `Response` produced
-    /// by a `fetch` handler onto an outgoing HTTP response (the serve path).
-    pub fn status_and_headers(&self, scope: &Scope<'_>) -> (u16, Vec<(String, String)>) {
-        let status = self.data().response.status;
-        let headers = self
-            .headers(scope)
+    /// Returns a copy of the response's header list.
+    pub fn headers_list(&self, scope: &Scope<'_>) -> Vec<(String, String)> {
+        self.headers(scope)
             .data()
             .header_list
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        (status, headers)
+            .collect()
     }
 
     /// The response's body as a [`platform::http::OutgoingBody`] for sending on the wire, on the
@@ -752,5 +748,17 @@ impl Response<'_> {
     /// does.
     pub fn take_send_body(&self, scope: &Scope<'_>) -> platform::http::OutgoingBody {
         crate::outgoing_body::outgoing_body(scope, self)
+    }
+
+    /// <https://fetch.spec.whatwg.org/#body-unusable>
+    ///
+    /// Whether the body is non-null and its stream already `disturbed` or `locked`.
+    pub fn is_body_unusable(&self, scope: &Scope<'_>) -> bool {
+        BodyMixin::is_unusable(self, scope)
+    }
+
+    /// Mark the body as read, so `bodyUsed` reports true.
+    pub fn mark_body_used(&self) {
+        BodyMixin::set_source_disturbed(self);
     }
 }

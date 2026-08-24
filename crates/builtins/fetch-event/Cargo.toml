@@ -1,0 +1,27 @@
+[package]
+name = "fetch-event"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[features]
+# For `cargo test --features debugmozjs`.
+debugmozjs = ["js/debugmozjs"]
+
+[dependencies]
+core-runtime.workspace = true
+js.workspace = true
+web-fetch.workspace = true
+web-globals.workspace = true
+
+[dev-dependencies]
+futures-lite.workspace = true
+libstarling.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
