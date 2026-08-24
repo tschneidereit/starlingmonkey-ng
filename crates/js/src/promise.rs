@@ -7,9 +7,11 @@
 //! handle type. It provides methods for state inspection, resolution/rejection,
 //! and adding reactions.
 
+use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use crate::builtins::JSType;
+use crate::function::Callback;
 use crate::gc::handle::{RootedHeap, Stack};
 use crate::gc::scope::Scope;
 use crate::prelude::ToJSVal;
@@ -373,6 +375,120 @@ impl<'s> Stack<'s, Promise> {
 }
 
 crate::gc::handle::deref_to_object!(Promise);
+
+/// The WebIDL [`Promise<T>`](https://webidl.spec.whatwg.org/#idl-promise) type:
+/// a `Promise<'s>` that carries the type its value is checked against.
+///
+/// Instead of immediately type-checking the value, it's wrapped in a `Promise`
+/// with a resolution callback that checks the value and rejects if it's not of
+/// the right type. Consumers of a `PromiseOf<'s, T>` are guaranteed to get a
+/// resolution value that is of type `T`, or a rejection.
+///
+/// The builtins macros perform this conversion wherever a `PromiseOf<'_, T>`
+/// appears as a method parameter or a `#[webidl_dictionary]` member, so the
+/// code behind it receives the already-wrapped promise. A bare `Promise<'_>` in
+/// either position is the same conversion without the check, for `Promise<any>`
+/// and `Promise<undefined>` (whose `T` every value converts to).
+///
+/// `PromiseOf<'s, T>` derefs to [`Promise<'s>`](crate::Promise).
+pub struct PromiseOf<'s, T> {
+    promise: crate::Promise<'s>,
+    /// `T` is a witness for the check the promise carries, not something the
+    /// handle owns, so it must not constrain variance or auto traits.
+    value_type: PhantomData<fn() -> T>,
+}
+
+impl<'s, T> PromiseOf<'s, T> {
+    /// [Convert a JavaScript value to a `Promise<T>`][convert], then arrange
+    /// for the eventual value to be checked against `T`.
+    ///
+    /// `check` is the fulfillment reaction: it converts the value to `T` and
+    /// returns it, or rejects. It is supplied by the calling macro, which knows
+    /// `T` syntactically; [`check_promise_value_type`] is what it runs. Nothing
+    /// ties `check` to `T` — pairing them is the caller's obligation, which is
+    /// why this is meant for generated code rather than hand-written builtins.
+    ///
+    /// [convert]: https://webidl.spec.whatwg.org/#js-to-promise
+    #[doc(hidden)]
+    pub fn new(
+        scope: &'s Scope<'_>,
+        value: impl ToJSVal<'s>,
+        check: Callback,
+    ) -> Result<Self, ExnThrown> {
+        // Steps 1–2: `NewPromiseCapability(%Promise%)`, then resolve it with the value.
+        let wrapped = Stack::<Promise>::new_resolved_with_value(scope, value)?;
+        // `react` to the wrapper with the conversion to `T` as its fulfillment steps. Resolving
+        // with a non-thenable settles `wrapped` immediately, so the check runs in the next
+        // microtask; resolving with a thenable defers it to that thenable's resolution.
+        // TODO: check if we can use a singleton callback per type here.
+        let on_fulfilled =
+            crate::Function::new_callback(scope, c"", 1, check, crate::value::undefined())?;
+        // A `None` rejection reaction forwards the rejection unchanged, which is what the spec's
+        // `onRejectedSteps` amount to for a caller that supplies no rejection steps.
+        let checked = wrapped.then(scope, Some(*on_fulfilled), None)?;
+        Ok(Self {
+            promise: checked,
+            value_type: PhantomData,
+        })
+    }
+
+    /// The underlying promise resolving to the type-checked result.
+    pub fn promise(&self) -> crate::Promise<'s> {
+        self.promise
+    }
+}
+
+/// The body of the fulfillment reaction [`PromiseOf::new`] attaches: convert
+/// `value` to `T` and hand it back, per [reacting to a promise][react]'s
+/// `onFulfilledSteps` ("convert V to an IDL value of type T", then "return
+/// result, converted to a JavaScript value"). A failed conversion throws, which
+/// rejects the promise the method holds.
+///
+/// The reaction itself can't be generic — a [`Callback`] is a plain `fn`
+/// pointer, and a rooted `T` ties its lifetime to the scope it was rooted in,
+/// which no `for<'a>` bound can express. Callers wrap this in a `fn` item
+/// instantiated for one concrete `T`, which is what the builtins macros emit.
+/// `type_name` is how they spell `T` for the failure message.
+///
+/// [react]: https://webidl.spec.whatwg.org/#dfn-perform-steps-once-promise-is-settled
+pub fn check_promise_value_type<'s, 'v, T>(
+    scope: &'s Scope<'s>,
+    value: HandleValue<'v>,
+    type_name: &str,
+) -> Result<crate::native::Value, ExnThrown>
+where
+    T: crate::conversion::FromJSVal<'s, 'v, Config = ()> + ToJSVal<'s>,
+{
+    match T::from_jsval(scope, value, ()) {
+        Ok(_) => Ok(value.get()),
+        Err(_) => {
+            // Clear any exception the attempted conversion might have thrown, and throw a more
+            // descriptive one.
+            crate::exception::clear(scope);
+            let _ = crate::exception::take_pending_or_undefined(scope);
+            let message = std::ffi::CString::new(format!(
+                "promise resolved with a value that is not a {type_name}"
+            ))
+            .unwrap_or_else(|_| c"promise resolved with a value of the wrong type".into());
+            Err(crate::error::throw_type_error(scope, &message))
+        }
+    }
+}
+
+impl<T> Clone for PromiseOf<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for PromiseOf<'_, T> {}
+
+impl<'s, T> std::ops::Deref for PromiseOf<'s, T> {
+    type Target = crate::Promise<'s>;
+    fn deref(&self) -> &Self::Target {
+        &self.promise
+    }
+}
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;

@@ -57,7 +57,7 @@ unsafe impl js::heap::Trace for AbortAlgorithm {
 /// <https://dom.spec.whatwg.org/#interface-abortsignal>
 #[webidl_interface(extends = EventTarget)]
 pub struct AbortSignal {
-    parent: EventTarget,
+    parent: EventTargetImpl,
 
     /// <https://dom.spec.whatwg.org/#abortsignal-abort-reason>
     pub(crate) abort_reason: Heap<Value>,

@@ -251,6 +251,9 @@ pub type Array<'s> = Stack<'s, array::Array>;
 /// A scope-rooted handle to a JavaScript `Promise` object.
 pub type Promise<'s> = Stack<'s, promise::Promise>;
 
+/// A `Promise` that resolves to a type-checked value, or rejects on type check failure.
+pub use promise::PromiseOf;
+
 /// A scope-rooted handle to a JavaScript `Date` object.
 pub type Date<'s> = Stack<'s, date::Date>;
 

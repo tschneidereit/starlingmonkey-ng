@@ -23,12 +23,14 @@ use crate::class_spec::{
 };
 use crate::conversion::{ConversionBehavior, ConversionError, FromJSVal, ToJSVal};
 use crate::error::{capture_stack_from_error, ExnThrown};
+use crate::function::Callback;
 use crate::gc::handle::Stack;
 use crate::gc::scope::{RootScope, Scope};
 use crate::heap::{MozHeap, Trace};
 use crate::native::{
     CallArgs, GCContext, HandleObject, JSNative, JSObject, JSTracer, RawJSContext, Value,
 };
+use crate::promise::PromiseOf;
 use crate::value;
 use crate::Object;
 use mozjs::gc::Handle;
@@ -320,6 +322,11 @@ impl<T: ClassDef> JSType for T {
 /// not need rooting, such as `i32`, `f64` or `String`, or be a scope-rooted
 /// type, such as `HandleValue<'_>`, `Promise<'_>`, or `Request<'_>`.
 ///
+/// Each element is converted through `FromJSVal`, so a `Promise<'_>` element is
+/// a *brand check*, unlike a `Promise<'_>` parameter, which is the WebIDL
+/// `Promise<T>` conversion that accepts any value (see [`PromiseOf`]). WebIDL
+/// has no variadic promise argument, so nothing needs the other behavior.
+///
 /// Note that instead of `HandleValue<'_>`, you can also use `&CallArgs`, which gives you access
 /// to the raw, already rooted, arguments vector and count.
 ///
@@ -389,14 +396,15 @@ impl<'a, T> IntoIterator for &'a RestArgs<T> {
 /// the child's prototype will have its `__proto__` set to the parent's prototype
 /// during class registration.
 ///
-/// The child struct must embed the parent as a field named `parent`.
+/// The child struct embeds the parent's data as a field named `parent`, typed
+/// as the parent's `Impl`.
 ///
 /// # Usage
 ///
 /// ```rust,ignore
 /// #[jsclass(extends = Animal)]
 /// struct Dog {
-///     parent: Animal,
+///     parent: AnimalImpl,
 ///     breed: String,
 /// }
 /// ```
@@ -562,6 +570,33 @@ pub struct Ref<'a, T: ?Sized> {
     flag: &'a Cell<BorrowFlag>,
 }
 
+impl<'a, T: ?Sized> Ref<'a, T> {
+    /// Narrow a guard to part of what it borrows — `Ref<'_, DogImpl>` to the
+    /// `Ref<'_, str>` of one of its fields, say.
+    ///
+    /// This is how a method returns something borrowed out of its class's data
+    /// rather than a copy of it. A bare `&str` can't be returned: it would
+    /// borrow from the guard, which is a temporary. The projected guard holds
+    /// the borrow open instead, and a `#[method]`/`#[getter]` may return it
+    /// directly — [`ToJSVal`] converts through to the borrowed value, with the
+    /// borrow still live, so `-> Ref<'_, str>` builds the JS string straight
+    /// from the stored bytes where `-> String` would copy them first.
+    ///
+    /// An associated function, not a method, so it can't shadow a field or
+    /// method of `T` reached through [`Deref`](std::ops::Deref) — the same
+    /// reason [`std::cell::Ref::map`] is one.
+    #[inline]
+    pub fn map<U: ?Sized>(orig: Self, project: impl FnOnce(&'a T) -> &'a U) -> Ref<'a, U> {
+        // The projection inherits the borrow rather than taking a second one, so the original
+        // guard must not run its `Drop` and release it.
+        let orig = std::mem::ManuallyDrop::new(orig);
+        Ref {
+            value: project(orig.value),
+            flag: orig.flag,
+        }
+    }
+}
+
 impl<T: ?Sized> std::ops::Deref for Ref<'_, T> {
     type Target = T;
     #[inline]
@@ -574,6 +609,19 @@ impl<T: ?Sized> Drop for Ref<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.flag.set(self.flag.get() - 1);
+    }
+}
+
+/// Convert what the guard borrows, with the borrow still held.
+///
+/// This is what makes a borrowed return type work: the trampoline converts the
+/// value while the guard is alive, and drops it after. Sound because a
+/// conversion neither moves the input nor runs author code that could reentrantly
+/// borrow this same object.
+impl<'s, T: ToJSVal<'s> + ?Sized> ToJSVal<'s> for Ref<'_, T> {
+    #[inline]
+    fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<crate::native::Value, ConversionError> {
+        (**self).to_jsval_raw(scope)
     }
 }
 
@@ -1901,6 +1949,59 @@ pub unsafe fn get_arg_with_config<'s, 'v, T: FromJSVal<'s, 'v>>(
     config: T::Config,
 ) -> Result<T, ExnThrown> {
     extract_arg(scope, args, index, true, config)
+}
+
+/// Extract a WebIDL `Promise<T>` argument from CallArgs.
+///
+/// Performs an eager argc check that throws on missing arguments, and then
+/// registers a type check for `T` on the value a promise resolved with the
+/// argument resolves to.
+///
+/// # Safety
+///
+/// - `scope` must be in a valid realm.
+/// - `args` must be from a valid JSNative call.
+#[doc(hidden)]
+pub unsafe fn get_checked_promise_arg<'s, T>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    index: u32,
+    check: Callback,
+) -> Result<PromiseOf<'s, T>, ExnThrown> {
+    let value = promise_arg_value(scope, args, index)?;
+    PromiseOf::new(scope, value, check)
+}
+
+/// Extract an unchecked WebIDL `Promise<T>` argument, for the `T`s that can't
+/// fail type checks, such as `any` and `undefined`.
+///
+/// # Safety
+///
+/// - `scope` must be in a valid realm.
+/// - `args` must be from a valid JSNative call.
+#[doc(hidden)]
+pub unsafe fn get_unchecked_promise_arg<'s>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    index: u32,
+) -> Result<crate::Promise<'s>, ExnThrown> {
+    let value = promise_arg_value(scope, args, index)?;
+    crate::Promise::new_resolved_with_value(scope, value)
+}
+
+/// The raw value a `Promise<T>` argument wraps, or a "Not enough arguments" exception.
+unsafe fn promise_arg_value<'s>(
+    scope: &'s Scope<'s>,
+    args: &CallArgs,
+    index: u32,
+) -> Result<mozjs::gc::HandleValue<'s>, ExnThrown> {
+    if index >= args.argc_ {
+        return Err(crate::error::throw_type_error(
+            scope,
+            c"Not enough arguments",
+        ));
+    }
+    Ok(Handle::from_raw(args.get(index)))
 }
 
 /// Extract a stack newtype argument from CallArgs.

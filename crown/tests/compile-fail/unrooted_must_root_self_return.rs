@@ -32,6 +32,12 @@ impl Other {
         //~^ ERROR: Type must be rooted
         unimplemented!()
     }
+
+    // Wrapping the return in a `Result` doesn't buy an exemption either.
+    fn try_make_guarded(&self) -> Result<Guarded, ()> {
+        //~^ ERROR: Type must be rooted
+        unimplemented!()
+    }
 }
 
 fn main() {}

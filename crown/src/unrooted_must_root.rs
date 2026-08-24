@@ -113,6 +113,16 @@ fn must_root_allows_self_return(sym: &Symbols, cx: &LateContext, did: DefId) -> 
         })
 }
 
+/// Looks through a `Result<T, E>` return type to `T`, leaving any other type
+/// alone. A constructor is allowed to be fallible, and `Result` hands its `Ok`
+/// value straight on to the caller just as a bare return does.
+fn peel_result<'tcx>(cx: &LateContext<'tcx>, ty: ty::Ty<'tcx>) -> ty::Ty<'tcx> {
+    match ty.kind() {
+        ty::Adt(def, args) if cx.tcx.is_diagnostic_item(sym::Result, def.did()) => args.type_at(0),
+        _ => ty,
+    }
+}
+
 /// Checks if a type is unrooted or contains any owned unrooted types
 fn is_unrooted_ty<'tcx>(
     sym: &'_ Symbols,
@@ -502,9 +512,10 @@ impl<'tcx> LateLintPass<'tcx> for UnrootedPass {
             }
 
             // An associated fn returning its own `must_root(allow_self_return)`
-            // type is constructor-shaped and exempt from the return check;
-            // callers holding the returned value are still flagged.
-            let exempt_self_return = match sig.output().skip_binder().kind() {
+            // type, bare or as the `Ok` of a `Result`, is constructor-shaped
+            // and exempt from the return check; callers holding the returned
+            // value are still flagged.
+            let exempt_self_return = match peel_result(cx, sig.output().skip_binder()).kind() {
                 ty::Adt(ret_def, _) => {
                     must_root_allows_self_return(&self.symbols, cx, ret_def.did())
                         && cx

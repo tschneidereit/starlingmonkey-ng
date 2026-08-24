@@ -135,7 +135,7 @@ impl Shape {
 /// Circle — extends Shape, adds a radius.
 #[jsclass(extends = Shape)]
 struct Circle {
-    parent: Shape,
+    parent: ShapeImpl,
     radius: f64,
 }
 
@@ -175,7 +175,7 @@ impl Circle {
 /// Rect — extends Shape, adds width and height.
 #[jsclass(extends = Shape)]
 struct Rect {
-    parent: Shape,
+    parent: ShapeImpl,
     width: f64,
     height: f64,
 }

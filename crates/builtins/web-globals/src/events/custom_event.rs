@@ -18,7 +18,7 @@ use super::event::{Event, EventImpl};
 /// <https://dom.spec.whatwg.org/#interface-customevent>
 #[webidl_interface(extends = Event)]
 pub struct CustomEvent {
-    parent: Event,
+    parent: EventImpl,
     /// <https://dom.spec.whatwg.org/#dom-customevent-detail>
     detail: Heap<Value>,
 }
@@ -27,15 +27,11 @@ pub struct CustomEvent {
 impl CustomEvent {
     /// <https://dom.spec.whatwg.org/#dom-customevent-customevent>
     #[constructor]
-    fn new(event_type: String, event_init_dict: Option<CustomEventInit<'_>>) -> Self {
-        let opts = event_init_dict.unwrap_or_default();
-        let parent_init = EventInit {
-            bubbles: opts.bubbles,
-            cancelable: opts.cancelable,
-            composed: opts.composed,
-        };
+    fn new(event_type: String, event_init_dict: Option<&CustomEventInit<'_>>) -> Self {
+        let default = CustomEventInit::default();
+        let opts = event_init_dict.unwrap_or(&default);
         CustomEventImpl {
-            parent: EventImpl::new(event_type, Some(parent_init)),
+            parent: EventImpl::new_untrusted(event_type, Some(opts.parent)),
             detail: Heap::from(opts.detail.map_or(value::null(), |h| h.get())),
         }
     }
@@ -60,8 +56,7 @@ impl CustomEvent {
             return;
         }
         // Step 2: `Initialize` `this` with _type_, _bubbles_, and _cancelable_.
-        super::event::initialize_event(
-            &mut self.data_mut().parent,
+        self.data_mut().initialize(
             event_type,
             bubbles.unwrap_or(false),
             cancelable.unwrap_or(false),
@@ -76,16 +71,9 @@ impl CustomEvent {
 }
 
 /// <https://dom.spec.whatwg.org/#dictdef-customeventinit>
-///
-/// Includes inherited members from EventInit: bubbles, cancelable, composed.
 #[derive(Default)]
-#[webidl_dictionary]
+#[webidl_dictionary(extends = EventInit)]
 pub struct CustomEventInit<'a> {
-    #[webidl(default = false)]
-    pub bubbles: bool,
-    #[webidl(default = false)]
-    pub cancelable: bool,
-    #[webidl(default = false)]
-    pub composed: bool,
+    pub parent: EventInit,
     pub detail: Option<HandleValue<'a>>,
 }

@@ -19,6 +19,12 @@ impl Foo {
     fn origin() -> Foo {
         Foo(0)
     }
+
+    // A constructor is allowed to be fallible: the `Ok` value is handed on to
+    // the caller just as a bare return is.
+    fn parse(text: &str) -> Result<Foo, ()> {
+        text.parse().map(Foo).map_err(|_| ())
+    }
 }
 
 trait Doubled {

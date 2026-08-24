@@ -451,7 +451,7 @@ mod setup_style_inheritance {
 
     #[jsclass(extends = Pet)]
     struct Lily {
-        parent: Pet,
+        parent: PetImpl,
         cuteness: f64,
     }
 
@@ -539,6 +539,7 @@ mod setup_style_inheritance {
 mod webidl_dictionary_tests {
     use core_runtime::test_util::{eval_with_setup, throws_with_setup};
     use core_runtime::{jsmethods, webidl_dictionary, webidl_interface};
+    use js::gc::scope::Scope;
     use js::Object;
 
     // A dictionary with all required members.
@@ -577,10 +578,122 @@ mod webidl_dictionary_tests {
         pub special: String,
     }
 
+    // A three-level inheritance chain. Each level adds one member, and the members are named so
+    // that sorting them as one flat set would interleave the levels — `bottom` and `base` sort
+    // before `middle`, which sorts before `top`, so a flat merge reads them in a different order
+    // than the spec's "inherited dictionaries first, least derived first".
+    #[webidl_dictionary]
+    pub struct BaseInit {
+        #[webidl(default = String::new())]
+        pub top: String,
+        #[webidl(default = String::new())]
+        pub base: String,
+    }
+
+    #[webidl_dictionary(extends = BaseInit)]
+    pub struct MiddleInit {
+        pub parent: BaseInit,
+        #[webidl(default = String::new())]
+        pub middle: String,
+    }
+
+    #[webidl_dictionary(extends = MiddleInit)]
+    pub struct DerivedInit<'a> {
+        pub parent: MiddleInit,
+        #[webidl(default = String::new())]
+        pub bottom: String,
+        /// Present only to make the derived dictionary carry a lifetime while its parents don't —
+        /// the shape `FetchEventInit` has.
+        pub extra: Option<Object<'a>>,
+    }
+
     // A class that uses dictionary parameters.
     #[webidl_interface]
     struct Greeter {
         greeting: String,
+    }
+
+    #[webidl_interface]
+    struct Inherited {
+        /// The inherited members, read through `Deref` at each level of the chain.
+        members: String,
+    }
+
+    #[jsmethods]
+    impl Inherited {
+        #[constructor]
+        fn new(init: &DerivedInit<'_>) -> Self {
+            Self {
+                // `top` and `base` live two levels up, `middle` one — `Deref` walks the chain.
+                members: format!(
+                    "{} {} {} {} {}",
+                    init.top,
+                    init.base,
+                    init.middle,
+                    init.bottom,
+                    init.extra.is_some()
+                ),
+            }
+        }
+
+        #[getter]
+        fn members(&self) -> String {
+            self.data().members.clone()
+        }
+
+        /// An `Option<&T>` parameter, and the reason references are worth having: `&DerivedInit`
+        /// coerces to `&MiddleInit` and on to `&BaseInit` at the call, so a value can be handed to
+        /// something that wants an ancestor without taking it apart first.
+        #[method]
+        fn describe(&self, derived: &DerivedInit<'_>, other: Option<&MiddleInit>) -> String {
+            fn base(init: &BaseInit) -> String {
+                format!("{}/{}", init.top, init.base)
+            }
+            match other {
+                Some(other) => format!("{} {}", base(derived), base(other)),
+                None => base(derived),
+            }
+        }
+
+        /// The same string as `members`, lent rather than copied: the guard holds the borrow open
+        /// until the trampoline has built the JS string from the stored bytes.
+        #[getter]
+        fn borrowed_members(&self) -> js::class::Ref<'_, str> {
+            js::class::Ref::map(self.data(), |data| data.members.as_str())
+        }
+
+        /// Takes a *mutable* borrow, so it panics if a lent value ever failed to give its
+        /// shared borrow back.
+        #[method]
+        fn touch(&self) {
+            self.data_mut().members.push('!');
+        }
+
+        /// `&str` parameters. A call from JS still has to copy the string out of the engine, so
+        /// this buys nothing there; what it buys is Rust callers, which can pass a borrow.
+        #[method]
+        fn label(&self, prefix: &str, suffix: Option<&str>) -> String {
+            format!("{prefix}{}{}", self.data().members, suffix.unwrap_or(""))
+        }
+
+        /// `&[T]` parameters. An integer element routes through the configured conversion and a
+        /// non-integer one through the plain path, so both are worth covering.
+        #[method]
+        fn tally(&self, bytes: &[u8], words: Option<&[String]>) -> String {
+            let sum: u32 = bytes.iter().map(|byte| u32::from(*byte)).sum();
+            format!("{} {} {}", bytes.len(), sum, words.map_or(0, <[_]>::len))
+        }
+
+        /// A promise-returning operation puts its argument extractions inside a closure, so the
+        /// lent value has to outlive the call there too.
+        #[method]
+        fn describe_later<'r>(
+            &self,
+            scope: &'r Scope<'_>,
+            derived: &DerivedInit<'_>,
+        ) -> Result<js::Promise<'r>, js::error::ExnThrown> {
+            js::Promise::new_resolved_with_value(scope, format!("{}!", derived.top))
+        }
     }
 
     #[jsmethods]
@@ -636,6 +749,7 @@ mod webidl_dictionary_tests {
         core_runtime::runtime::register_global_initializer(|scope, global| {
             Greeter::add_to_global(scope, global);
             Config::add_to_global(scope, global);
+            Inherited::add_to_global(scope, global);
         });
     }
 
@@ -697,6 +811,129 @@ mod webidl_dictionary_tests {
         assert_eq!(
             eval("new Greeter({ name: 'Dana', age: 18 }, null).greeting"),
             "Hello, Dana (age 18)."
+        );
+    }
+
+    // Inheritance
+
+    #[test]
+    fn inherited_members_are_read_through_the_chain() {
+        assert_eq!(
+            eval(
+                "new Inherited({ top: 'T', base: 'B', middle: 'M', bottom: 'b', extra: {} })
+                    .members"
+            ),
+            "T B M b true"
+        );
+    }
+
+    #[test]
+    fn inherited_members_absent_take_their_defaults() {
+        assert_eq!(eval("new Inherited({}).members"), "    false");
+    }
+
+    #[test]
+    fn inherited_dictionaries_convert_least_derived_first() {
+        // Every member is a property get, so an accessor on the source object records the order
+        // the conversion reads them in. WebIDL: the inherited dictionaries first, least derived
+        // first, each one's own members lexicographically. Sorting all five as one flat set would
+        // give `base, bottom, extra, middle, top` — this asserts the chain is walked instead.
+        assert_eq!(
+            eval(
+                r#"
+                const order = [];
+                const spy = (name) => ({
+                    get() { order.push(name); return name === 'extra' ? {} : name; },
+                    enumerable: true,
+                });
+                const init = Object.defineProperties({}, {
+                    top: spy('top'), base: spy('base'), middle: spy('middle'),
+                    bottom: spy('bottom'), extra: spy('extra'),
+                });
+                new Inherited(init);
+                order.join(',')
+                "#
+            ),
+            "base,top,middle,bottom,extra"
+        );
+    }
+
+    #[test]
+    fn dictionaries_can_be_taken_by_reference() {
+        // Both the plain and the `Option` form, and the absent case for the latter.
+        assert_eq!(
+            eval("new Inherited({}).describe({ top: 'T', base: 'B' }, { top: 't', base: 'b' })"),
+            "T/B t/b"
+        );
+        assert_eq!(
+            eval("new Inherited({}).describe({ top: 'T', base: 'B' })"),
+            "T/B"
+        );
+        assert_eq!(
+            eval("new Inherited({}).describe({ top: 'T', base: 'B' }, undefined)"),
+            "T/B"
+        );
+    }
+
+    #[test]
+    fn a_getter_can_lend_a_string_instead_of_copying_it() {
+        // What script sees is an ordinary JS string, identical to the copying getter's.
+        assert_eq!(
+            eval(
+                "const i = new Inherited({ top: 'T', base: 'B' });
+                 `${typeof i.borrowedMembers} ${i.borrowedMembers === i.members}`"
+            ),
+            "string true"
+        );
+    }
+
+    #[test]
+    fn methods_can_take_str_by_reference() {
+        // The `Option<&str>` form covers both present and absent, since `as_deref` is what makes
+        // the present case type-check at all.
+        assert_eq!(
+            eval("new Inherited({ top: 'T' }).label('[', ']')"),
+            "[T    false]"
+        );
+        assert_eq!(
+            eval("new Inherited({ top: 'T' }).label('[')"),
+            "[T    false"
+        );
+        // Conversion is unchanged by the borrow: a non-string argument still coerces.
+        assert_eq!(eval("new Inherited({}).label(1, 2)"), "1    false2");
+    }
+
+    #[test]
+    fn methods_can_take_slices_by_reference() {
+        assert_eq!(
+            eval("new Inherited({}).tally([1, 2, 3], ['a', 'b'])"),
+            "3 6 2"
+        );
+        assert_eq!(eval("new Inherited({}).tally([])"), "0 0 0");
+    }
+
+    #[test]
+    fn lending_a_string_gives_the_borrow_back() {
+        // `touch` borrows the data mutably, which panics if the projected guard held its shared
+        // borrow open past the call that lent it.
+        assert_eq!(
+            eval(
+                "const i = new Inherited({ top: 'T' });
+                 i.borrowedMembers;
+                 i.touch();
+                 i.borrowedMembers.endsWith('!')"
+            ),
+            "true"
+        );
+    }
+
+    #[test]
+    fn a_lent_dictionary_survives_a_promise_returning_call() {
+        // The value is extracted inside the closure that turns a failure into a rejection; the
+        // borrow of it has to reach the call in the same block.
+        assert_eq!(
+            eval("new Inherited({}).describeLater({ top: 'T' }) instanceof Promise"),
+            "true"
         );
     }
 
