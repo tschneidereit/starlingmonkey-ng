@@ -36,39 +36,47 @@ run *ARGS:
     cargo run --features debugmozjs -- {{ARGS}}
 
 # Clone the WPT test suite (shallow clone, ~200MB).
+[group('wpt')]
 clone-wpt-tests *ARGS:
     ./scripts/clone-wpt.sh {{ARGS}}
 
 # Add the hosts entries the WPT server needs to /etc/hosts.
+[group('wpt')]
 wpt-setup *ARGS:
     cat deps/wpt-hosts | sudo tee -a /etc/hosts
 
 # Run WPT tests, optionally filtering by pattern.
+[group('wpt')]
 wpt-test *PATTERN:
     @just build
     node tests/wpt-harness/run-wpt.mjs {{PATTERN}}
 
 # Run WPT tests, optionally filtering by pattern.
+[group('wpt')]
 wpt-test-release *PATTERN:
     @just build-release
     node tests/wpt-harness/run-wpt.mjs --runtime=target/release/starling {{PATTERN}}
 
 # Run WPT tests with verbose output.
+[group('wpt')]
 wpt-test-verbose *PATTERN:
     @just build
     node tests/wpt-harness/run-wpt.mjs -vv {{PATTERN}}
 
 # Run WPT tests and update expectation files.
+[group('wpt')]
 wpt-update *PATTERN:
     @just build
     node tests/wpt-harness/run-wpt.mjs --update-expectations {{PATTERN}}
 
 # Run WPT tests with request restrictions disabled (the non-WPT default).
+[group('wpt')]
 wpt-test-permissive *PATTERN:
     @just build
     node tests/wpt-harness/run-wpt.mjs --permissive {{PATTERN}}
 
 # Run permissive WPT tests and update `permissive_status` expectations.
+[group('wpt')]
 wpt-update-permissive *PATTERN:
     @just build
     node tests/wpt-harness/run-wpt.mjs --permissive --update-expectations {{PATTERN}}
@@ -83,7 +91,7 @@ fmt-check *ARGS:
 
 # Run clippy lints.
 clippy *ARGS:
-    cargo clippy {{ARGS}}
+    cargo clippy --features debugmozjs {{ARGS}}
 
 # Run GC zeal stress tests.
 # Defaults to quick tests on the `js` and `core-runtime` packages.
@@ -153,16 +161,19 @@ test-serve-wasm-release *ARGS:
         cargo test -p serve-test-support --test serve_wasm_e2e {{ARGS}}
 
 # Run WPT tests against the wasm binary.
+[group('wpt')]
 wpt-test-wasm *PATTERN:
     @just build-wasm
     node tests/wpt-harness/run-wpt.mjs --target=wasm {{PATTERN}}
 
 # Run WPT tests against the wasm binary with verbose output.
+[group('wpt')]
 wpt-test-wasm-verbose *PATTERN:
     @just build-wasm
     node tests/wpt-harness/run-wpt.mjs --target=wasm -vv {{PATTERN}}
 
 # Run WPT tests against the wasm binary and update expectations.
+[group('wpt')]
 wpt-update-wasm *PATTERN:
     @just build-wasm
     node tests/wpt-harness/run-wpt.mjs --target=wasm --update-expectations {{PATTERN}}
@@ -175,6 +186,7 @@ wpt-update-wasm *PATTERN:
 # tests can't collide through shared global state. The wasm server asks its host for the same
 # property with `--max-instance-reuse-count 1`, which it has to: a WASIp3 host reuses an instance
 # for many requests by default.
+[group('wpt')]
 wpt-test-serve *PATTERN:
     @just build
     node tests/wpt-harness/run-wpt.mjs --mode=serve {{PATTERN}}
@@ -182,12 +194,14 @@ wpt-test-serve *PATTERN:
 # Run WPT tests against the wasm binary through a serve-mode runtime, pre-initialized with Wizer.
 # This is the configuration a deployed server has: inside a request handler, against a snapshot
 # whose engine and content script are already stood up. Drop `--wizen` to skip the snapshot step.
+[group('wpt')]
 wpt-test-wasm-serve *PATTERN:
     @just build-wasm
     node tests/wpt-harness/run-wpt.mjs --target=wasm --mode=serve --wizen {{PATTERN}}
 
 # Run WPT across every configuration: both targets, each as a command and as a server, from one
 # build per target.
+[group('wpt')]
 wpt-test-all *PATTERN:
     @just wpt-test {{PATTERN}}
     @just wpt-test-wasm {{PATTERN}}
