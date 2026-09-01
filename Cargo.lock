@@ -1598,6 +1598,7 @@ dependencies = [
  "url",
  "wasip3 0.8.0+wasi-0.3.0",
  "web-fetch",
+ "web-file",
  "web-globals",
  "web-streams",
  "web-url",
@@ -2978,6 +2979,19 @@ dependencies = [
  "web-globals",
  "web-streams",
  "web-url",
+]
+
+[[package]]
+name = "web-file"
+version = "0.3.0"
+dependencies = [
+ "core-runtime",
+ "encoding_rs",
+ "js",
+ "libstarling",
+ "tokio",
+ "web-globals",
+ "web-streams",
 ]
 
 [[package]]

@@ -61,6 +61,7 @@ wpt-support = { path = "crates/wpt-support" }
 fetch-event = { path = "crates/builtins/fetch-event" }
 simple-http = { path = "crates/builtins/simple-http" }
 web-fetch = { path = "crates/builtins/web-fetch" }
+web-file = { path = "crates/builtins/web-file" }
 web-globals = { path = "crates/builtins/web-globals" }
 web-streams = { path = "crates/builtins/web-streams" }
 web-url = { path = "crates/builtins/web-url" }

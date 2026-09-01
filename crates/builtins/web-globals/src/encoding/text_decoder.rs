@@ -31,7 +31,7 @@ pub struct TextDecoder {
 impl TextDecoder<'_> {
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder>
     #[constructor]
-    fn new(
+    pub fn new(
         &self,
         label: Option<String>,
         options: Option<TextDecoderOptions>,
@@ -60,28 +60,28 @@ impl TextDecoder<'_> {
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-encoding>
     #[getter]
-    fn encoding(&self) -> String {
+    pub fn encoding(&self) -> String {
         // Step 1: Return this's encoding's name, ASCII lowercased.
         self.data().encoding_name.clone()
     }
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-fatal>
     #[getter(name = "fatal")]
-    fn get_fatal(&self) -> bool {
+    pub fn get_fatal(&self) -> bool {
         // Step 1: Return true if this's error mode is "fatal"; otherwise false.
         self.data().fatal
     }
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-ignorebom>
     #[getter(name = "ignoreBOM")]
-    fn ignore_bom(&self) -> bool {
+    pub fn ignore_bom(&self) -> bool {
         // Step 1: Return this's ignore BOM.
         self.data().ignore_bom
     }
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-decode>
     #[method]
-    fn decode(
+    pub fn decode(
         &self,
         scope: &Scope<'_>,
         input: Option<ArrayBufferViewOrArrayBuffer<'_>>,
