@@ -663,8 +663,9 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
 
             /// Borrow the private Rust data (guard dereferencing to `&data`).
             ///
-            /// Panics if the data is already mutably borrowed (a reentrant
-            /// access to the same object) — see `js::class::Stack::data`.
+            /// In debug builds, panics if the data is already mutably borrowed
+            /// (a reentrant access to the same object). See
+            /// `js::class::Stack::data`.
             pub fn data(&self) -> ::js::class::Ref<'_, #inner_name> {
                 self.0.data().unwrap()
             }
@@ -672,8 +673,9 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             /// Mutably borrow the private Rust data (guard dereferencing to
             /// `&mut data`).
             ///
-            /// Panics if the data is already borrowed (a reentrant access to
-            /// the same object) — see `js::class::Stack::data_mut`.
+            /// In debug builds, panics if the data is already borrowed (a
+            /// reentrant access to the same object). See
+            /// `js::class::Stack::data_mut`.
             pub fn data_mut(&self) -> ::js::class::RefMut<'_, #inner_name> {
                 self.0.data_mut().unwrap()
             }
