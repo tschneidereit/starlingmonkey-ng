@@ -8,7 +8,9 @@
 //! for defining JavaScript classes backed by Rust structs.
 
 use std::any::TypeId;
-use std::cell::{Cell, RefCell};
+#[cfg(debug_assertions)]
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr, CString};
 use std::marker::PhantomData;
@@ -249,22 +251,11 @@ impl<'s, T: JSType + ClassDef> Stack<'s, T> {
     ///
     /// # Panics
     ///
-    /// Panics if the data is already mutably borrowed — i.e. a JS reentry
-    /// borrowed this object's data while a [`data_mut`](Self::data_mut) guard
-    /// was still live.
+    /// In debug builds, panics if the data is already mutably borrowed. That
+    /// happens when a JS reentry borrowed this object's data while a
+    /// [`data_mut`](Self::data_mut) guard was live.
     pub fn data(&self) -> Option<Ref<'_, T>> {
-        let obj = self.handle.get();
-        let flag = unsafe { get_borrow_flag(obj)? };
-        // Check (and panic on conflict) before materializing the `&T`, so the
-        // reference is never created while a mutable borrow is live.
-        acquire_shared(flag);
-        match unsafe { get_private_or_ancestor::<T>(obj) } {
-            Some(value) => Some(Ref { value, flag }),
-            None => {
-                flag.set(flag.get() - 1);
-                None
-            }
-        }
+        unsafe { borrow::<T>(self.handle.get()) }
     }
 
     /// Mutably borrow the private Rust data, returning a guard that
@@ -274,20 +265,11 @@ impl<'s, T: JSType + ClassDef> Stack<'s, T> {
     ///
     /// # Panics
     ///
-    /// Panics if the data is already borrowed (shared or mutable) — i.e. a JS
-    /// reentry borrowed this object's data while a borrow was still live. See
-    /// [`data`](Self::data).
+    /// In debug builds, panics if the data is already borrowed (shared or
+    /// mutable). That happens when a JS reentry borrowed this object's data
+    /// while a borrow was live. See [`data`](Self::data).
     pub fn data_mut(&self) -> Option<RefMut<'_, T>> {
-        let obj = self.handle.get();
-        let flag = unsafe { get_borrow_flag(obj)? };
-        acquire_mut(flag);
-        match unsafe { get_private_or_ancestor_mut::<T>(obj) } {
-            Some(value) => Some(RefMut { value, flag }),
-            None => {
-                flag.set(UNUSED);
-                None
-            }
-        }
+        unsafe { borrow_mut::<T>(self.handle.get()) }
     }
 }
 
@@ -483,17 +465,22 @@ impl<'s, T: ClassDef> StackType<'s> for Stack<'s, T> {
 // ============================================================================
 
 const PRIVATE_DATA_SLOT: u32 = 0;
+#[cfg(debug_assertions)]
 const BORROW_FLAG_SLOT: u32 = 1;
 
 /// Minimum number of reserved slots required for a class instance.
 ///
-/// Slot 0 ([`PRIVATE_DATA_SLOT`]) holds the boxed Rust data; slot 1
-/// ([`BORROW_FLAG_SLOT`]) holds the boxed borrow flag that makes
-/// [`Stack::data`]/[`Stack::data_mut`] safe (see [`BorrowFlag`]).
+/// Slot 0 ([`PRIVATE_DATA_SLOT`]) holds the boxed Rust data. In debug builds,
+/// slot 1 ([`BORROW_FLAG_SLOT`]) holds the boxed borrow flag that
+/// [`Stack::data`]/[`Stack::data_mut`] check (see [`BorrowFlag`]).
 ///
 /// Public for use by generated `ClassDef::CLASS` implementations.
 #[doc(hidden)]
+#[cfg(debug_assertions)]
 pub const MIN_CLASS_RESERVED_SLOTS: u32 = BORROW_FLAG_SLOT + 1;
+#[doc(hidden)]
+#[cfg(not(debug_assertions))]
+pub const MIN_CLASS_RESERVED_SLOTS: u32 = PRIVATE_DATA_SLOT + 1;
 
 // ---------------------------------------------------------------------------
 // Runtime borrow tracking for private data
@@ -506,23 +493,24 @@ pub const MIN_CLASS_RESERVED_SLOTS: u32 = BORROW_FLAG_SLOT + 1;
 // native method takes `&mut` data, calls back into JS, and the re-entered code
 // touches the same object's data, minting a second overlapping reference.
 //
-// To make `data_mut()` safe we track borrows at runtime with a per-object flag
-// stored in `BORROW_FLAG_SLOT`, exactly mirroring `RefCell`: a conflicting
-// borrow (mut/mut or mut/shared) panics rather than aliasing. The flag is a
-// single `Cell` per object shared across the whole inheritance hierarchy, so
-// borrowing a parent's slice conflicts with borrowing the child's. The check is
-// a single-threaded `Cell` read/compare/write, which we assume to have
-// negligible cost next to the JSAPI calls around it, so it's always on, in
-// release as well as debug builds.
-// TODO: benchmark this assumption and consider a debug-only check if it turns out to be costly.
+// In debug builds we track borrows at runtime with a per-object flag stored in
+// `BORROW_FLAG_SLOT`, exactly mirroring `RefCell`: a conflicting borrow
+// (mut/mut or mut/shared) panics rather than aliasing. The flag is a single
+// `Cell` per object shared across the whole inheritance hierarchy, so borrowing
+// a parent's slice conflicts with borrowing the child's. Release builds omit
+// the flag, its slot, and the checks entirely.
 
 /// Borrow state for an object's private data: `0` = unborrowed, `n > 0` = `n`
 /// live shared borrows, `-1` = a live mutable borrow.
+#[cfg(debug_assertions)]
 type BorrowFlag = isize;
 
+#[cfg(debug_assertions)]
 const UNUSED: BorrowFlag = 0;
+#[cfg(debug_assertions)]
 const WRITING: BorrowFlag = -1;
 
+#[cfg(debug_assertions)]
 #[cold]
 #[inline(never)]
 fn borrow_conflict(mutable: bool) -> ! {
@@ -543,6 +531,7 @@ fn borrow_conflict(mutable: bool) -> ! {
 ///
 /// Must be called *before* materializing the `&T`, so the reference is never
 /// created while a conflicting borrow is live.
+#[cfg(debug_assertions)]
 fn acquire_shared(flag: &Cell<BorrowFlag>) {
     let f = flag.get();
     if f < UNUSED {
@@ -552,6 +541,7 @@ fn acquire_shared(flag: &Cell<BorrowFlag>) {
 }
 
 /// Take a mutable borrow on `flag`, panicking if it is borrowed at all.
+#[cfg(debug_assertions)]
 fn acquire_mut(flag: &Cell<BorrowFlag>) {
     if flag.get() != UNUSED {
         borrow_conflict(true);
@@ -559,14 +549,76 @@ fn acquire_mut(flag: &Cell<BorrowFlag>) {
     flag.set(WRITING);
 }
 
+/// Take a shared borrow of `obj`'s private data of type `T`.
+///
+/// Returns `None` if `obj` has no private data of type `T`. In debug builds,
+/// panics if the data is already mutably borrowed.
+///
+/// # Safety
+///
+/// `obj` must be a valid JS object created with at least
+/// [`MIN_CLASS_RESERVED_SLOTS`] reserved slots.
+unsafe fn borrow<'a, T: ClassDef>(obj: *mut JSObject) -> Option<Ref<'a, T>> {
+    // Check (and panic on conflict) before materializing the `&T`, so the
+    // reference is never created while a mutable borrow is live.
+    #[cfg(debug_assertions)]
+    let flag = {
+        let flag = unsafe { get_borrow_flag(obj)? };
+        acquire_shared(flag);
+        flag
+    };
+    match unsafe { get_private_or_ancestor::<T>(obj) } {
+        Some(value) => Some(Ref {
+            value,
+            #[cfg(debug_assertions)]
+            flag,
+        }),
+        None => {
+            #[cfg(debug_assertions)]
+            flag.set(flag.get() - 1);
+            None
+        }
+    }
+}
+
+/// Take a mutable borrow of `obj`'s private data of type `T`.
+///
+/// Returns `None` if `obj` has no private data of type `T`. In debug builds,
+/// panics if the data is already borrowed.
+///
+/// # Safety
+///
+/// Same as [`borrow`].
+unsafe fn borrow_mut<'a, T: ClassDef>(obj: *mut JSObject) -> Option<RefMut<'a, T>> {
+    #[cfg(debug_assertions)]
+    let flag = {
+        let flag = unsafe { get_borrow_flag(obj)? };
+        acquire_mut(flag);
+        flag
+    };
+    match unsafe { get_private_or_ancestor_mut::<T>(obj) } {
+        Some(value) => Some(RefMut {
+            value,
+            #[cfg(debug_assertions)]
+            flag,
+        }),
+        None => {
+            #[cfg(debug_assertions)]
+            flag.set(UNUSED);
+            None
+        }
+    }
+}
+
 /// A shared guard over private data, released when dropped.
 ///
-/// Returned by [`Stack::data`] and [`get_this_data`]. Dereferences to `&T`;
-/// holding it keeps a shared borrow live, so a reentrant mutable borrow of the
-/// same object panics.
+/// Returned by [`Stack::data`] and [`get_this_data`]. Dereferences to `&T`.
+/// Holding a `Ref` keeps a shared borrow live, so a reentrant mutable borrow
+/// of the same object panics in debug builds.
 #[crate::allow_unrooted_interior]
 pub struct Ref<'a, T: ?Sized> {
     value: &'a T,
+    #[cfg(debug_assertions)]
     flag: &'a Cell<BorrowFlag>,
 }
 
@@ -592,6 +644,7 @@ impl<'a, T: ?Sized> Ref<'a, T> {
         let orig = std::mem::ManuallyDrop::new(orig);
         Ref {
             value: project(orig.value),
+            #[cfg(debug_assertions)]
             flag: orig.flag,
         }
     }
@@ -605,6 +658,7 @@ impl<T: ?Sized> std::ops::Deref for Ref<'_, T> {
     }
 }
 
+#[cfg(debug_assertions)]
 impl<T: ?Sized> Drop for Ref<'_, T> {
     #[inline]
     fn drop(&mut self) {
@@ -628,11 +682,12 @@ impl<'s, T: ToJSVal<'s> + ?Sized> ToJSVal<'s> for Ref<'_, T> {
 /// A mutable guard over private data, released when dropped.
 ///
 /// Returned by [`Stack::data_mut`] and [`get_this_data_mut`]. Dereferences to
-/// `&mut T`; holding it keeps the object's data exclusively borrowed, so any
-/// reentrant borrow of the same object panics.
+/// `&mut T`. Holding a `Ref` keeps the object's data exclusively borrowed, so
+/// any reentrant borrow of the same object panics in debug builds.
 #[crate::allow_unrooted_interior]
 pub struct RefMut<'a, T: ?Sized> {
     value: &'a mut T,
+    #[cfg(debug_assertions)]
     flag: &'a Cell<BorrowFlag>,
 }
 
@@ -651,6 +706,7 @@ impl<T: ?Sized> std::ops::DerefMut for RefMut<'_, T> {
     }
 }
 
+#[cfg(debug_assertions)]
 impl<T: ?Sized> Drop for RefMut<'_, T> {
     #[inline]
     fn drop(&mut self) {
@@ -673,9 +729,12 @@ pub unsafe fn set_private<T: 'static>(obj: *mut JSObject, data: T) {
 
     // Install the borrow flag (slot 1). One flag per object, shared across the
     // inheritance hierarchy; dropped alongside the data in `drop_private`.
-    let flag = Box::into_raw(Box::new(Cell::new(UNUSED)));
-    let flag_val = unsafe { value::from_private(flag as *const c_void) };
-    unsafe { crate::object::set_reserved_slot(obj, BORROW_FLAG_SLOT, &flag_val) };
+    #[cfg(debug_assertions)]
+    unsafe {
+        let flag = Box::into_raw(Box::new(Cell::new(UNUSED)));
+        let flag_val = value::from_private(flag as *const c_void);
+        crate::object::set_reserved_slot(obj, BORROW_FLAG_SLOT, &flag_val);
+    }
 }
 
 /// Get the `JSClass` pointer for a `ClassDef` type, cast to `usize`.
@@ -746,13 +805,16 @@ pub unsafe fn drop_private<T: 'static>(obj: *mut JSObject) {
     }
 
     // Drop the borrow flag installed by `set_private`.
-    let flag_val = unsafe { crate::object::get_reserved_slot(obj, BORROW_FLAG_SLOT) };
-    if !flag_val.is_undefined() {
-        let flag_ptr = flag_val.to_private() as *mut Cell<BorrowFlag>;
-        if !flag_ptr.is_null() {
-            let _ = Box::from_raw(flag_ptr);
-            let undef = value::undefined();
-            crate::object::set_reserved_slot(obj, BORROW_FLAG_SLOT, &undef);
+    #[cfg(debug_assertions)]
+    unsafe {
+        let flag_val = crate::object::get_reserved_slot(obj, BORROW_FLAG_SLOT);
+        if !flag_val.is_undefined() {
+            let flag_ptr = flag_val.to_private() as *mut Cell<BorrowFlag>;
+            if !flag_ptr.is_null() {
+                let _ = Box::from_raw(flag_ptr);
+                let undef = value::undefined();
+                crate::object::set_reserved_slot(obj, BORROW_FLAG_SLOT, &undef);
+            }
         }
     }
 }
@@ -1169,6 +1231,7 @@ unsafe fn get_raw_private(obj: *mut JSObject) -> Option<*const c_void> {
 ///
 /// `obj` must be a valid JS object created with at least
 /// [`MIN_CLASS_RESERVED_SLOTS`] reserved slots.
+#[cfg(debug_assertions)]
 unsafe fn get_borrow_flag<'a>(obj: *mut JSObject) -> Option<&'a Cell<BorrowFlag>> {
     let val = unsafe { crate::object::get_reserved_slot(obj, BORROW_FLAG_SLOT) };
     if val.is_undefined() {
@@ -2102,17 +2165,8 @@ pub unsafe fn get_this_data<'a, T: ClassDef>(
     args: &CallArgs,
 ) -> Result<Ref<'a, T>, ExnThrown> {
     let obj = resolve_webidl_this(scope, args, class_tag::<T>())?;
-    let Some(flag) = get_borrow_flag(obj) else {
-        return Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR));
-    };
-    acquire_shared(flag);
-    match get_private_or_ancestor::<T>(obj) {
-        Some(value) => Ok(Ref { value, flag }),
-        None => {
-            flag.set(flag.get() - 1);
-            Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR))
-        }
-    }
+    unsafe { borrow::<T>(obj) }
+        .ok_or_else(|| crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR))
 }
 
 /// Extract the `this` object's private data mutably.
@@ -2127,17 +2181,8 @@ pub unsafe fn get_this_data_mut<'a, T: ClassDef>(
     args: &CallArgs,
 ) -> Result<RefMut<'a, T>, ExnThrown> {
     let obj = resolve_webidl_this(scope, args, class_tag::<T>())?;
-    let Some(flag) = get_borrow_flag(obj) else {
-        return Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR));
-    };
-    acquire_mut(flag);
-    match get_private_or_ancestor_mut::<T>(obj) {
-        Some(value) => Ok(RefMut { value, flag }),
-        None => {
-            flag.set(UNUSED);
-            Err(crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR))
-        }
-    }
+    unsafe { borrow_mut::<T>(obj) }
+        .ok_or_else(|| crate::error::throw_type_error(scope, T::NOT_TYPE_ERROR))
 }
 
 /// Extract the `this` object as a rooted stack newtype in a method callback.
