@@ -36,7 +36,7 @@ JS modules, and functions and properties on the global object.
 StarlingMonkey runs `.js` and `.mjs` files as ES modules by default:
 
 ```bash
-starling script.js
+starlingmonkey script.js
 ```
 
 ES module features work out of the box — `import`/`export`, strict mode, and
@@ -56,19 +56,19 @@ console.log(greet("world"));
 ```
 
 ```bash
-starling main.js
+starlingmonkey main.js
 ```
 
 For quick one-liners, use `-e`:
 
 ```bash
-starling -e 'console.log("hello")'
+starlingmonkey -e 'console.log("hello")'
 ```
 
 For legacy scripts that rely on sloppy mode or a global `this`:
 
 ```bash
-starling --legacy-script old-code.js
+starlingmonkey --legacy-script old-code.js
 ```
 
 ---
@@ -93,7 +93,7 @@ on both native and `wasm32-wasip2` targets.
 ## CLI Reference
 
 ```
-starling [OPTIONS] [SCRIPT_PATH]
+starlingmonkey [OPTIONS] [SCRIPT_PATH]
 
 Arguments:
   [SCRIPT_PATH]   Path to the entry JS/MJS file (default: ./index.js)
@@ -644,6 +644,13 @@ just build-wasm        # debug build for wasm32-wasip2
 just test-wasm         # all Rust tests, on wasm32-wasip2
 just check-wasm        # fmt-check + clippy + wasm tests
 ```
+
+The package builds two targets. `cargo build` produces the native binary
+`target/debug/starlingmonkey`. A wasm build produces the component
+`target/wasm32-wasip2/debug/starling.wasm` from the crate's `cdylib` target. The binary is
+not the wasm entry point, because a binary links `crt1-command.o`, which exports
+`wasi:cli/run` itself and collides with the component's own export on wasm32-wasip3. It is
+still built on wasm targets, where it does nothing.
 
 ---
 

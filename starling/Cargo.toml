@@ -6,8 +6,20 @@ license.workspace = true
 authors.workspace = true
 edition.workspace = true
 
-[[bin]]
+# The wasm artifact. The `cdylib` link pulls in no `crt1-command.o`, so the `export!` in `lib.rs`
+# is the only `wasi:cli/run` in the module. The binary below does link it, and on wasm32-wasip3
+# the `wasi:cli/run@0.3.0#run` it exports collides with that one. The two targets must also differ
+# in name, or both would write `starling.wasm`.
+[lib]
 name = "starling"
+crate-type = ["cdylib"]
+# The wasm entry point, not a library with tests. A test harness is a binary, so it does not
+# receive the `--wrap` link argument `build.rs` emits for the cdylib, and its link fails on an
+# undefined `__real___wasm_call_ctors`.
+test = false
+
+[[bin]]
+name = "starlingmonkey"
 path = "src/main.rs"
 test = false
 
@@ -18,17 +30,17 @@ jitspew = ['js/jitspew']
 intl = ['js/intl']
 
 [dependencies]
-# `core-runtime` and `js` carry no direct use in `main.rs`: the former is needed by the `examples/`
-# (whose `#[jsmodule]` expansions name it), the latter backs the `profilemozjs`/`jitspew`/`intl`
-# features above.
+# `core-runtime` and `js` carry no direct use in `lib.rs` or `main.rs`: the former is needed by the
+# `examples/` (whose `#[jsmodule]` expansions name it), the latter backs the
+# `profilemozjs`/`jitspew`/`intl` features above.
 core-runtime.workspace = true
 js.workspace = true
 libstarling.workspace = true
 wasip3.workspace = true
-# Pinned to the version `wasip3` itself uses, rather than the workspace's. Both generate a
-# `run_ctors_once` guarded by its own static, so two versions in one component means the C++
-# constructors run twice — which a Wizer-resumed instance trips immediately (SpiderMonkey's
-# `InitializeUptime` asserts it is called once).
+# Pinned to the version `wasip3` itself uses, rather than the workspace's, so the component
+# carries one wit-bindgen. Each version generates its own `run_ctors_once` guard, and
+# `__wrap___wasm_call_ctors` in `lib.rs` collapses those onto one, so the C++ constructors run
+# once. SpiderMonkey's `InitializeUptime` asserts it is called once.
 #
 # `inter-task-wakeup` lets one wit task wake another through plain Rust wakers, which the serve
 # path needs: the response-body writer task parks on a Rust channel the request's event-loop
