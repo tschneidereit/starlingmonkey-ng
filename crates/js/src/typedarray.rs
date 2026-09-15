@@ -42,7 +42,6 @@ use crate::builtins::JSType;
 use crate::conversion::{ConversionError, FromJSVal};
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
-use crate::native::RawJSContext;
 use crate::Object;
 use mozjs::gc::{HandleObject, HandleValue};
 use mozjs::jsapi::{JSClass, JSObject, JSProtoKey, JS};
@@ -619,12 +618,12 @@ pub trait TypedArrayKind: JSType {
 
     /// Create a new typed array of this kind with `length` elements.
     ///
-    /// # Safety
-    ///
-    /// `cx` must be a valid JSContext with an entered realm.
-    unsafe fn create_new(cx: *mut RawJSContext, length: usize) -> *mut JSObject;
+    /// The context must have a realm entered.
+    fn create_new(cx: &mut mozjs::context::JSContext, length: usize) -> *mut JSObject;
 
     /// Get the data pointer and element count of an existing typed array.
+    ///
+    /// A detached array yields a null pointer and a length of zero.
     ///
     /// # Safety
     ///
@@ -635,13 +634,13 @@ pub trait TypedArrayKind: JSType {
 impl<'s, T: TypedArrayKind> Stack<'s, T> {
     /// Create a new typed array with `length` elements (zero-initialized).
     pub fn new(scope: &'s Scope<'_>, length: usize) -> Result<Self, ExnThrown> {
-        let obj = unsafe { T::create_new(scope.cx_mut().raw_cx(), length) };
+        let obj = T::create_new(scope.cx_mut(), length);
         root_or_throw(scope, obj)
     }
 
     /// Create a new typed array pre-populated with `data`.
     pub fn with_data(scope: &'s Scope<'_>, data: &[T::Element]) -> Result<Self, ExnThrown> {
-        let obj = unsafe { T::create_new(scope.cx_mut().raw_cx(), data.len()) };
+        let obj = T::create_new(scope.cx_mut(), data.len());
         let nn = NonNull::new(obj).ok_or(ExnThrown)?;
         if !data.is_empty() {
             // SAFETY: just-created array of `data.len()` elements; we have
@@ -753,12 +752,15 @@ macro_rules! typed_array_marker {
         impl TypedArrayKind for $Marker {
             type Element = <$tag as TypedArrayElement>::Element;
 
-            unsafe fn create_new(cx: *mut RawJSContext, length: usize) -> *mut JSObject {
+            fn create_new(cx: &mut mozjs::context::JSContext, length: usize) -> *mut JSObject {
                 <$tag as TypedArrayElementCreator>::create_new(cx, length)
             }
 
             unsafe fn length_and_data(obj: *mut JSObject) -> (*mut Self::Element, usize) {
-                <$tag as TypedArrayElement>::length_and_data(obj)
+                match <$tag as TypedArrayElement>::length_and_data(obj) {
+                    Some(data) => (data.as_ptr().cast(), data.len()),
+                    None => (std::ptr::null_mut(), 0),
+                }
             }
         }
 

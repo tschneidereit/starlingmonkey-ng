@@ -95,6 +95,11 @@ fn main() {
         // within individual .cpp files (e.g. #include "console.h" from a
         // subdirectory) resolve correctly in the unity build.
         .include(&cpp_dir)
+        // `js-confdefs.h` defines the platform macros the SpiderMonkey headers
+        // are configured with (`XP_UNIX`, `XP_DARWIN`, `XP_WIN`, ...). mozjs-sys
+        // force-includes it when compiling its own glue, and headers such as
+        // `mozilla/UniquePtrExtensions.h` fail to compile without it.
+        .flag(format!("-include{mozjs_include}/js-confdefs.h"))
         .warnings(false);
 
     if is_wasm {
@@ -104,7 +109,6 @@ fn main() {
         build.cpp_link_stdlib(None);
 
         build
-            .flag(format!("-include{mozjs_include}/js-confdefs.h"))
             .flag("-Qunused-arguments")
             .flag("-mthread-model")
             .flag("single")

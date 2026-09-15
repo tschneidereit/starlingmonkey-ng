@@ -611,3 +611,70 @@ fn test_js_api_with_runtime() {
         }
     }
 }
+
+/// `js::jobs::queue_microtask` runs a Rust callback as a microtask.
+///
+/// The job is enqueued as a promise reaction, so it is called with the source
+/// promise's `undefined` result, and a job that throws must not stop the jobs
+/// queued behind it.
+#[test]
+fn test_queue_microtask() {
+    use std::cell::Cell;
+
+    thread_local! {
+        static RAN: Cell<u32> = const { Cell::new(0) };
+        static FIRST_ARG_WAS_UNDEFINED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    let rt = Runtime::init(&RuntimeConfig::default());
+    let scope = rt.default_global();
+
+    let record = js::Function::new_callback(
+        &scope,
+        c"record",
+        0,
+        |_scope, args, _| {
+            RAN.with(|n| n.set(n.get() + 1));
+            FIRST_ARG_WAS_UNDEFINED.with(|f| f.set(args.get(0).is_undefined()));
+            Ok(value::undefined())
+        },
+        (),
+    )
+    .unwrap();
+
+    let thrower =
+        js::Function::new_callback(&scope, c"thrower", 0, |_scope, _args, _| Err(ExnThrown), ())
+            .unwrap();
+
+    // Nothing runs until the queue is drained.
+    js::jobs::queue_microtask(&scope, &record).unwrap();
+    assert_eq!(RAN.with(Cell::get), 0);
+    assert!(js::jobs::has_pending_jobs(&scope));
+
+    js::jobs::run_jobs(&scope);
+    assert_eq!(RAN.with(Cell::get), 1);
+    assert!(FIRST_ARG_WAS_UNDEFINED.with(Cell::get));
+
+    // A job that throws leaves no pending exception behind and does not stop
+    // the jobs queued after it.
+    js::jobs::queue_microtask(&scope, &thrower).unwrap();
+    js::jobs::queue_microtask(&scope, &record).unwrap();
+    js::jobs::run_jobs(&scope);
+    assert_eq!(RAN.with(Cell::get), 2);
+    assert!(!js::exception::is_pending(&scope));
+
+    // Jobs run in the order they were queued.
+    let order = js::compile::evaluate(&scope, "globalThis.__order = []; 0").unwrap();
+    assert_eq!(order.to_int32(), 0);
+    for tag in ['a', 'b', 'c'] {
+        let src = format!("() => globalThis.__order.push('{tag}')");
+        let f = js::compile::evaluate(&scope, &src).unwrap();
+        let f = Object::from_value(&scope, f).unwrap();
+        let f = f.cast::<js::Function>().unwrap();
+        js::jobs::queue_microtask(&scope, &f).unwrap();
+    }
+    js::jobs::run_jobs(&scope);
+    let joined = js::compile::evaluate(&scope, "globalThis.__order.join('')").unwrap();
+    let joined = String::from_jsval(&scope, joined, ()).unwrap();
+    assert_eq!(joined, "abc");
+}

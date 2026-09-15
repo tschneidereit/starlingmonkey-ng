@@ -116,14 +116,15 @@ pub fn error_from_exception<'a>(
     scope: &Scope<'_>,
     obj: mozjs::gc::HandleObject<'a>,
 ) -> Option<&'a mozjs::jsapi::JSErrorReport> {
-    let ptr = unsafe { wrappers2::JS_ErrorFromException(scope.cx(), obj) };
-    if ptr.is_null() {
-        None
-    } else {
-        // SAFETY: SpiderMonkey guarantees the report pointer is valid for the
-        // lifetime of the Error object, which is kept alive by the Handle.
-        Some(unsafe { &*ptr })
-    }
+    mozjs::rust::borrowed_error_report(scope.cx(), |cx, report| {
+        if !unsafe { wrappers2::JS_ErrorFromException(cx, obj, report) } {
+            return None;
+        }
+        // SAFETY: the call populated the report, and SpiderMonkey keeps it
+        // alive for the lifetime of the Error object, which is kept alive by
+        // the Handle.
+        Some(unsafe { &*report.report_ })
+    })
 }
 
 /// Report an uncatchable exception (e.g., OOM or stack overflow).

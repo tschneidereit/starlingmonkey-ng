@@ -136,7 +136,7 @@ impl<'s> Str<'s> {
         scope: &'s Scope<'_>,
         val: mozjs::gc::HandleValue,
     ) -> Result<Self, ExnThrown> {
-        let js_str = unsafe { mozjs::rust::ToString(scope.cx_mut().raw_cx(), val) };
+        let js_str = unsafe { mozjs::rust::ToString(scope.cx_mut(), val) };
         Self::from_mozjs_rval(scope, js_str)
     }
 

@@ -547,17 +547,6 @@ impl<'s> Stack<'s, Object> {
         unsafe { Self::from_raw(scope, child).ok_or(ExnThrown) }
     }
 
-    /// Clone an object (shallow copy).
-    pub fn clone_object(
-        scope: &'s Scope<'_>,
-        obj: Stack<'_, Object>,
-        proto: Stack<'_, Object>,
-    ) -> Result<Self, ExnThrown> {
-        let cloned =
-            unsafe { wrappers2::JS_CloneObject(scope.cx_mut(), obj.handle(), proto.handle()) };
-        unsafe { Self::from_raw(scope, cloned).ok_or(ExnThrown) }
-    }
-
     /// Get a constructor from a prototype object.
     pub fn get_constructor(
         scope: &'s Scope<'_>,
@@ -607,22 +596,6 @@ impl<'s> Stack<'s, Object> {
         };
         ExnThrown::check(ok)?;
         Ok(found)
-    }
-
-    /// Copy all own properties and private fields from `src` to this object.
-    pub fn copy_own_properties_and_private_fields(
-        &self,
-        scope: &Scope<'_>,
-        src: Stack<'_, Object>,
-    ) -> Result<(), ExnThrown> {
-        let ok = unsafe {
-            wrappers2::JS_CopyOwnPropertiesAndPrivateFields(
-                scope.cx_mut(),
-                self.handle(),
-                src.handle(),
-            )
-        };
-        ExnThrown::check(ok)
     }
 
     /// Convert a value to an object.

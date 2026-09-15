@@ -75,6 +75,11 @@ strip = "symbols"
 [profile.dev]
 lto = false
 
+# `mozjs_sys` picks its prebuilt `debugmozjs` archive by opt-level, and only `-O3` archives are
+# published. Any other level falls back to building SpiderMonkey from source.
+[profile.dev.package.mozjs_sys]
+opt-level = 3
+
 # [profile.dev.build-override]
 # opt-level = 3
 

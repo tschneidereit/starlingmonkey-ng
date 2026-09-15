@@ -17,7 +17,7 @@
 //! 4. Populate it with native values/functions using `JS_SetProperty` /
 //!    `JS_DefineFunction`
 //!
-//! A module resolve hook maps specifier strings to compiled module objects
+//! A module load hook maps specifier strings to compiled module objects
 //! via a thread-local registry.
 //!
 //! # Example
@@ -41,22 +41,21 @@
 //! The specifier is the `mod` name camelCased, unless overridden with
 //! `#[jsmodule(name = "...")]`.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::ffi::CString;
-use std::path::{Path, PathBuf};
-use std::ptr;
-
-use js::conversion::ToJSVal;
+use js::conversion::{jsstr_to_string, ToJSVal};
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::Trace;
 use js::module_raw::{transform_str_to_source_text, CompileOptionsWrapper, SetModulePrivate};
-use js::native::{HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
+use js::native::{GCHandle, HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
 use js::prelude::{HandleValue, RootScope};
 use js::Object;
 use oxc_resolver::{ResolveOptions, Resolver};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
+use std::ptr::{self, NonNull};
 
 // ============================================================================
 // Module export descriptors
@@ -130,6 +129,18 @@ thread_local! {
     static BASE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
+fn registry<R>(f: impl FnOnce(&RefCell<HashMap<String, ModuleEntry>>) -> R) -> R {
+    MODULE_REGISTRY.with(f)
+}
+
+fn resolver<R>(f: impl FnOnce(&RefCell<Option<Resolver>>) -> R) -> R {
+    RESOLVER.with(f)
+}
+
+fn base_path<R>(f: impl FnOnce(&RefCell<Option<PathBuf>>) -> R) -> R {
+    BASE_PATH.with(f)
+}
+
 /// Trace all cached module objects.
 ///
 /// # Safety
@@ -166,10 +177,11 @@ pub fn remove_module_gc_tracer(cx: &js::native::JSContext) {
 }
 
 // ============================================================================
-// Module resolve hook
+// Module load hook
 // ============================================================================
 
-/// The module resolve hook called by SpiderMonkey when processing `import`.
+/// The module load hook called by SpiderMonkey once per `import` while loading
+/// a module graph.
 ///
 /// Resolution strategy:
 /// 1. Check the module registry for an exact match: native modules by name,
@@ -178,87 +190,109 @@ pub fn remove_module_gc_tracer(cx: &js::native::JSContext) {
 ///    (file-backed modules carry their canonical path in their module
 ///    private), or against the loader's base path for pathless referrers
 ///    (eval scripts, native modules).
-#[js::allow_unrooted]
-unsafe extern "C" fn module_resolve_hook(
+///
+/// Every call ends either by handing the module to
+/// `finish_loading_imported_module` or by returning `false`, which leaves the
+/// engine to fail the load with the exception this reported.
+unsafe extern "C" fn module_load_hook(
     cx: *mut js::native::RawJSContext,
-    referencing_private: js::native::RawHandle<Value>,
+    referrer: js::native::RawHandle<*mut js::native::JSScript>,
     module_request: js::native::RawHandle<*mut JSObject>,
-) -> *mut JSObject {
+    _host_defined: js::native::RawHandle<Value>,
+    payload: js::native::RawHandle<Value>,
+    _line_number: u32,
+    _column_number: js::native::ColumnNumberOneOrigin,
+) -> bool {
+    // SAFETY: cx is a valid RawJSContext from the load hook, which SpiderMonkey
+    // calls with the referrer's realm entered.
+    let scope = unsafe { RootScope::from_current_realm(cx) };
+
     // Extract the specifier string from the ModuleRequest object
     let specifier_str =
         unsafe { js::module_raw::GetModuleRequestSpecifier(cx as _, module_request) };
     if specifier_str.is_null() {
-        return ptr::null_mut();
+        return false;
     }
 
-    let specifier = match unsafe { jsstring_to_string(cx, specifier_str) } {
+    let specifier = match jsstring_to_string(&scope, specifier_str) {
         Some(s) => s,
-        None => return ptr::null_mut(),
+        None => return false,
     };
 
     // 1. Check the module registry for an exact match.
-    let cached = MODULE_REGISTRY.with(|reg| {
+    let cached = registry(|reg| {
         reg.borrow()
             .get(&specifier)
-            .map(|entry| entry.module_obj.as_ptr())
+            .map(|entry| entry.module_obj.get(&scope))
     });
-    if let Some(obj) = cached {
-        return obj;
-    }
 
     // 2. Resolve via filesystem using oxc_resolver, relative to the referrer.
-    let base_dir = unsafe { referrer_base_dir(cx, referencing_private) };
-    match resolve_file_module(cx, &specifier, base_dir) {
-        Ok(obj) => obj,
-        Err(msg) => {
-            let c_msg = CString::new(msg).unwrap_or_else(|_| c"Module resolution failed".into());
-            // SAFETY: cx is a valid RawJSContext from the resolve hook.
-            let scope = RootScope::from_current_realm(cx);
-            js::error::report_error_ascii(&scope, &c_msg);
-            ptr::null_mut()
+    let module = match cached {
+        Some(obj) => obj,
+        None => {
+            let base_dir = referrer_base_dir(&scope, referrer);
+            match resolve_file_module(&scope, &specifier, base_dir) {
+                Ok(obj) => obj,
+                Err(msg) => {
+                    let c_msg =
+                        CString::new(msg).unwrap_or_else(|_| c"Module resolution failed".into());
+                    js::error::report_error_ascii(&scope, &c_msg);
+                    return false;
+                }
+            }
         }
+    };
+
+    unsafe {
+        js::module::finish_loading_imported_module(
+            &scope,
+            GCHandle::from_raw(referrer),
+            GCHandle::from_raw(module_request),
+            GCHandle::from_raw(payload),
+            module.handle(),
+        )
     }
+    .is_ok()
 }
 
 /// The directory to resolve a relative specifier against: the parent of the
 /// referencing module's path if the referrer carries one in its module
 /// private, the loader's base path otherwise (eval-script entries and native
 /// modules have no path).
-unsafe fn referrer_base_dir(
-    cx: *mut js::native::RawJSContext,
-    referencing_private: js::native::RawHandle<Value>,
+fn referrer_base_dir(
+    scope: &Scope<'_>,
+    referrer: js::native::RawHandle<*mut js::native::JSScript>,
 ) -> Option<PathBuf> {
-    if referencing_private.is_string() {
-        if let Some(path) = unsafe { jsstring_to_string(cx, referencing_private.to_string()) } {
-            if let Some(parent) = Path::new(&path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    return Some(parent.to_path_buf());
+    if !referrer.get().is_null() {
+        let private =
+            js::module::get_script_private(scope, unsafe { GCHandle::from_raw(referrer) });
+        if private.is_string() {
+            if let Some(path) = jsstring_to_string(scope, private.to_string()) {
+                if let Some(parent) = Path::new(&path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        return Some(parent.to_path_buf());
+                    }
                 }
             }
         }
     }
-    BASE_PATH.with(|bp| bp.borrow().clone())
+    base_path(|bp| bp.borrow().clone())
 }
 
 /// Resolve a specifier to a file on disk, compile it as a module, and cache it.
 ///
-/// Only *compiles* the module — linking and evaluation are handled by
-/// SpiderMonkey's module pipeline (the caller of the resolve hook).
-///
-/// # Safety
-///
-/// `cx` must be a valid JSContext pointer. Called from the resolve hook.
-#[js::allow_unrooted]
-unsafe fn resolve_file_module(
-    cx: *mut js::native::RawJSContext,
+/// Only compiles the module. Loading its own imports, linking and evaluation
+/// are handled by SpiderMonkey's module pipeline.
+fn resolve_file_module<'r>(
+    scope: &'r Scope,
     specifier: &str,
     base_dir: Option<PathBuf>,
-) -> Result<*mut JSObject, String> {
+) -> Result<Object<'r>, String> {
     let base_dir = base_dir
         .ok_or_else(|| format!("Module '{}' not found (no base path configured)", specifier))?;
 
     // Resolve using oxc_resolver
-    let resolved_path = RESOLVER.with(|r| {
+    let resolved_path = resolver(|r| {
         let borrow = r.borrow();
         let resolver = borrow
             .as_ref()
@@ -280,10 +314,10 @@ unsafe fn resolve_file_module(
     let canonical_key = canonical_path.to_string_lossy().to_string();
 
     // Check if already compiled under the canonical path
-    let cached = MODULE_REGISTRY.with(|reg| {
+    let cached = registry(|reg| {
         reg.borrow()
             .get(&canonical_key)
-            .map(|entry| entry.module_obj.as_ptr())
+            .map(|entry| entry.module_obj.get(scope))
     });
     if let Some(obj) = cached {
         return Ok(obj);
@@ -296,39 +330,28 @@ unsafe fn resolve_file_module(
     // Compile (but do NOT link or evaluate — SpiderMonkey handles that)
     let c_filename =
         CString::new(canonical_key.as_bytes()).map_err(|_| "Invalid filename".to_string())?;
-    let options = CompileOptionsWrapper::new_raw(cx as _, c_filename, 1);
+    let options = CompileOptionsWrapper::new(scope.cx_mut(), c_filename, 1);
     let mut src = transform_str_to_source_text(&source);
-    let module_obj = unsafe { js::module_raw::CompileModule1(cx as _, options.ptr, &mut src) };
-    if module_obj.is_null() {
-        return Err(format!(
-            "Failed to compile module '{}'",
-            canonical_path.display()
-        ));
-    }
+    // SAFETY: `options` and `src` are valid for the duration of this call.
+    let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
+        .map_err(|_| format!("Failed to compile module '{}'", canonical_path.display()))?;
 
-    // Root the module for the rest of the setup: allocating the path string
-    // below can GC, which would move an unrooted module object.
-    let scope = RootScope::from_current_realm(cx);
-    let module = unsafe { Object::from_raw(&scope, module_obj) }
-        .ok_or_else(|| "Compiled module is null".to_string())?;
-
-    // Store the canonical path in the module private: the resolve hook reads
-    // it to resolve this module's own relative imports against its directory.
-    let path_str = js::JSString::from_str(&scope, &canonical_key)
+    // Store the canonical path in the module private: the load hook reads it
+    // to resolve this module's own relative imports against its directory.
+    let path_str = js::JSString::from_str(scope, &canonical_key)
         .map_err(|_| "Failed to allocate module path string".to_string())?;
     unsafe { SetModulePrivate(module.as_raw(), &path_str.as_value()) };
 
-    MODULE_REGISTRY.with(|reg| {
+    registry(|reg| {
         reg.borrow_mut().insert(
             canonical_key,
             ModuleEntry {
-                // SAFETY: the module is rooted by `scope` and non-null.
-                module_obj: unsafe { Heap::from_raw(module.as_raw()) },
+                module_obj: Heap::from(module),
             },
         );
     });
 
-    Ok(module.as_raw())
+    Ok(module)
 }
 
 /// Resolve `.` and `..` components lexically, without touching the filesystem, so
@@ -357,23 +380,17 @@ fn lexically_normalize(path: PathBuf) -> PathBuf {
 }
 
 /// Convert a JSString to a Rust String.
-unsafe fn jsstring_to_string(
-    cx: *mut js::native::RawJSContext,
-    s: *mut JSString,
-) -> Option<String> {
-    use js::conversion::jsstr_to_string;
-    use std::ptr::NonNull;
-    let scope = RootScope::from_current_realm(cx);
-    NonNull::new(s).map(|nn| jsstr_to_string(&scope, nn))
+fn jsstring_to_string(scope: &Scope<'_>, s: *mut JSString) -> Option<String> {
+    NonNull::new(s).map(|nn| jsstr_to_string(scope, nn))
 }
 
 // ============================================================================
 // Public API
 // ============================================================================
 
-/// Install the module resolve hook and configure the filesystem resolver.
+/// Install the module load hook and configure the filesystem resolver.
 ///
-/// `rt` is the raw `JSRuntime` pointer on which the resolve hook is installed.
+/// `rt` is the raw `JSRuntime` pointer on which the load hook is installed.
 /// `base_path` is the directory used as the starting point for resolving
 /// import specifiers (typically the directory containing the entry script).
 ///
@@ -385,7 +402,7 @@ unsafe fn jsstring_to_string(
 pub unsafe fn init_module_loader(rt: *mut js::native::JSRuntime, base_path: PathBuf) {
     BASE_PATH.with(|bp| *bp.borrow_mut() = Some(base_path));
 
-    unsafe { js::module::set_module_resolve_hook(rt, Some(module_resolve_hook)) };
+    unsafe { js::module::set_module_load_hook(rt, Some(module_load_hook)) };
 
     RESOLVER.with(|r| {
         *r.borrow_mut() = Some(Resolver::new(ResolveOptions {
@@ -431,7 +448,7 @@ pub fn clear_module_state() {
 /// 2. Compiles it as a module via `CompileModule`
 /// 3. Links and evaluates the module
 /// 4. Populates the module environment with native functions and values
-/// 5. Stores the module in the thread-local registry for the resolve hook
+/// 5. Stores the module in the thread-local registry for the load hook
 ///
 /// # Safety
 ///
@@ -462,8 +479,8 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
     // Native modules carry no path in their module private: the generated
     // `export var` source has no imports to resolve.
 
-    // 3. Store in registry before linking (resolve hook must find it)
-    MODULE_REGISTRY.with(|reg| {
+    // 3. Store in registry before loading (load hook must find it)
+    registry(|reg| {
         reg.borrow_mut().insert(
             T::NAME.to_string(),
             ModuleEntry {
@@ -479,7 +496,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
     // exports are undefined.
     let populated = unsafe { link_evaluate_and_populate::<T>(scope, module, &declarations) };
     if !populated {
-        MODULE_REGISTRY.with(|reg| {
+        registry(|reg| {
             reg.borrow_mut().remove(T::NAME);
         });
     }
@@ -526,9 +543,10 @@ unsafe fn link_evaluate_and_populate<T: NativeModule>(
     unsafe { T::evaluate(scope, env.handle()) }
 }
 
-/// Steps 4.-5. shared by every synthetic-module path: link the compiled module,
-/// evaluate it (running the `export var ...` initializations), and return its
-/// environment object, ready for the caller to populate.
+/// Steps 4.-5. shared by every synthetic-module path: load the compiled
+/// module's dependency graph, link it, evaluate it (running the
+/// `export var ...` initializations), and return its environment object, ready
+/// for the caller to populate.
 ///
 /// # Safety
 ///
@@ -538,7 +556,10 @@ unsafe fn link_evaluate_and_get_env<'s>(
     scope: &'s Scope<'_>,
     module: Object<'_>,
 ) -> Option<Object<'s>> {
-    // 4. Link
+    // 4. Load the dependency graph, then link
+    if js::module::load_requested_modules(scope, module).is_err() {
+        return None;
+    }
     if js::module::link(scope, module).is_err() {
         return None;
     }
@@ -568,7 +589,7 @@ unsafe fn link_evaluate_and_get_env<'s>(
 ///
 /// Each `(name, value)` pair becomes an `export var <name>` binding initialized
 /// to `value`. The module is registered under the owned `name` string, so the
-/// resolve hook resolves an exact-match `import ... from "<name>"`.
+/// load hook resolves an exact-match `import ... from "<name>"`.
 ///
 /// On any failure the half-registered entry is removed again, matching
 /// [`register_module`]: a later import then fails to resolve rather than finding
@@ -602,8 +623,8 @@ pub unsafe fn register_synthetic_module(
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }?;
 
     // 3. Store in the registry under the owned specifier before linking, so the
-    //    resolve hook finds it.
-    MODULE_REGISTRY.with(|reg| {
+    //    load hook finds it.
+    registry(|reg| {
         reg.borrow_mut().insert(
             name.to_string(),
             ModuleEntry {
@@ -617,7 +638,7 @@ pub unsafe fn register_synthetic_module(
     // On any failure, remove the registry entry again.
     let result = unsafe { link_evaluate_and_populate_values(scope, module, exports) };
     if result.is_err() {
-        MODULE_REGISTRY.with(|reg| {
+        registry(|reg| {
             reg.borrow_mut().remove(name);
         });
     }
@@ -671,9 +692,9 @@ pub unsafe fn register_source_module(
     let mut src = transform_str_to_source_text(source);
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }?;
 
-    // Register before linking so the resolve hook (and the module's own imports)
+    // Register before loading so the load hook (and the module's own imports)
     // can find it by name.
-    MODULE_REGISTRY.with(|reg| {
+    registry(|reg| {
         reg.borrow_mut().insert(
             name.to_string(),
             ModuleEntry {
@@ -683,10 +704,11 @@ pub unsafe fn register_source_module(
         );
     });
 
-    let linked = js::module::link(scope, module)
+    let linked = js::module::load_requested_modules(scope, module)
+        .and_then(|()| js::module::link(scope, module))
         .and_then(|()| js::module::evaluate(scope, module).map(drop));
     if linked.is_err() {
-        MODULE_REGISTRY.with(|reg| {
+        registry(|reg| {
             reg.borrow_mut().remove(name);
         });
         return Err(ExnThrown);
@@ -696,8 +718,9 @@ pub unsafe fn register_source_module(
 
 /// Evaluate a JS script as a module, with access to registered native modules.
 ///
-/// This compiles the given source as a module, links it (the resolve hook
-/// will find registered native modules and resolve file imports), and evaluates it.
+/// This compiles the given source as a module, loads its dependency graph (the
+/// load hook will find registered native modules and resolve file imports),
+/// links it, and evaluates it.
 ///
 /// The `filename` is used both as the script origin for error messages and
 /// (if it's a real filesystem path) as the base for resolving relative imports.
@@ -720,7 +743,7 @@ pub unsafe fn evaluate_module<'s>(
         .map_err(|_| ExnThrown)?;
 
     // If the filename is a real path, store its absolute form in the module
-    // private: the resolve hook reads it to resolve this entry's relative
+    // private: the load hook reads it to resolve this entry's relative
     // imports against the entry's own directory. Pathless entries (eval
     // scripts, synthetic filenames) leave the private unset and fall back to
     // the loader's base path. The empty-path guard prevents WASI from
@@ -739,6 +762,7 @@ pub unsafe fn evaluate_module<'s>(
         }
     }
 
+    js::module::load_requested_modules(scope, module).map_err(|_| ExnThrown)?;
     js::module::link(scope, module).map_err(|_| ExnThrown)?;
     js::module::evaluate(scope, module).map_err(|_| ExnThrown)
 }

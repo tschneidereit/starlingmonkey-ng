@@ -156,8 +156,9 @@ pub mod engine {
 pub mod native {
     pub use mozjs::context::{JSContext, RawJSContext};
     pub use mozjs::jsapi::{
-        BigInt, CallArgs, ExceptionStackBehavior, GCContext, HandleValueArray, JSNative, JSObject,
-        JSRuntime, JSString, JSTracer, PropertyDescriptor, SymbolCode, Value,
+        BigInt, CallArgs, ColumnNumberOneOrigin, ExceptionStackBehavior, GCContext,
+        HandleValueArray, JSNative, JSObject, JSRuntime, JSScript, JSString, JSTracer,
+        PropertyDescriptor, SymbolCode, Value,
     };
     pub use mozjs::rust::wrappers2::JS_GetRuntime;
     pub use mozjs::rust::{Handle, HandleId, HandleObject, MutableHandle, MutableHandleValue};
@@ -168,7 +169,7 @@ pub mod native {
 
     /// The raw `JS::Handle<T>` type from SpiderMonkey's FFI layer.
     ///
-    /// Used in resolve hook signatures and other callbacks that receive
+    /// Used in load hook signatures and other callbacks that receive
     /// handles directly from the engine.
     pub use mozjs::jsapi::Handle as RawHandle;
 }

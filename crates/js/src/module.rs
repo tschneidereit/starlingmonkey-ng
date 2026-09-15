@@ -6,15 +6,17 @@
 //! compiling modules from source, linking them, evaluating them, and
 //! inspecting their requested imports and namespace.
 
+use std::cell::Cell;
 use std::ptr::NonNull;
 
 use crate::gc::scope::Scope;
 use crate::{Object, Promise};
-use mozjs::gc::{Handle, HandleObject, HandleString, HandleValue};
+use mozjs::gc::{Handle, HandleObject, HandleValue};
 use mozjs::jsapi::mozilla::Utf8Unit;
+use mozjs::jsapi::HandleValue as RawHandleValue;
 use mozjs::jsapi::{
-    JSObject, JSScript, JSString, ModuleErrorBehaviour, ModuleType, ReadOnlyCompileOptions,
-    SourceText,
+    ExceptionStackBehavior, JSObject, JSScript, JSString, ModuleErrorBehaviour, ModuleType,
+    ReadOnlyCompileOptions, SourceText,
 };
 use mozjs::jsval::UndefinedValue;
 use mozjs::rust::wrappers2;
@@ -104,22 +106,6 @@ pub fn throw_on_evaluation_failure(
     ExnThrown::check(ok)
 }
 
-/// Get the number of requested module imports.
-pub fn get_requested_modules_count(scope: &Scope<'_>, module_record: Object) -> u32 {
-    unsafe { wrappers2::GetRequestedModulesCount(scope.cx(), module_record.handle()) }
-}
-
-/// Get the module specifier string for a requested import at `index`.
-pub fn get_requested_module_specifier(
-    scope: &Scope<'_>,
-    module_record: Object,
-    index: u32,
-) -> Option<NonNull<JSString>> {
-    NonNull::new(unsafe {
-        wrappers2::GetRequestedModuleSpecifier(scope.cx_mut(), module_record.handle(), index)
-    })
-}
-
 /// Get the module type for a requested import at `index`.
 pub fn get_requested_module_type(
     scope: &Scope<'_>,
@@ -129,21 +115,27 @@ pub fn get_requested_module_type(
     unsafe { wrappers2::GetRequestedModuleType(scope.cx(), module_record.handle(), index) }
 }
 
+/// Get the private value of a script.
+///
+/// For a module's script this is the value [`SetModulePrivate`] stored, since
+/// both go through the script's source object. A script that was never given
+/// one yields `undefined`.
+///
+/// [`SetModulePrivate`]: crate::module_raw::SetModulePrivate
+pub fn get_script_private<'s>(
+    scope: &'s Scope<'_>,
+    script: Handle<'_, *mut JSScript>,
+) -> HandleValue<'s> {
+    let mut rval = scope.root_value_mut(UndefinedValue());
+    // SAFETY: `script` is rooted by the handle, and the out-param is rooted on
+    // `scope`.
+    unsafe { mozjs::glue::JS_GetScriptPrivate(script.get(), rval.reborrow().into()) };
+    rval.handle()
+}
+
 /// Get the `JSScript` associated with a module record.
 pub fn get_module_script(module_record: Object) -> Option<NonNull<JSScript>> {
     NonNull::new(unsafe { wrappers2::GetModuleScript(module_record.handle()) })
-}
-
-/// Create a module request object with a specifier and type.
-pub fn create_module_request<'s>(
-    scope: &'s Scope<'_>,
-    specifier: HandleString,
-    module_type: ModuleType,
-) -> Result<Handle<'s, *mut JSObject>, ExnThrown> {
-    let obj = unsafe { wrappers2::CreateModuleRequest(scope.cx_mut(), specifier, module_type) };
-    NonNull::new(obj)
-        .map(|p| scope.root_object(p))
-        .ok_or(ExnThrown)
 }
 
 /// Get the specifier string of a module request.
@@ -183,18 +175,127 @@ pub fn get_environment(scope: &Scope<'_>, module_obj: HandleObject) -> Option<No
     NonNull::new(unsafe { wrappers2::GetModuleEnvironment(scope.cx(), module_obj) })
 }
 
-/// Set the module resolve hook on the runtime.
+/// Set the module load hook on the runtime.
 ///
-/// The hook is called by SpiderMonkey when an `import` statement needs to
-/// resolve a module specifier to a compiled module object.
+/// The hook is called by [`load_requested_modules`] once per import in the
+/// graph, to turn a module request into a compiled module object. It must
+/// conclude each call either by passing the module to
+/// [`finish_loading_imported_module`] or by returning `false`, which leaves
+/// the engine to fail the load with whatever exception is pending.
 ///
 /// # Safety
 ///
 /// `rt` must be a valid `JSRuntime` pointer. `hook` must be a valid function
 /// pointer (or `None` to clear the hook).
-pub unsafe fn set_module_resolve_hook(
+pub unsafe fn set_module_load_hook(
     rt: *mut mozjs::jsapi::JSRuntime,
-    hook: mozjs::jsapi::ModuleResolveHook,
+    hook: mozjs::jsapi::ModuleLoadHook,
 ) {
-    mozjs::jsapi::SetModuleResolveHook(rt, hook);
+    mozjs::jsapi::SetModuleLoadHook(rt, hook);
+}
+
+thread_local! {
+    /// Outcome of the innermost in-flight [`load_requested_modules`] call:
+    /// `None` until one of its callbacks fires, `Some(Ok(()))` once the graph
+    /// has loaded, `Some(Err(ExnThrown))` once it has failed.
+    static LOAD_OUTCOME: Cell<Option<Result<(), ExnThrown>>> = const { Cell::new(None) };
+}
+
+fn load_outcome<R>(f: impl FnOnce(&Cell<Option<Result<(), ExnThrown>>>) -> R) -> R {
+    LOAD_OUTCOME.with(f)
+}
+
+unsafe extern "C" fn load_resolved(
+    _cx: *mut mozjs::jsapi::JSContext,
+    _host_defined: RawHandleValue,
+) -> bool {
+    load_outcome(|outcome| outcome.set(Some(Ok(()))));
+    true
+}
+
+unsafe extern "C" fn load_rejected(
+    cx: *mut mozjs::jsapi::JSContext,
+    _host_defined: RawHandleValue,
+    error: RawHandleValue,
+) -> bool {
+    load_outcome(|outcome| outcome.set(Some(Err(ExnThrown))));
+    // The engine hands the failure to us as a value rather than a pending
+    // exception, so re-throw it for the caller of `load_requested_modules`.
+    unsafe {
+        mozjs::jsapi::JS_SetPendingException(cx, error, ExceptionStackBehavior::Capture);
+    }
+    // This return value is `LoadRequestedModules`'s own, so `false` reports the
+    // exception just set.
+    false
+}
+
+/// Load the dependency graph of a compiled module, calling the runtime's
+/// module load hook once per import.
+///
+/// This is the ES2025 `LoadRequestedModules` operation, and must be called
+/// after compilation and before [`link`]. Loading runs to completion before
+/// this returns, which requires a load hook that resolves every request
+/// synchronously. A hook that defers leaves the graph unloaded, and this
+/// returns `Err`.
+pub fn load_requested_modules(scope: &Scope<'_>, module_record: Object) -> Result<(), ExnThrown> {
+    // `LoadRequestedModules` takes no host-defined data. The callbacks receive
+    // this value back and ignore it.
+    let host_defined = scope.root_value(UndefinedValue());
+    // A load hook may itself compile and load a module graph, so save and
+    // restore any enclosing call's outcome around this one.
+    let enclosing = load_outcome(|outcome| outcome.replace(None));
+    // The return value is whatever the callback that ran returned, which the
+    // callbacks already recorded. Use the recorded outcome instead, which also
+    // covers the case where neither callback ran.
+    let _ = unsafe {
+        wrappers2::LoadRequestedModules(
+            scope.cx_mut(),
+            module_record.handle(),
+            host_defined,
+            Some(load_resolved),
+            Some(load_rejected),
+        )
+    };
+    load_outcome(|outcome| outcome.replace(enclosing)).unwrap_or_else(|| {
+        // Neither callback ran, so loading never concluded: either an
+        // engine-level failure such as OOM, which leaves its own exception
+        // pending, or a load hook that deferred, which leaves none.
+        if crate::exception::is_pending(scope) {
+            Err(ExnThrown)
+        } else {
+            Err(crate::error::throw_internal_error(
+                scope,
+                c"module loading did not complete: the module load hook deferred",
+            ))
+        }
+    })
+}
+
+/// Supply the module a load hook was asked for, concluding that call.
+///
+/// `referrer`, `module_request` and `payload` must be the arguments the hook
+/// received. The hook must call this exactly once per invocation unless it
+/// returns `false`.
+///
+/// # Safety
+///
+/// Only valid from within a module load hook, with that hook's own arguments.
+pub unsafe fn finish_loading_imported_module(
+    scope: &Scope<'_>,
+    referrer: Handle<'_, *mut JSScript>,
+    module_request: HandleObject,
+    payload: HandleValue,
+    result: HandleObject,
+) -> Result<(), ExnThrown> {
+    let ok = unsafe {
+        wrappers2::FinishLoadingImportedModule(
+            scope.cx_mut(),
+            referrer,
+            module_request,
+            payload,
+            result,
+            false,
+        )
+    };
+    ExnThrown::check(ok)
 }

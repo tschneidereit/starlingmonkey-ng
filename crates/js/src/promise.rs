@@ -103,7 +103,7 @@ impl<'s> Stack<'s, Promise> {
     /// "already resolved" site — an absent algorithm's result, a `then` source
     /// for a derived promise — indefinitely, without allocating a fresh
     /// promise per use. (To merely defer a callback by one tick, use
-    /// [`crate::jobs::queue_microtask`] instead — no promise involved at all.)
+    /// [`crate::jobs::queue_microtask`] instead.)
     /// The promise must never be handed to author code: an author-visible
     /// "a promise resolved with undefined" needs a fresh promise per call, or
     /// the shared identity becomes observable. Derived promises (`then`
@@ -327,8 +327,7 @@ impl<'s> Stack<'s, Promise> {
         scope: &'s Scope<'_>,
         promises: &[HandleObject],
     ) -> Result<Self, ExnThrown> {
-        let cx = unsafe { scope.raw_cx_no_gc() };
-        let vector = mozjs::rust::RootedObjectVectorWrapper::new(cx);
+        let vector = mozjs::rust::RootedObjectVectorWrapper::new(scope.cx_mut());
         for promise in promises {
             if !vector.append(promise.get()) {
                 return Err(ExnThrown);

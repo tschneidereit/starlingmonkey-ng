@@ -11,9 +11,7 @@ use std::ptr::NonNull;
 
 use crate::gc::scope::Scope;
 use mozjs::gc::HandleObject;
-use mozjs::jsapi::{
-    CompartmentFilter, JSClass, JSObject, NukeReferencesFromTarget, NukeReferencesToWindow, Realm,
-};
+use mozjs::jsapi::{CompartmentFilter, JSClass, JSObject};
 use mozjs::rust::wrappers2;
 use mozjs::rust::MutableHandleObject;
 
@@ -34,28 +32,6 @@ pub fn refresh_cross_compartment_wrappers(
     obj: HandleObject,
 ) -> Result<(), ExnThrown> {
     let ok = unsafe { wrappers2::JS_RefreshCrossCompartmentWrappers(scope.cx_mut(), obj) };
-    ExnThrown::check(ok)
-}
-
-/// Nuke cross-compartment wrappers matching the given filters.
-///
-/// # Safety
-///
-/// `source_filter` and `target` must be valid pointers.
-pub unsafe fn nuke_cross_compartment_wrappers(
-    scope: &Scope<'_>,
-    source_filter: *const CompartmentFilter,
-    target: *mut Realm,
-    nuke_references_to_window: NukeReferencesToWindow,
-    nuke_references_from_target: NukeReferencesFromTarget,
-) -> Result<(), ExnThrown> {
-    let ok = wrappers2::NukeCrossCompartmentWrappers(
-        scope.cx(),
-        source_filter,
-        target,
-        nuke_references_to_window,
-        nuke_references_from_target,
-    );
     ExnThrown::check(ok)
 }
 

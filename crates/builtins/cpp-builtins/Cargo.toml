@@ -13,7 +13,6 @@ debugmozjs = []
 js.workspace = true
 mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" }
 mozjs_sys = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" }
-starling-macro.workspace = true
 
 [build-dependencies]
 cc = "1.2.56"
