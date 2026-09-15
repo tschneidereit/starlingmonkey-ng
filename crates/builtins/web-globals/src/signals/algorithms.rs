@@ -2,7 +2,8 @@
 
 //! Abort signal algorithms from <https://dom.spec.whatwg.org>.
 
-use std::time::{Duration, Instant};
+use platform::clock::Instant;
+use std::time::Duration;
 
 use core_runtime::event_loop::{with_active_event_loop, Task, TaskId};
 use js::conversion::ToJSVal;

@@ -107,6 +107,9 @@ mod wasm_entry {
                 if let Err(e) = libstarling::serve_wasm::pre_initialize().await {
                     panic!("pre-initialization failed: {e}");
                 }
+                // Last, so that the clock reading it records is past every timestamp the
+                // snapshot holds.
+                libstarling::serve_wasm::mark_resumed_from_snapshot();
             }
         }
 

@@ -12,7 +12,8 @@
 //! `clearTimeout`, and `clearInterval` to a global object. These functions
 //! interact with the event loop via [`with_active_event_loop`].
 
-use std::time::{Duration, Instant};
+use platform::clock::Instant;
+use std::time::Duration;
 
 use js::conversion::ToJSVal;
 use js::error::{throw_error, ExnThrown};

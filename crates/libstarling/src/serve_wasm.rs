@@ -95,6 +95,16 @@ fn runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeout
     Ok(pair)
 }
 
+/// Record that this instance's state is being captured in a Wizer snapshot. The resumed
+/// instance's first request runs the resume fixups (see [`fix_up_after_resume`]), which advance
+/// its clocks by the monotonic clock reading taken here. Every caller is a Wizer entry point, and
+/// calls this last, since a reading taken afterwards would sit past the recorded one and so still
+/// be in the resumed instance's future.
+pub fn mark_resumed_from_snapshot() {
+    RESUMED_FROM_SNAPSHOT.with(|resumed| resumed.set(true));
+    platform::clock::record_snapshot_reading();
+}
+
 /// Initializes the runtime until it's ready for Wizer snapshotting.
 ///
 /// This entails initializing the JS runtime, registering builtins, running the top-level script to
@@ -106,7 +116,7 @@ pub async fn pre_initialize() -> Result<(), String> {
         STARTUP.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), Startup::Driving))
     else {
         // Nothing to evaluate: `runtime` was already stood up, so this is a second call.
-        RESUMED_FROM_SNAPSHOT.with(|resumed| resumed.set(true));
+        mark_resumed_from_snapshot();
         return Ok(());
     };
     drive_startup(raw_cx, invocation.state_mut().event_loop(), &evaluation).await;
@@ -146,8 +156,13 @@ fn evaluated_without_listener(
 }
 
 /// Some state, such as process time origins, needs fixing up after snapshot resumption.
+///
+/// The monotonic clock comes first: its offset puts the timestamps the snapshot holds in the
+/// resumed instance's past, and both the engine's timing and every fixup below read the clock
+/// through it.
 fn fix_up_after_resume() {
     if RESUMED_FROM_SNAPSHOT.with(|resumed| resumed.replace(false)) {
+        js::clock::advance_monotonic_clock(platform::clock::resume_from_snapshot());
         core_runtime::runtime::run_resume_fixups();
     }
 }

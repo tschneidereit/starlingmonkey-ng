@@ -1000,13 +1000,6 @@ fn a_snapshotted_instance_keeps_its_clock_and_global_across_requests() {
     let Some(server) = Serve::new(18420)
         .reusing_one_instance()
         .wizen()
-        // A resumed snapshot includes SpiderMonkey's GC statistics, whose phase timestamps are
-        // readings of the monotonic clock the snapshotting process had. `wasmtime serve` starts
-        // that clock again from zero, so those readings sit in the resumed instance's future and
-        // mode 4's barrier verifier trips a debug assertion on them (`Inconsistent time data`,
-        // Mozilla bug 1400153) and traps. `performance`'s time origin is the same hazard, which
-        // `register_resume_fixup` repairs. The engine's own copy is out of reach from here.
-        .without_gc_zeal()
         .script(HANDLER)
         .start()
     else {
@@ -2675,13 +2668,6 @@ fn a_snapshotted_instance_waits_for_the_scripts_top_level_await() {
     });"#;
     let Some(server) = Serve::new(18458)
         .wizen()
-        // A resumed snapshot includes SpiderMonkey's GC statistics, whose phase timestamps are
-        // readings of the monotonic clock the snapshotting process had. `wasmtime serve` starts
-        // that clock again from zero, so those readings sit in the resumed instance's future and
-        // mode 4's barrier verifier trips a debug assertion on them (`Inconsistent time data`,
-        // Mozilla bug 1400153) and traps. `performance`'s time origin is the same hazard, which
-        // `register_resume_fixup` repairs. The engine's own copy is out of reach from here.
-        .without_gc_zeal()
         .ready(Ready::Listening)
         .module("awaited.mjs", SCRIPT)
         .start()

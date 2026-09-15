@@ -17,6 +17,7 @@ event-listener.workspace = true
 futures-lite = "2"
 js.workspace = true
 oxc_resolver.workspace = true
+platform.workspace = true
 shlex = "2"
 tempfile = "3"
 
