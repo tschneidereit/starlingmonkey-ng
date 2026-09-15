@@ -6,6 +6,7 @@
 //! `JSON.parse` and `JSON.stringify` operations.
 
 use super::error::ExnThrown;
+use super::string::Str;
 use crate::gc::scope::Scope;
 use js::Object;
 use mozjs::gc::{HandleObject, HandleString, HandleValue};
@@ -16,19 +17,9 @@ use mozjs::rust::wrappers2;
 ///
 /// Accepts a Rust `&str` and parses it using SpiderMonkey's JSON parser.
 pub fn parse<'r>(scope: &'r Scope<'_>, json: &str) -> Result<HandleValue<'r>, ExnThrown> {
-    let utf16: Vec<u16> = json.encode_utf16().collect();
-    let mut rval = scope.root_value_mut(UndefinedValue());
-    // SAFETY: utf16 is a valid buffer that lives for the duration of this call.
-    let ok = unsafe {
-        wrappers2::JS_ParseJSON(
-            scope.cx_mut(),
-            utf16.as_ptr(),
-            utf16.len() as u32,
-            rval.reborrow(),
-        )
-    };
-    ExnThrown::check(ok)?;
-    Ok(rval.handle())
+    // A JS string keeps Latin-1 text in one byte per character, and the parser reads it as such.
+    let string = Str::from_str(scope, json)?;
+    parse_js_string(scope, string.handle())
 }
 
 /// Parse a JSON string (represented as a `JSString`) into a JS value.
@@ -66,20 +57,8 @@ pub fn parse_with_reviver<'r>(
     json: &str,
     reviver: HandleValue,
 ) -> Result<HandleValue<'r>, ExnThrown> {
-    let utf16: Vec<u16> = json.encode_utf16().collect();
-    let mut rval = scope.root_value_mut(UndefinedValue());
-    // SAFETY: utf16 is a valid buffer that lives for the duration of this call.
-    let ok = unsafe {
-        wrappers2::JS_ParseJSONWithReviver(
-            scope.cx_mut(),
-            utf16.as_ptr(),
-            utf16.len() as u32,
-            reviver,
-            rval.reborrow(),
-        )
-    };
-    ExnThrown::check(ok)?;
-    Ok(rval.handle())
+    let string = Str::from_str(scope, json)?;
+    parse_js_string_with_reviver(scope, string.handle(), reviver)
 }
 
 /// Parse JSON with a reviver function (JS string input).
