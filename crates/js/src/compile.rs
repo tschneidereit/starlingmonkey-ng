@@ -19,7 +19,10 @@ use std::ptr::NonNull;
 use crate::gc::scope::Scope;
 use mozjs::gc::{Handle, HandleFunction, HandleScript, HandleValue};
 use mozjs::jsapi::mozilla::Utf8Unit;
-use mozjs::jsapi::{EnvironmentChain, JSFunction, JSScript, ReadOnlyCompileOptions, SourceText};
+use mozjs::jsapi::{
+    DelazificationOption, EnvironmentChain, JSFunction, JSScript, ReadOnlyCompileOptions,
+    SourceText,
+};
 use mozjs::rust::{transform_str_to_source_text, wrappers2, CompileOptionsWrapper};
 
 use super::error::ExnThrown;
@@ -60,6 +63,20 @@ pub fn evaluate_non_syntactic<'s>(
     evaluate_with_options(scope, script, filename, lineno, true)
 }
 
+/// Compile options for a script or module at `filename` and `lineno`. Every function is parsed
+/// and compiled to bytecode when its script is compiled, instead of on its first call, so a
+/// snapshot taken after evaluation holds the bytecode of every function.
+pub fn options(scope: &Scope<'_>, filename: CString, lineno: u32) -> CompileOptionsWrapper {
+    let options = CompileOptionsWrapper::new(scope.cx(), filename, lineno);
+    // SAFETY: `options.ptr` is a valid pointer created by `NewCompileOptions`, owned by
+    // `options`.
+    unsafe {
+        (*options.ptr)._base.eagerDelazificationStrategy_ =
+            DelazificationOption::ParseEverythingEagerly;
+    }
+    options
+}
+
 fn evaluate_with_options<'s>(
     scope: &'s Scope<'_>,
     script: &str,
@@ -69,7 +86,7 @@ fn evaluate_with_options<'s>(
 ) -> Result<HandleValue<'s>, ExnThrown> {
     let filename_cstr =
         CString::new(filename).unwrap_or_else(|_| CString::new("<unknown>").unwrap());
-    let options = CompileOptionsWrapper::new(scope.cx(), filename_cstr, lineno);
+    let options = options(scope, filename_cstr, lineno);
     if non_syntactic_scope {
         // SAFETY: `options.ptr` is a valid pointer created by `NewCompileOptions`.
         // We are setting the `nonSyntacticScope` field on the base
@@ -175,7 +192,7 @@ pub fn compile_with_filename<'s>(
 ) -> Result<Handle<'s, *mut JSScript>, ExnThrown> {
     let filename_cstr =
         CString::new(filename).unwrap_or_else(|_| CString::new("<unknown>").unwrap());
-    let options = CompileOptionsWrapper::new(scope.cx(), filename_cstr, lineno);
+    let options = options(scope, filename_cstr, lineno);
     let mut source = transform_str_to_source_text(script);
     let script = unsafe { wrappers2::Compile1(scope.cx_mut(), options.ptr, &mut source) };
     NonNull::new(script)

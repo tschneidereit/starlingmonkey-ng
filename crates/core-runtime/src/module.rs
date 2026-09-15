@@ -46,7 +46,7 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::Trace;
-use js::module_raw::{transform_str_to_source_text, CompileOptionsWrapper, SetModulePrivate};
+use js::module_raw::{transform_str_to_source_text, SetModulePrivate};
 use js::native::{GCHandle, HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
 use js::prelude::{HandleValue, RootScope};
 use js::{allow_unrooted, Object};
@@ -390,7 +390,7 @@ fn resolve_file_module<'r>(
     // Compile (but do NOT link or evaluate — SpiderMonkey handles that)
     let c_filename =
         CString::new(canonical_key.as_bytes()).map_err(|_| "Invalid filename".to_string())?;
-    let options = CompileOptionsWrapper::new(scope.cx_mut(), c_filename, 1);
+    let options = js::compile::options(scope, c_filename, 1);
     let mut src = transform_str_to_source_text(&source);
     // SAFETY: `options` and `src` are valid for the duration of this call.
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
@@ -518,7 +518,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
 
     // 2. Compile module
     let filename = CString::new(T::NAME).unwrap();
-    let options = CompileOptionsWrapper::new(scope.cx_mut(), filename, 1);
+    let options = js::compile::options(scope, filename, 1);
 
     let mut src = transform_str_to_source_text(&source);
     let module = match unsafe { js::module::compile_module(scope, options.ptr, &mut src) } {
@@ -666,7 +666,7 @@ pub unsafe fn register_synthetic_module(
 
     // 2. Compile the module.
     let filename = CString::new(name).map_err(|_| ExnThrown)?;
-    let options = CompileOptionsWrapper::new(scope.cx_mut(), filename, 1);
+    let options = js::compile::options(scope, filename, 1);
     let mut src = transform_str_to_source_text(&source);
     // Synthetic modules carry no path in their module private: the generated
     // `export var` source has no imports of its own to resolve.
@@ -738,7 +738,7 @@ pub unsafe fn register_source_module(
     source: &str,
 ) -> Result<(), ExnThrown> {
     let filename = CString::new(name).map_err(|_| ExnThrown)?;
-    let options = CompileOptionsWrapper::new(scope.cx_mut(), filename, 1);
+    let options = js::compile::options(scope, filename, 1);
     let mut src = transform_str_to_source_text(source);
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }?;
 
@@ -786,7 +786,7 @@ pub unsafe fn evaluate_module<'s>(
     filename: &str,
 ) -> Result<HandleValue<'s>, ExnThrown> {
     let c_filename = CString::new(filename).unwrap();
-    let options = CompileOptionsWrapper::new(scope.cx_mut(), c_filename, 1);
+    let options = js::compile::options(scope, c_filename, 1);
 
     let mut src = transform_str_to_source_text(source);
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
