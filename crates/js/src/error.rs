@@ -498,6 +498,6 @@ pub fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
         Err(_) => return,
     };
 
-    // Set the stack as an own property on the target object.
-    let _ = obj.set_property(scope, c"stack", stack_val);
+    // Set the stack as a non-enumerable own property on the target object.
+    let _ = obj.define_property(scope, c"stack", stack_val, 0);
 }
