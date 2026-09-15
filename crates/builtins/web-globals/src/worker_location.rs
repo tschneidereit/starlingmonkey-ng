@@ -16,8 +16,9 @@ use js::error::TypeError;
 use js::gc::scope::Scope;
 use js::Object;
 
-thread_local! {
-    /// The URL backing `globalThis.location`.
+js::instance_local! {
+    /// The URL backing `globalThis.location`. Set once before the runtime is initialized and read
+    /// by every accessor after, so it is scoped to the runtime rather than to the call that set it.
     static LOCATION_URL: RefCell<Option<url::Url>> = const { RefCell::new(None) };
 }
 

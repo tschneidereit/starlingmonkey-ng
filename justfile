@@ -15,6 +15,14 @@
 #   just clippy          Run clippy lints
 #   just check           Run fmt check + clippy + tests
 
+# The wasm target the `-wasm` recipes build for. `WASM_TARGET=p3 just test-wasm` retargets them;
+# `p2`, `p3` and full triples are all accepted. The pinned toolchain in `rust-toolchain.toml`
+# ships no wasm32-wasip3 std, so that target builds through nightly.
+_wasm_target_arg := env_var_or_default("WASM_TARGET", "p2")
+WASM_TARGET := if _wasm_target_arg == "p2" { "wasm32-wasip2" } else if _wasm_target_arg == "p3" { "wasm32-wasip3" } else { _wasm_target_arg }
+_wasm_cargo := if WASM_TARGET == "wasm32-wasip3" { "cargo +nightly" } else { "cargo" }
+_wasm_out := "${CARGO_TARGET_DIR:-" + justfile_directory() + "/target}/" + WASM_TARGET
+
 # Build in debug mode.
 build *TARGET:
     cargo build --features debugmozjs {{TARGET}}
@@ -121,24 +129,24 @@ check-wasm:
     just clippy --all
     just test-wasm --examples
 
-# Build for wasm32-wasip2.
+# Build for the wasm target (`WASM_TARGET`, default wasm32-wasip2).
 build-wasm *TARGET:
-    cargo build --target wasm32-wasip2 --features debugmozjs {{TARGET}}
+    {{_wasm_cargo}} build --target {{WASM_TARGET}} --features debugmozjs {{TARGET}}
 
-# Build for wasm32-wasip2 in release mode.
+# Build for the wasm target in release mode.
 build-wasm-release *TARGET:
-    cargo build --target wasm32-wasip2 --release {{TARGET}}
+    {{_wasm_cargo}} build --target {{WASM_TARGET}} --release {{TARGET}}
 
 # Run all Rust tests. A run with no arguments also runs the wasm serve end-to-end suite;
 # arguments (a filter, `--examples`) reach only the cargo tests and leave that suite out.
 test-wasm *TARGET:
-    cargo test --target wasm32-wasip2 --features debugmozjs --workspace {{TARGET}}
+    {{_wasm_cargo}} test --target {{WASM_TARGET}} --features debugmozjs --workspace {{TARGET}}
     @{{ if TARGET == "" { "just test-serve-wasm" } else { "echo 'Skipped the wasm serve end-to-end suite; run it with: just test-serve-wasm'" } }}
 
 # Run all Rust tests in release mode. A run with no arguments also runs the wasm serve
 # end-to-end suite.
 test-wasm-release *TARGET:
-    cargo test --target wasm32-wasip2 --release --workspace {{TARGET}}
+    {{_wasm_cargo}} test --target {{WASM_TARGET}} --release --workspace {{TARGET}}
     @{{ if TARGET == "" { "just test-serve-wasm-release" } else { "echo 'Skipped the wasm serve end-to-end suite; run it with: just test-serve-wasm-release'" } }}
 
 # Snapshot the component with `wasmtime wizer` and serve the result. Needs wasmtime on PATH.
@@ -151,32 +159,32 @@ test-wizer *ARGS:
 # skips loudly.
 test-serve-wasm *ARGS:
     @just build-wasm -p starlingmonkey
-    STARLING_WASM_COMPONENT="${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/wasm32-wasip2/debug/starling.wasm" \
+    STARLING_WASM_COMPONENT="{{_wasm_out}}/debug/starling.wasm" \
         cargo test -p serve-test-support --test serve_wasm_e2e {{ARGS}}
 
 # `test-serve-wasm` against the release component. The harness itself stays a debug build.
 test-serve-wasm-release *ARGS:
     @just build-wasm-release -p starlingmonkey
-    STARLING_WASM_COMPONENT="${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/wasm32-wasip2/release/starling.wasm" \
+    STARLING_WASM_COMPONENT="{{_wasm_out}}/release/starling.wasm" \
         cargo test -p serve-test-support --test serve_wasm_e2e {{ARGS}}
 
 # Run WPT tests against the wasm binary.
 [group('wpt')]
 wpt-test-wasm *PATTERN:
     @just build-wasm
-    node tests/wpt-harness/run-wpt.mjs --target=wasm {{PATTERN}}
+    node tests/wpt-harness/run-wpt.mjs --target=wasm --runtime="{{_wasm_out}}/debug/starling.wasm" {{PATTERN}}
 
 # Run WPT tests against the wasm binary with verbose output.
 [group('wpt')]
 wpt-test-wasm-verbose *PATTERN:
     @just build-wasm
-    node tests/wpt-harness/run-wpt.mjs --target=wasm -vv {{PATTERN}}
+    node tests/wpt-harness/run-wpt.mjs --target=wasm --runtime="{{_wasm_out}}/debug/starling.wasm" -vv {{PATTERN}}
 
 # Run WPT tests against the wasm binary and update expectations.
 [group('wpt')]
 wpt-update-wasm *PATTERN:
     @just build-wasm
-    node tests/wpt-harness/run-wpt.mjs --target=wasm --update-expectations {{PATTERN}}
+    node tests/wpt-harness/run-wpt.mjs --target=wasm --runtime="{{_wasm_out}}/debug/starling.wasm" --update-expectations {{PATTERN}}
 
 # Run WPT tests through a serve-mode runtime: each test runs inside a `fetch` handler rather than
 # as a one-shot command, which is the shape a deployed server has. Same binary as the command-mode
@@ -197,7 +205,7 @@ wpt-test-serve *PATTERN:
 [group('wpt')]
 wpt-test-wasm-serve *PATTERN:
     @just build-wasm
-    node tests/wpt-harness/run-wpt.mjs --target=wasm --mode=serve --wizen {{PATTERN}}
+    node tests/wpt-harness/run-wpt.mjs --target=wasm --runtime="{{_wasm_out}}/debug/starling.wasm" --mode=serve --wizen {{PATTERN}}
 
 # Run WPT across every configuration: both targets, each as a command and as a server, from one
 # build per target.

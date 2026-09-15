@@ -47,8 +47,9 @@ starling-macro = { path = "crates/starling-macro" }
 tokio = { version = "1", features = ["rt", "time", "net", "io-util"] }
 url = "2.5.8"
 uuid = { version = "1.23", features = ["v4"] }
-wasip3 = { version = "0.8.0", features = ["http-compat"] }
-wit-bindgen = { version = "=0.61.0", features = ["macros"] }
+wasip3 = { version = "0.9.0", features = ["http-compat"] }
+# Must equal the `wit-bindgen` version `wasip3` depends on. See `starling/Cargo.toml`.
+wit-bindgen = { version = "=0.62.0", features = ["macros"] }
 wpt-support = { path = "crates/wpt-support" }
 
 # bindgen = { version = "0.72", default-features = false, features = [

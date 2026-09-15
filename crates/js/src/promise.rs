@@ -365,8 +365,8 @@ impl<'s> Stack<'s, Promise> {
     pub fn spawn(&self, js_promise: PromiseFuture) {
         let heap_promise = RootedHeap::new(*self);
 
-        let owner = CURRENT_FUTURE_OWNER.with(|owner_cell| owner_cell.get());
-        PENDING_FUTURES.with(|f| {
+        let owner = current_future_owner(|owner_cell| owner_cell.get());
+        pending_futures(|f| {
             f.borrow_mut()
                 .push((owner, heap_promise, js_promise.future));
         });
@@ -598,23 +598,47 @@ impl PromiseFuture {
     }
 }
 
-thread_local! {
-    // Crown: `PendingPromise` is self-rooting via `RootedHeap`, so we
-    // don't need to root the Vec itself.
-    #[crate::allow_unrooted_interior]
-    static PENDING_FUTURES: RefCell<Vec<PendingPromise>> = RefCell::new(Vec::new());
-}
-
-thread_local! {
+/// This module's share of the crate's thread-local state. See [`crate::tls`].
+///
+/// Crown: `PendingPromise` is self-rooting via `RootedHeap`, so neither `Vec`
+/// needs rooting.
+#[crate::allow_unrooted_interior]
+pub(crate) struct PromiseTls {
+    /// Futures waiting for an event loop to adopt them.
+    pending: RefCell<Vec<PendingPromise>>,
+    /// The futures the event loop is currently polling.
+    active: RefCell<Vec<PendingPromise>>,
     /// The event-loop id that owns futures spawned now (set by the event loop in `with_event_loop`).
     /// 0 when no loop is active.
-    static CURRENT_FUTURE_OWNER: Cell<u64> = const { Cell::new(0) };
+    owner: Cell<u64>,
+}
+
+impl PromiseTls {
+    pub(crate) const fn new() -> Self {
+        Self {
+            pending: RefCell::new(Vec::new()),
+            active: RefCell::new(Vec::new()),
+            owner: Cell::new(0),
+        }
+    }
+}
+
+fn pending_futures<R>(f: impl FnOnce(&RefCell<Vec<PendingPromise>>) -> R) -> R {
+    crate::tls::with(|tls| f(&tls.promise.pending))
+}
+
+fn active_futures<R>(f: impl FnOnce(&RefCell<Vec<PendingPromise>>) -> R) -> R {
+    crate::tls::with(|tls| f(&tls.promise.active))
+}
+
+fn current_future_owner<R>(f: impl FnOnce(&Cell<u64>) -> R) -> R {
+    crate::tls::with(|tls| f(&tls.promise.owner))
 }
 
 /// Set the owning event-loop id for futures spawned from now on, returning the previous owner so the
 /// caller can restore it when the loop's scope ends. The event loop calls this in `with_event_loop`.
 pub fn set_current_future_owner(owner: u64) -> u64 {
-    CURRENT_FUTURE_OWNER.with(|owner_cell| owner_cell.replace(owner))
+    current_future_owner(|owner_cell| owner_cell.replace(owner))
 }
 
 /// Take all pending promise futures, returning them for execution.
@@ -622,13 +646,7 @@ pub fn set_current_future_owner(owner: u64) -> u64 {
 /// This drains the internal queue into the active set managed by
 /// [`drive_pending_futures`]; it is not normally called directly.
 fn take_pending_futures() -> Vec<PendingPromise> {
-    PENDING_FUTURES.with(|f| std::mem::take(&mut *f.borrow_mut()))
-}
-
-thread_local! {
-    // The futures currently being polled by the event loop. Like `PENDING_FUTURES`,
-    // each entry self-roots its promise via `RootedHeap`.
-    static ACTIVE_FUTURES: RefCell<Vec<PendingPromise>> = const { RefCell::new(Vec::new()) };
+    pending_futures(|f| std::mem::take(&mut *f.borrow_mut()))
 }
 
 /// Cancel and drop the pending future settling `promise`, if one is queued.
@@ -646,8 +664,8 @@ pub fn cancel_pending_future(promise: Stack<Promise>) -> bool {
             !matches
         });
     };
-    PENDING_FUTURES.with(&mut drop_matching);
-    ACTIVE_FUTURES.with(&mut drop_matching);
+    pending_futures(&mut drop_matching);
+    active_futures(&mut drop_matching);
     removed
 }
 
@@ -664,8 +682,8 @@ pub fn cancel_pending_futures_for(owner: u64) {
             .borrow_mut()
             .retain(|(future_owner, _, _)| *future_owner != owner && *future_owner != 0);
     };
-    PENDING_FUTURES.with(drop_owned);
-    ACTIVE_FUTURES.with(drop_owned);
+    pending_futures(drop_owned);
+    active_futures(drop_owned);
 }
 
 /// Whether any async-promise future owned by `owner` (or unowned) is pending (spawned but not yet
@@ -675,8 +693,8 @@ pub fn cancel_pending_futures_for(owner: u64) {
 /// even with no tasks or timers — without being held alive by another request's loop's futures.
 pub fn has_pending_futures(owner: u64) -> bool {
     let owned_by_caller = |future: &PendingPromise| future.0 == owner || future.0 == 0;
-    ACTIVE_FUTURES.with(|a| a.borrow().iter().any(owned_by_caller))
-        || PENDING_FUTURES.with(|f| f.borrow().iter().any(owned_by_caller))
+    active_futures(|a| a.borrow().iter().any(owned_by_caller))
+        || pending_futures(|f| f.borrow().iter().any(owned_by_caller))
 }
 
 /// A promise object whose future completed, paired with its outcome — returned by
@@ -700,7 +718,7 @@ pub fn poll_pending_futures(
 ) -> Vec<CompletedFuture> {
     // Take the active set out of the thread-local (so a future's poll can't re-borrow it) and adopt
     // any newly spawned futures.
-    let mut futures = ACTIVE_FUTURES.with(|a| std::mem::take(&mut *a.borrow_mut()));
+    let mut futures = active_futures(|a| std::mem::take(&mut *a.borrow_mut()));
     futures.append(&mut take_pending_futures());
 
     let mut still_pending: Vec<PendingPromise> = Vec::with_capacity(futures.len());
@@ -718,8 +736,8 @@ pub fn poll_pending_futures(
     }
 
     // Restore the still-pending futures. Anything spawned during the polls above landed in
-    // `PENDING_FUTURES` and is adopted on the next call.
-    ACTIVE_FUTURES.with(|a| a.borrow_mut().append(&mut still_pending));
+    // `pending` and is adopted on the next call.
+    active_futures(|a| a.borrow_mut().append(&mut still_pending));
     completed
 }
 

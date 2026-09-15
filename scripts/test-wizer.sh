@@ -11,17 +11,30 @@
 #   ./scripts/test-wizer.sh            # build the component, then run every case
 #   ./scripts/test-wizer.sh --no-build # reuse the component already in target/
 #
+# `WASM_TARGET` selects the target, as `p2`, `p3` or a full triple. It defaults to `p2`.
+#
 # Requires `wasmtime` on PATH (for both the `wizer` subcommand and `serve`).
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-COMPONENT="target/wasm32-wasip2/debug/starling.wasm"
+case "${WASM_TARGET:-p2}" in
+    p2) TARGET=wasm32-wasip2 ;;
+    p3) TARGET=wasm32-wasip3 ;;
+    *) TARGET="${WASM_TARGET}" ;;
+esac
+# The pinned toolchain ships no wasm32-wasip3 std.
+if [ "$TARGET" = wasm32-wasip3 ]; then
+    CARGO=(cargo +nightly)
+else
+    CARGO=(cargo)
+fi
+COMPONENT="target/$TARGET/debug/starling.wasm"
 WASI_FLAGS=(-Scli=y,inherit-env=y,http=y)
 
 if [[ "${1:-}" != "--no-build" ]]; then
-    cargo build --target wasm32-wasip2 --features debugmozjs -p starlingmonkey
+    "${CARGO[@]}" build --target "$TARGET" --features debugmozjs -p starlingmonkey
 fi
 
 if ! command -v wasmtime >/dev/null; then

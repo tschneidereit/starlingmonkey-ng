@@ -470,7 +470,7 @@ impl Default for RuntimeConfig {
 // origin/mode enforcement) rather than HTTP correctness rules. In non-browser
 // contexts these policies are usually unwanted, so they're disabled by default.
 
-thread_local! {
+js::instance_local! {
     static ENFORCE_REQUEST_RESTRICTIONS: Cell<bool> = const { Cell::new(false) };
 }
 

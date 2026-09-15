@@ -22,7 +22,14 @@ workspace = true
 
 [dependencies]
 indexmap = "2.13"
-mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" }
+# `libz-rs` (pure Rust) rather than mozjs's default `libz-sys`, whose C zlib has no
+# wasm32-wasip3 build. `jit` and `intl` are mozjs defaults that `default-features = false` would
+# otherwise drop, and dropping `intl` would take ICU out of every build.
+mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main", default-features = false, features = [
+  "jit",
+  "libz-rs",
+  "intl",
+] }
 mozjs_sys = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" }
 num-traits = "0.2"
 starling-macro.workspace = true
