@@ -49,13 +49,13 @@ use js::heap::Trace;
 use js::module_raw::{transform_str_to_source_text, CompileOptionsWrapper, SetModulePrivate};
 use js::native::{GCHandle, HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
 use js::prelude::{HandleValue, RootScope};
-use js::Object;
+use js::{allow_unrooted, Object};
 use oxc_resolver::{ResolveOptions, Resolver};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 
 // ============================================================================
 // Module export descriptors
@@ -114,31 +114,45 @@ pub trait NativeModule: 'static {
 /// A cached compiled module object, stored in a `Heap` so SpiderMonkey's
 /// moving GC can update the pointer during compaction.
 /// Traced by `trace_module_registry`, so allowed to contain unrooted interior.
-#[js::allow_unrooted_interior]
+#[js::must_root]
 struct ModuleEntry {
     module_obj: Heap<js::object::Object>,
 }
 
-thread_local! {
-    static MODULE_REGISTRY: RefCell<HashMap<String, ModuleEntry>> = RefCell::new(HashMap::new());
-
-    /// The resolver instance, created once per thread via `init_module_loader`.
-    static RESOLVER: RefCell<Option<Resolver>> = const { RefCell::new(None) };
-
+/// A runtime's module state, held as a field of [`Runtime`](crate::Runtime).
+///
+/// `Runtime` declares this before its `mozjs_rt`, so the cached module objects
+/// drop while the SpiderMonkey context is still alive and their write barriers
+/// can fire.
+#[js::must_root]
+#[derive(Default)]
+pub struct ModuleState {
+    registry: RefCell<HashMap<String, ModuleEntry>>,
+    /// The resolver instance, created once per runtime via `init_module_loader`.
+    resolver: RefCell<Option<Resolver>>,
     /// Fallback base directory for the entry module (before any module objects exist).
-    static BASE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    base_path: RefCell<Option<PathBuf>>,
+}
+
+/// Run `f` against the current runtime's module state.
+///
+/// The SpiderMonkey callbacks below take no data pointer of their own, so they
+/// reach the runtime through [`crate::runtime::current`].
+fn with_state<R>(f: impl FnOnce(&ModuleState) -> R) -> R {
+    let rt = crate::runtime::current().expect("module state used outside a runtime");
+    f(&rt.modules)
 }
 
 fn registry<R>(f: impl FnOnce(&RefCell<HashMap<String, ModuleEntry>>) -> R) -> R {
-    MODULE_REGISTRY.with(f)
+    with_state(|state| f(&state.registry))
 }
 
 fn resolver<R>(f: impl FnOnce(&RefCell<Option<Resolver>>) -> R) -> R {
-    RESOLVER.with(f)
+    with_state(|state| f(&state.resolver))
 }
 
 fn base_path<R>(f: impl FnOnce(&RefCell<Option<PathBuf>>) -> R) -> R {
-    BASE_PATH.with(f)
+    with_state(|state| f(&state.base_path))
 }
 
 /// Trace all cached module objects.
@@ -146,33 +160,38 @@ fn base_path<R>(f: impl FnOnce(&RefCell<Option<PathBuf>>) -> R) -> R {
 /// # Safety
 ///
 /// `trc` must be a valid `JSTracer` pointer provided by SpiderMonkey's GC.
-unsafe fn trace_module_registry(trc: *mut JSTracer) {
-    MODULE_REGISTRY.with(|reg| {
-        for entry in reg.borrow().values() {
-            entry.module_obj.trace(trc);
-        }
-    });
+#[allow_unrooted]
+unsafe fn trace_module_registry(state: &ModuleState, trc: *mut JSTracer) {
+    for entry in state.registry.borrow().values() {
+        entry.module_obj.trace(trc);
+    }
 }
 
 /// C-compatible trampoline for [`trace_module_registry`].
-unsafe extern "C" fn trace_module_registry_cb(trc: *mut JSTracer, _data: *mut std::ffi::c_void) {
-    trace_module_registry(trc);
+///
+/// # Safety
+///
+/// `data` must be the `Runtime` address [`init_module_gc_tracer`] was given.
+unsafe extern "C" fn trace_module_registry_cb(trc: *mut JSTracer, data: *mut c_void) {
+    let rt = unsafe { &*(data as *const crate::Runtime) };
+    unsafe { trace_module_registry(&rt.modules, trc) };
 }
 
 /// Register the module registry as a GC root tracer.
 ///
 /// Called automatically by `Runtime::init` — only needed when using a
 /// raw mozjs `Runtime` directly.
-pub fn init_module_gc_tracer(cx: &mut js::native::JSContext) {
+/// `rt` is handed back to the tracer, which reads the registry out of it.
+pub fn init_module_gc_tracer(cx: &mut js::native::JSContext, rt: *const crate::Runtime) {
     unsafe {
-        js::gc::add_extra_gc_roots_tracer(cx, Some(trace_module_registry_cb), ptr::null_mut())
+        js::gc::add_extra_gc_roots_tracer(cx, Some(trace_module_registry_cb), rt as *mut c_void)
     };
 }
 
-/// Remove the module registry GC root tracer.
-pub fn remove_module_gc_tracer(cx: &js::native::JSContext) {
+/// Remove the module registry GC root tracer. `rt` must match the registration.
+pub fn remove_module_gc_tracer(cx: &js::native::JSContext, rt: *const crate::Runtime) {
     unsafe {
-        js::gc::remove_extra_gc_roots_tracer(cx, Some(trace_module_registry_cb), ptr::null_mut())
+        js::gc::remove_extra_gc_roots_tracer(cx, Some(trace_module_registry_cb), rt as *mut c_void)
     };
 }
 
@@ -390,44 +409,34 @@ fn jsstring_to_string(scope: &Scope<'_>, s: *mut JSString) -> Option<String> {
 
 /// Install the module load hook and configure the filesystem resolver.
 ///
-/// `rt` is the raw `JSRuntime` pointer on which the load hook is installed.
-/// `base_path` is the directory used as the starting point for resolving
-/// import specifiers (typically the directory containing the entry script).
+/// The load hook is installed on `rt`, and `base` is the directory import
+/// specifiers resolve from (typically the directory holding the entry script).
 ///
 /// This must be called once before any modules are registered or imported.
-///
-/// # Safety
-///
-/// `rt` must be a valid `*mut JSRuntime`.
-pub unsafe fn init_module_loader(rt: *mut js::native::JSRuntime, base_path: PathBuf) {
-    BASE_PATH.with(|bp| *bp.borrow_mut() = Some(base_path));
+pub fn init_module_loader(rt: &crate::Runtime, base: PathBuf) {
+    let state = &rt.modules;
+    *state.base_path.borrow_mut() = Some(base);
 
-    unsafe { js::module::set_module_load_hook(rt, Some(module_load_hook)) };
+    // SAFETY: `rt` owns the `JSRuntime` the hook is installed on, so it is valid
+    // and outlives the hook.
+    unsafe { js::module::set_module_load_hook(rt.rt(), Some(module_load_hook)) };
 
-    RESOLVER.with(|r| {
-        *r.borrow_mut() = Some(Resolver::new(ResolveOptions {
-            extensions: vec![".js".into(), ".mjs".into(), ".json".into()],
-            ..ResolveOptions::default()
-        }));
-    });
+    *state.resolver.borrow_mut() = Some(Resolver::new(ResolveOptions {
+        extensions: vec![".js".into(), ".mjs".into(), ".json".into()],
+        ..ResolveOptions::default()
+    }));
 }
 
-/// Drop the cached module objects, so the next `import` of a path compiles and evaluates it afresh.
+/// Drop the cached module objects. See [`crate::Runtime::clear_module_registry`], the public entry
+/// point, for when a caller needs this.
 ///
-/// The registry is keyed by path and holds module objects belonging to the global they were
-/// evaluated in. A caller that serves each request from a *new* global (`--serve-isolated`) has to
-/// clear it between requests: otherwise the second request links against the first request's
-/// already-evaluated modules, their top-level side effects (registering a `fetch` handler, say)
-/// never run again in the new global, and whatever state they hold outlives the isolation
-/// boundary.
-///
-/// The resolver and base path are deliberately left in place — they are per-thread setup from
+/// The resolver and base path are left in place. They are per-runtime setup from
 /// [`init_module_loader`], not per-evaluation state.
 ///
 /// Must be called while the `JSContext` is still alive, because `Heap::drop()` fires GC write
 /// barriers.
-pub fn clear_module_registry() {
-    MODULE_REGISTRY.with(|reg| reg.borrow_mut().clear());
+pub(crate) fn clear_module_registry(state: &ModuleState) {
+    state.registry.borrow_mut().clear();
 }
 
 /// Clear all module state (registry, resolver, base path).
@@ -435,10 +444,10 @@ pub fn clear_module_registry() {
 /// Must be called while the `JSContext` is still alive, because
 /// `Heap::drop()` fires GC write barriers. Called automatically
 /// by `Runtime::drop`.
-pub fn clear_module_state() {
-    clear_module_registry();
-    BASE_PATH.with(|bp| *bp.borrow_mut() = None);
-    RESOLVER.with(|r| *r.borrow_mut() = None);
+pub(crate) fn clear_module_state(state: &ModuleState) {
+    clear_module_registry(state);
+    *state.base_path.borrow_mut() = None;
+    *state.resolver.borrow_mut() = None;
 }
 
 /// Register a native module, making it available for `import` from JS.
