@@ -110,6 +110,10 @@ pub struct Response {
     /// The network response body for incoming responses.
     #[no_trace]
     pub(crate) host_body: Option<platform::http::IncomingBody>,
+    /// The `body`'s byte source, attributed to this object for the GC. Kept in sync by
+    /// `sync_body_accounting`.
+    #[no_trace]
+    pub(crate) accounted: js::gc::AssociatedMemory,
     /// The `.body` stream's native byte source, kept so an abort can cancel an in-flight host
     /// read. Set when `.body` materializes a host-backed stream.
     pub(crate) body_source: Option<Heap<crate::incoming_body::HostBodySourceImpl>>,
@@ -124,6 +128,14 @@ pub struct Response {
 
 #[webidl_methods]
 impl Response {
+    /// Stop reporting the body's bytes to the GC. A compacting GC may have moved the object
+    /// since `sync_body_accounting` ran, so the finalizer's address is used here.
+    #[destructor]
+    fn release_body_accounting(&mut self, object: *mut js::native::JSObject) {
+        // SAFETY: `object` is the object being finalized, whose private data this is.
+        unsafe { self.accounted.release(object) };
+    }
+
     /// <https://fetch.spec.whatwg.org/#dom-response>
     #[constructor]
     fn new(
@@ -168,6 +180,7 @@ impl Response {
             body,
             body_stream: body_stream.map(Heap::from),
             host_body: None,
+            accounted: Default::default(),
             body_source: None,
             headers: Some(Heap::from(headers)),
             abort_state: None,
@@ -451,11 +464,29 @@ impl Response<'_> {
     /// HEAD/CONNECT/null-body-status step (Step 22).
     /// Drops the body record, its stream, and any host body so consume/`.body` see no body.
     pub(crate) fn clear_body(&self) {
+        {
+            let mut data = self.data_mut();
+            data.body = None;
+            data.body_stream = None;
+            data.host_body = None;
+            data.body_source = None;
+        }
+        self.sync_body_accounting();
+    }
+
+    /// Attribute the `body`'s byte source to this object for the GC, replacing the previous
+    /// amount. Called wherever the byte source is set, taken, or dropped.
+    pub(crate) fn sync_body_accounting(&self) {
         let mut data = self.data_mut();
-        data.body = None;
-        data.body_stream = None;
-        data.host_body = None;
-        data.body_source = None;
+        let bytes = match &data.body {
+            Some(Body {
+                source: BodySource::Bytes(bytes),
+                ..
+            }) => bytes.len(),
+            _ => 0,
+        };
+        // SAFETY: `self` is a rooted handle to the object owning this private data.
+        unsafe { data.accounted.set(self.as_raw(), bytes) };
     }
 
     /// Whether a host body is still sitting unread on this response.
@@ -702,14 +733,18 @@ impl crate::incoming_body::HostBackedBodyOwner for Response<'_> {
     }
 
     fn take_byte_source(&self) -> Option<bytes::Bytes> {
-        let mut data = self.data_mut();
-        let body = data.body.as_mut()?;
-        let BodySource::Bytes(bytes) = &mut body.source else {
-            return None;
+        let taken = {
+            let mut data = self.data_mut();
+            let body = data.body.as_mut()?;
+            let BodySource::Bytes(bytes) = &mut body.source else {
+                return None;
+            };
+            let bytes = std::mem::take(bytes);
+            body.source_disturbed = true;
+            bytes
         };
-        let bytes = std::mem::take(bytes);
-        body.source_disturbed = true;
-        Some(bytes)
+        self.sync_body_accounting();
+        Some(taken)
     }
 
     fn body_stream<'r>(
@@ -729,15 +764,18 @@ impl crate::incoming_body::HostBackedBodyOwner for Response<'_> {
         stream: web_streams::readable::readable_stream::ReadableStream<'_>,
     ) {
         let _ = scope;
-        let mut data = self.data_mut();
-        data.body_stream = Some(Heap::from(stream));
-        // The source's bytes now live in the teed stream, so read via that branch, not the
-        // byte/host fast paths: drop the byte source and the now-stale host source.
-        if let Some(body) = data.body.as_mut() {
-            body.source = BodySource::Null;
+        {
+            let mut data = self.data_mut();
+            data.body_stream = Some(Heap::from(stream));
+            // The source's bytes now live in the teed stream, so read via that branch, not the
+            // byte/host fast paths: drop the byte source and the now-stale host source.
+            if let Some(body) = data.body.as_mut() {
+                body.source = BodySource::Null;
+            }
+            data.host_body = None;
+            data.body_source = None;
         }
-        data.host_body = None;
-        data.body_source = None;
+        self.sync_body_accounting();
     }
 }
 

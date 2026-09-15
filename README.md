@@ -220,7 +220,7 @@ To store a reference to an instance in a long-lived struct, hold a
 | `#[getter]` | Read accessor for a JS property (`obj.x`). |
 | `#[setter]` | Write accessor; `fn set_x(&mut self, v: T)` pairs with the `x` getter. |
 | `#[static_method]` | Method on the constructor (`Counter.zero()`). |
-| `#[destructor]` | Runs during GC finalization, before the Rust data is dropped. |
+| `#[destructor]` | Runs during GC finalization, before the Rust data is dropped. Takes an optional second parameter, `*mut JSObject`, which receives the object being finalized. A subclass runs its parent's destructor after its own. |
 
 **Return types:**
 

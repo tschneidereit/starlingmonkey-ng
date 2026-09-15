@@ -346,6 +346,17 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         quote! {}
     };
 
+    // A class embeds its parent's data, so the parent's destructor is called after this
+    // class's own. Without this it would never run, because finalization dispatches only on
+    // the most derived class.
+    let parent_destructor = if let Some(ref inner_parent_name) = inner_parent {
+        quote! {
+            <#inner_parent_name as ::js::class::ClassDef>::destructor(&mut self.parent, object);
+        }
+    } else {
+        quote! {}
+    };
+
     // Generate TO_STRING_TAG const override.
     // Explicit `to_string_tag = "..."` always wins. Otherwise, when
     // `config.auto_to_string_tag` is true (webidl_interface), default
@@ -561,10 +572,12 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
                 (&reg).register(builder)
             }
 
-            fn destructor(&mut self) {
+            #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+            fn destructor(&mut self, object: *mut ::js::native::JSObject) {
                 use ::js::class::__DestructorRegistrar;
                 let reg = ::js::class::__DtorReg::<Self>::new();
-                (&reg).destruct(self);
+                (&reg).destruct(self, object);
+                #parent_destructor
             }
 
             fn register_constants(
@@ -1127,6 +1140,15 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                 }
             };
 
+            // A destructor taking the finalized object names a raw `JSObject` pointer, and must
+            // not allocate anything or otherwise trigger a GC, so opting out of the crown check
+            // is safe.
+            if matches!(kind, MethodKind::Destructor) && fn_item.sig.inputs.len() > 1 {
+                fn_item.attrs.push(
+                    syn::parse_quote! { #[cfg_attr(crown, allow(crown::unrooted_must_root))] },
+                );
+            }
+
             let info = parse_method_info(
                 fn_item.clone(),
                 kind,
@@ -1165,6 +1187,8 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
     let mut static_builder_calls = Vec::new();
     let mut constructor_body = None;
     let mut destructor_fn_name = None;
+    // A destructor may take the object being finalized as a second parameter.
+    let mut destructor_takes_object = false;
     // Setup-style constructor: detected when #[constructor] has &self/&mut self.
     // The constructor body runs on the stack newtype after allocation + boxing.
     let mut setup_ctor_info: Option<usize> = None; // index into `methods`
@@ -1216,6 +1240,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
             }
             MethodKind::Constructor => {}
             MethodKind::Destructor => {
+                destructor_takes_object = method.fn_item.sig.inputs.len() > 1;
                 destructor_fn_name = Some(method.fn_item.sig.ident.clone());
             }
             MethodKind::PostInit => {
@@ -1457,10 +1482,16 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
 
     // Generate the DestructorRegistrar impl
     let dtor_impl = if let Some(fn_name) = destructor_fn_name {
+        let call = if destructor_takes_object {
+            quote! { #inner_name::#fn_name(this, object); }
+        } else {
+            quote! { let _ = object; #inner_name::#fn_name(this); }
+        };
         quote! {
             impl ::js::class::__DestructorRegistrar<#inner_name> for ::js::class::__DtorReg<#inner_name> {
-                fn destruct(&self, this: &mut #inner_name) {
-                    #inner_name::#fn_name(this);
+                #[cfg_attr(crown, allow(crown::unrooted_must_root))]
+                fn destruct(&self, this: &mut #inner_name, object: *mut ::js::native::JSObject) {
+                    #call
                 }
             }
         }
