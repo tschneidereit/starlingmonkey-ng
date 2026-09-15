@@ -210,9 +210,7 @@ pub mod module_raw {
     pub use mozjs::jsapi::{
         CompileModule1, GetModuleRequestSpecifier, JSRuntime, SetModulePrivate,
     };
-    pub use mozjs::rust::{
-        transform_str_to_source_text, wrappers2::GetModuleEnvironment, CompileOptionsWrapper,
-    };
+    pub use mozjs::rust::{transform_str_to_source_text, wrappers2::GetModuleEnvironment};
 }
 
 pub use macros::must_root;
