@@ -181,6 +181,38 @@ pub fn set_low_memory_state(scope: &Scope<'_>, new_state: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// FinalizationRegistry cleanup
+// ---------------------------------------------------------------------------
+
+/// The host hook SpiderMonkey calls when a `FinalizationRegistry` has cleanup
+/// work: `(do_cleanup, incumbent_global, data)`.
+pub type HostCleanupFinalizationRegistryCallback =
+    mozjs::jsapi::JSHostCleanupFinalizationRegistryCallback;
+
+/// Install the host hook that receives `FinalizationRegistry` cleanup work.
+///
+/// The engine collects a registry's dead targets but runs none of its callbacks
+/// itself. It calls this hook instead, once per registry that has work, with the
+/// `doCleanup` function to invoke later. Without a hook installed no
+/// `FinalizationRegistry` callback ever runs.
+///
+/// The hook is called from inside a collection, so it must only record
+/// `do_cleanup` and return. Anything that could trigger a GC, allocate on the JS
+/// heap, or run JS belongs in the later call to `do_cleanup`.
+///
+/// # Safety
+///
+/// `cb` must be a valid function pointer (or `None` to clear the hook), and
+/// `data` must stay valid for as long as the hook is installed.
+pub unsafe fn set_host_cleanup_finalization_registry_callback(
+    cx: &JSContext,
+    cb: HostCleanupFinalizationRegistryCallback,
+    data: *mut std::os::raw::c_void,
+) {
+    wrappers2::SetHostCleanupFinalizationRegistryCallback(cx, cb, data);
+}
+
+// ---------------------------------------------------------------------------
 // Extra GC roots tracing
 // ---------------------------------------------------------------------------
 

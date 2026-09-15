@@ -908,11 +908,15 @@ impl Default for EventLoop {
 /// This should be called after running any task that may have created
 /// promise reactions or other microtasks. It drains the job queue and
 /// then clears the weak-reference set for the current "turn".
+///
+/// Any `FinalizationRegistry` cleanup a collection queued runs first, so a
+/// callback's own microtasks are drained in the same turn.
 pub fn run_microtasks(scope: &Scope<'_>) {
     debug_assert!(
         !js::exception::is_pending(scope),
         "Cannot run microtasks with pending exception"
     );
+    crate::finalization::run_pending(scope);
     jobs::run_jobs(scope);
     // Weak-ref set is cleared by run_jobs.
 }
