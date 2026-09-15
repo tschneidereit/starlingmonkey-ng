@@ -157,7 +157,7 @@ pub mod native {
     pub use mozjs::context::{JSContext, RawJSContext};
     pub use mozjs::jsapi::{
         BigInt, CallArgs, ColumnNumberOneOrigin, ExceptionStackBehavior, GCContext,
-        HandleValueArray, JSNative, JSObject, JSRuntime, JSScript, JSString, JSTracer,
+        HandleValueArray, JSFunction, JSNative, JSObject, JSRuntime, JSScript, JSString, JSTracer,
         PropertyDescriptor, SymbolCode, Value,
     };
     pub use mozjs::rust::wrappers2::JS_GetRuntime;

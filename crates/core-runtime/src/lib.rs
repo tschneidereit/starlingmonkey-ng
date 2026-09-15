@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod event_loop;
+pub mod finalization;
 pub mod invocation;
 pub mod module;
 pub mod runtime;

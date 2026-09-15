@@ -34,10 +34,10 @@ use mozjs::jsval::{
     ObjectValue, PrivateValue, StringValue, UInt32Value, UndefinedValue,
 };
 
-pub use mozjs::jsval::JSVal as Value;
-
 use crate::conversion::ToJSVal;
 use crate::error::ExnThrown;
+pub use mozjs::jsval::JSVal as Value;
+use mozjs_sys::jsapi::JSFunction;
 
 /// Create an `undefined` value.
 #[inline]
@@ -126,7 +126,15 @@ pub fn from_bigint(bi: Handle<*mut BigInt>) -> JSVal {
 pub fn from_function(fun: HandleFunction) -> JSVal {
     // SAFETY: The function is rooted via the handle. JS_GetFunctionObject
     // returns a non-null pointer for any valid JSFunction.
-    unsafe { ObjectValue(mozjs::jsapi::JS_GetFunctionObject(fun.get())) }
+    unsafe { from_raw_function(fun.get()) }
+}
+
+/// Create a value from a raw function pointer.
+///
+/// SAFETY: `fun` must be a valid, non-null, rooted `JSFunction` pointer.
+#[inline]
+pub unsafe fn from_raw_function(fun: *mut JSFunction) -> JSVal {
+    ObjectValue(mozjs::jsapi::JS_GetFunctionObject(fun))
 }
 
 /// Create a private value from a pointer.

@@ -226,6 +226,8 @@ pub struct Runtime {
     /// Cached module objects, the resolver and the base path. Declared before
     /// `mozjs_rt` for the same reason as `default_global`.
     pub(crate) modules: module::ModuleState,
+    /// `FinalizationRegistry` cleanups still queued. Same ordering requirement.
+    pub(crate) finalization: crate::finalization::FinalizationState,
     mozjs_rt: UnsafeCell<MozJSRuntime>,
     /// Registry of live [`InvocationState`](crate::invocation::InvocationState)
     /// instances. The GC trace callback iterates this to trace all event
@@ -283,6 +285,7 @@ impl Runtime {
             mozjs_rt: UnsafeCell::new(mozjs_rt),
             default_global: Heap::default(),
             modules: module::ModuleState::default(),
+            finalization: crate::finalization::FinalizationState::default(),
             invocations: RefCell::new(InvocationRegistry::new()),
         });
 
@@ -308,6 +311,9 @@ impl Runtime {
         // Register GC tracer for the module registry so cached module
         // objects are properly traced.
         module::init_module_gc_tracer(rt.mozjs_rt_mut().cx(), self_ptr as *const Self);
+
+        // Ensure `FinalizationRegistry` callbacks get run.
+        crate::finalization::install(rt.mozjs_rt_mut().cx());
 
         module::init_module_loader(&rt, config.base_path());
 
@@ -488,6 +494,9 @@ impl Drop for Runtime {
         // Heap::drop fires GC write barriers which can trigger GC under
         // GC zeal — the module tracer must still be registered.
         module::clear_module_state(&self.modules);
+        // Same reason: the queued `doCleanup` functions belong to this runtime,
+        // and their tracer is still registered.
+        crate::finalization::clear(&self.finalization);
 
         // Remove GC tracers (module registry is empty, so the tracer
         // is a no-op even if called during barrier processing).
