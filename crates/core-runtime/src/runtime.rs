@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
 use std::{
-    cell::{RefCell, UnsafeCell},
+    cell::{Cell, RefCell, UnsafeCell},
     env,
     ffi::c_void,
     process,
@@ -34,6 +34,28 @@ use js::{
 ///
 /// Registered initializers are called during `Runtime::new_global()`.
 type GlobalInitFn = for<'a> fn(&'a Scope<'a>, Object<'a>);
+
+thread_local! {
+    /// The runtime whose SpiderMonkey callbacks are installed on this thread.
+    ///
+    /// A raw pointer, so this key has no destructor and takes no part in
+    /// thread-local teardown. The state it stands in for lives on the `Runtime`
+    /// itself, so `Runtime::drop` reaches that state through `&mut self` rather
+    /// than through a key that may already be gone.
+    ///
+    /// Only for the SpiderMonkey callbacks that take no data pointer of their
+    /// own. Everything else already has a `Runtime` in hand.
+    static CURRENT: Cell<*const Runtime> = const { Cell::new(std::ptr::null()) };
+}
+
+/// The runtime this thread's callbacks belong to, or `None` outside
+/// `Runtime::init`..`Runtime::drop`.
+pub(crate) fn current<'a>() -> Option<&'a Runtime> {
+    let rt = CURRENT.get();
+    // SAFETY: `init` stores the address of an `Rc` allocation, which is stable
+    // for the runtime's life, and `drop` clears it before that allocation goes.
+    (!rt.is_null()).then(|| unsafe { &*rt })
+}
 
 thread_local! {
     static GLOBAL_INITIALIZERS: RefCell<Vec<GlobalInitFn>> = const { RefCell::new(Vec::new()) };
@@ -201,6 +223,9 @@ pub struct Runtime {
     /// `Heap::drop()` fires a GC write barrier, which requires the
     /// SpiderMonkey context to still be alive.
     default_global: Heap<js::object::Object>,
+    /// Cached module objects, the resolver and the base path. Declared before
+    /// `mozjs_rt` for the same reason as `default_global`.
+    pub(crate) modules: module::ModuleState,
     mozjs_rt: UnsafeCell<MozJSRuntime>,
     /// Registry of live [`InvocationState`](crate::invocation::InvocationState)
     /// instances. The GC trace callback iterates this to trace all event
@@ -257,8 +282,12 @@ impl Runtime {
         let rt = Rc::new(Self {
             mozjs_rt: UnsafeCell::new(mozjs_rt),
             default_global: Heap::default(),
+            modules: module::ModuleState::default(),
             invocations: RefCell::new(InvocationRegistry::new()),
         });
+
+        // Set before anything can call back into us. Cleared by the `Drop` impl.
+        CURRENT.set(Rc::as_ptr(&rt));
 
         // Register runtime GC tracer, passing a raw pointer to the Rc's
         // inner allocation so the callback can trace `default_global`
@@ -278,11 +307,9 @@ impl Runtime {
 
         // Register GC tracer for the module registry so cached module
         // objects are properly traced.
-        module::init_module_gc_tracer(rt.mozjs_rt_mut().cx());
+        module::init_module_gc_tracer(rt.mozjs_rt_mut().cx(), self_ptr as *const Self);
 
-        unsafe {
-            module::init_module_loader(rt.rt(), config.base_path());
-        }
+        module::init_module_loader(&rt, config.base_path());
 
         // Create the default global and register builtins.
         drop(rt.new_global());
@@ -435,13 +462,23 @@ impl Runtime {
     /// Re-initialize the module loader.
     ///
     /// Clears any existing module state (registry, cached modules, resolver)
-    /// and sets up a fresh module resolve hook rooted at `base_path`.
+    /// and sets up a fresh module load hook rooted at `base_path`.
     /// Useful in tests to point imports at a temp directory.
     pub fn reset_module_loader(&self, base_path: std::path::PathBuf) {
-        module::clear_module_state();
-        unsafe {
-            module::init_module_loader(self.rt(), base_path);
-        }
+        module::clear_module_state(&self.modules);
+        module::init_module_loader(self, base_path);
+    }
+
+    /// Drop the cached module objects, so the next `import` of a path compiles
+    /// and evaluates it afresh. The resolver and base path stay in place.
+    ///
+    /// A caller serving each request from a new global has to clear this between
+    /// requests: the registry is keyed by path and holds module objects belonging
+    /// to the global they were evaluated in, so otherwise the next request links
+    /// against the previous request's already-evaluated modules and their
+    /// top-level side effects never run again.
+    pub fn clear_module_registry(&self) {
+        module::clear_module_registry(&self.modules);
     }
 }
 
@@ -450,7 +487,7 @@ impl Drop for Runtime {
         // Clear module state while tracers are still registered.
         // Heap::drop fires GC write barriers which can trigger GC under
         // GC zeal — the module tracer must still be registered.
-        module::clear_module_state();
+        module::clear_module_state(&self.modules);
 
         // Remove GC tracers (module registry is empty, so the tracer
         // is a no-op even if called during barrier processing).
@@ -464,7 +501,12 @@ impl Drop for Runtime {
                 self_ptr,
             );
         }
-        module::remove_module_gc_tracer(self.mozjs_rt().cx_no_gc());
+        module::remove_module_gc_tracer(self.mozjs_rt().cx_no_gc(), self_ptr as *const Self);
+        // Only if this is still the current runtime: a second one created on
+        // this thread has already replaced the pointer with its own.
+        if CURRENT.get() == self as *const Self {
+            CURRENT.set(std::ptr::null());
+        }
         js::gc::shutdown(self.mozjs_rt().cx_no_gc());
     }
 }

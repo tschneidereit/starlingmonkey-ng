@@ -610,7 +610,7 @@ async fn evaluate_into_request_global(
     // Module objects are cached per global, so a new global per request requires clearing the
     // registry first, because for now the registry doesn't key modules on the global.
     if script.module_mode {
-        core_runtime::module::clear_module_registry();
+        context.runtime.clear_module_registry();
     }
     // SAFETY: the caller holds the request's realm entered, and the module loader was initialized
     // by `Runtime::init`.
