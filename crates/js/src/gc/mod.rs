@@ -15,13 +15,13 @@ pub mod pool;
 pub mod scope;
 
 use mozjs::context::JSContext;
-use mozjs::jsapi::{JSGCParamKey, SliceBudget, Zone};
+use mozjs::jsapi::{JSObject, MemoryUse, SliceBudget, Zone, JS};
 use mozjs::rust::wrappers2;
 use scope::Scope;
 
 // Re-export types that appear in public function signatures so callers
 // can name them without depending on `mozjs` directly.
-pub use mozjs::jsapi::{GCOptions, GCReason};
+pub use mozjs::jsapi::{GCOptions, GCReason, JSGCParamKey};
 
 #[cfg(feature = "debugmozjs")]
 pub use mozjs::jsapi::SetGCZeal;
@@ -153,6 +153,73 @@ pub fn is_incremental_gc_in_progress(scope: &Scope<'_>) -> bool {
 /// Set a GC parameter.
 pub fn set_parameter(scope: &Scope<'_>, key: JSGCParamKey, value: u32) {
     unsafe { wrappers2::JS_SetGCParameter(scope.cx_mut(), key, value) }
+}
+
+/// Rust-side memory attributed to a JS object, so the GC's heap-growth heuristics see it.
+///
+/// The GC schedules collections from the bytes reported to it. Memory a class's private data
+/// holds outside the GC heap (a request body's bytes, say) is invisible to it, so objects owning
+/// large Rust allocations pile up until the process runs out of memory. A class holding such
+/// memory keeps an `AssociatedMemory` field, calls [`AssociatedMemory::set`] whenever the amount
+/// changes, and calls [`AssociatedMemory::release`] from its `#[destructor]`.
+///
+/// No object pointer is stored. A compacting GC relocates tenured objects, so an address kept
+/// across a collection can name a released arena, and the engine's own accounting is rekeyed to
+/// the new address. Every call therefore takes the object's current address, which the owning
+/// class has at hand: a rooted handle for `set`, the finalizer's argument for `release`.
+#[derive(Debug, Default)]
+pub struct AssociatedMemory {
+    bytes: usize,
+}
+
+impl AssociatedMemory {
+    /// The bytes currently attributed to the object.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Attribute `bytes` to `object`, replacing the previous amount.
+    ///
+    /// # Safety
+    ///
+    /// `object` must be alive, and must be the object whose private data owns this field.
+    pub unsafe fn set(&mut self, object: *mut JSObject, bytes: usize) {
+        // SAFETY: the caller keeps `object` alive.
+        unsafe { self.release(object) };
+        self.bytes = bytes;
+        if bytes > 0 {
+            // SAFETY: the caller keeps `object` alive.
+            unsafe { JS::AddAssociatedMemory(object, bytes, MemoryUse::Embedding1) };
+        }
+    }
+
+    /// Remove everything attributed to `object`.
+    ///
+    /// # Safety
+    ///
+    /// `object` must be the object whose private data owns this field. It may be the object
+    /// being finalized, which is still readable while its finalizer runs.
+    pub unsafe fn release(&mut self, object: *mut JSObject) {
+        if self.bytes > 0 {
+            // SAFETY: the caller passes the object's current address.
+            unsafe { JS::RemoveAssociatedMemory(object, self.bytes, MemoryUse::Embedding1) };
+            self.bytes = 0;
+        }
+    }
+}
+
+impl Drop for AssociatedMemory {
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            self.bytes, 0,
+            "a class holding an `AssociatedMemory` must call `release` from its `#[destructor]`"
+        );
+    }
+}
+
+// SAFETY: holds no GC pointers the collector needs to see, so tracing is a no-op.
+unsafe impl mozjs::rust::Trace for AssociatedMemory {
+    unsafe fn trace(&self, _: *mut mozjs::jsapi::JSTracer) {}
 }
 
 /// Reset a GC parameter to its default value.

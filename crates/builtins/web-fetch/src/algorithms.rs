@@ -1157,7 +1157,9 @@ pub(crate) fn create_a_response_object<'r>(
     //     `headers list` is _response_’s `headers list` and `guard` is _guard_.
     // Step 4: Return _responseObject_.
     let headers = Headers::from_list(scope, header_list, guard)?;
-    Response::from_record_headers_body(scope, record, headers, body, stream)
+    let response = Response::from_record_headers_body(scope, record, headers, body, stream)?;
+    response.sync_body_accounting();
+    Ok(response)
 }
 
 /// <https://fetch.spec.whatwg.org/#initialize-a-response>
@@ -1229,6 +1231,7 @@ pub(crate) fn initialize_a_response<'r>(
             }
         }
     }
+    response.sync_body_accounting();
     Ok(())
 }
 

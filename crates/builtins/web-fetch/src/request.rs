@@ -230,6 +230,10 @@ pub struct Request {
     /// Consumed by the first of `consume`/`.body`.
     #[no_trace]
     host_body: Option<platform::http::IncomingBody>,
+    /// The `body`'s byte source, attributed to this object for the GC. Kept in sync by
+    /// `sync_body_accounting`.
+    #[no_trace]
+    accounted: js::gc::AssociatedMemory,
     /// The `.body` stream's native host source. Set when `.body` materializes a host-backed
     /// stream.
     body_source: Option<Heap<crate::incoming_body::HostBodySourceImpl>>,
@@ -250,6 +254,14 @@ pub enum RequestInfo<'s> {
 
 #[webidl_methods]
 impl Request {
+    /// Stop reporting the body's bytes to the GC. A compacting GC may have moved the object
+    /// since `sync_body_accounting` ran, so the finalizer's address is used here.
+    #[destructor]
+    fn release_body_accounting(&mut self, object: *mut js::native::JSObject) {
+        // SAFETY: `object` is the object being finalized, whose private data this is.
+        unsafe { self.accounted.release(object) };
+    }
+
     /// <https://fetch.spec.whatwg.org/#dom-request>
     #[constructor]
     fn new(
@@ -674,6 +686,7 @@ impl Request {
         };
         // Step 42: Set `this`’s `request`’s `body` to _finalBody_.
         self.data_mut().body = final_body;
+        self.sync_body_accounting();
         if let Some(stream) = final_stream {
             self.data_mut().body_stream.set(stream);
         }
@@ -727,6 +740,7 @@ impl Request {
             body: body_record,
             body_stream: None,
             host_body: body,
+            accounted: Default::default(),
             body_source: None,
             headers: Some(Heap::from(headers)),
             signal: Some(Heap::from(signal)),
@@ -922,10 +936,12 @@ impl Request {
             // A cloned request reads through its teed stream; the host body stays with the
             // source (whose stream is the other tee branch).
             host_body: None,
+            accounted: Default::default(),
             body_source: None,
             headers: Some(Heap::from(cloned_headers)),
             signal: Some(Heap::from(cloned_signal)),
         })?;
+        cloned_object.sync_body_accounting();
         // [inlined create a Request object] Step 5: Return _requestObject_.
         // Step 6: Return _clonedRequestObject_.
         Ok(cloned_object)
@@ -1098,14 +1114,18 @@ impl HostBackedBodyOwner for Request<'_> {
     }
 
     fn take_byte_source(&self) -> Option<bytes::Bytes> {
-        let mut data = self.data_mut();
-        let body = data.body.as_mut()?;
-        let BodySource::Bytes(bytes) = &mut body.source else {
-            return None;
+        let taken = {
+            let mut data = self.data_mut();
+            let body = data.body.as_mut()?;
+            let BodySource::Bytes(bytes) = &mut body.source else {
+                return None;
+            };
+            let bytes = std::mem::take(bytes);
+            body.source_disturbed = true;
+            bytes
         };
-        let bytes = std::mem::take(bytes);
-        body.source_disturbed = true;
-        Some(bytes)
+        self.sync_body_accounting();
+        Some(taken)
     }
 
     fn body_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>> {
@@ -1118,15 +1138,35 @@ impl HostBackedBodyOwner for Request<'_> {
 
     fn replace_body_stream_after_tee(&self, _scope: &Scope<'_>, stream: ReadableStream<'_>) {
         debug_assert!(self.data().body_stream.is_some());
-        let mut data = self.data_mut();
-        data.body_stream = Some(Heap::from(stream));
-        // The source's bytes now live in the teed stream, so read via that branch, not the
-        // byte/host fast paths: drop the byte source and the now-stale host source.
-        if let Some(body) = data.body.as_mut() {
-            body.source = BodySource::Null;
+        {
+            let mut data = self.data_mut();
+            data.body_stream = Some(Heap::from(stream));
+            // The source's bytes now live in the teed stream, so read via that branch, not the
+            // byte/host fast paths: drop the byte source and the now-stale host source.
+            if let Some(body) = data.body.as_mut() {
+                body.source = BodySource::Null;
+            }
+            data.host_body = None;
+            data.body_source = None;
         }
-        data.host_body = None;
-        data.body_source = None;
+        self.sync_body_accounting();
+    }
+}
+
+impl Request<'_> {
+    /// Attribute the `body`'s byte source to this object for the GC, replacing the previous
+    /// amount. Called wherever the byte source is set, taken, or dropped.
+    pub(crate) fn sync_body_accounting(&self) {
+        let mut data = self.data_mut();
+        let bytes = match &data.body {
+            Some(Body {
+                source: BodySource::Bytes(bytes),
+                ..
+            }) => bytes.len(),
+            _ => 0,
+        };
+        // SAFETY: `self` is a rooted handle to the object owning this private data.
+        unsafe { data.accounted.set(self.as_raw(), bytes) };
     }
 }
 

@@ -1451,9 +1451,19 @@ pub trait ClassDef: Sized + Trace + 'static {
 
     /// Called during GC finalization, before the Rust data is dropped.
     ///
+    /// `object` is the object being finalized. A compacting GC may have moved it since it was
+    /// constructed, so this is the only address the data may use at finalization time. Nothing
+    /// here may allocate on the JS heap or run JS.
+    ///
+    /// A class declared with `extends` calls its parent's `destructor` after its own, passing
+    /// the same object.
+    ///
     /// Use `#[destructor]` in `#[jsmethods]` to define this.
     /// The default implementation does nothing.
-    fn destructor(&mut self) {}
+    #[crate::allow_unrooted]
+    fn destructor(&mut self, object: *mut JSObject) {
+        let _ = object;
+    }
 
     /// Return the prototype of the parent class, or null if no parent.
     ///
@@ -1923,7 +1933,7 @@ pub unsafe extern "C" fn generic_class_finalize<T: ClassDef>(
 ) {
     // Call the user-defined destructor before dropping
     if let Some(data) = get_private_mut::<T>(obj) {
-        data.destructor();
+        data.destructor(obj);
     }
     drop_private::<T>(obj);
 }
@@ -2399,11 +2409,13 @@ impl<T: ClassDef> __MethodRegistrar<T> for &__MethodReg<T> {
 /// the real impl on `__DtorReg<T>` directly when `#[destructor]` is used.
 #[doc(hidden)]
 pub trait __DestructorRegistrar<T: ClassDef> {
-    fn destruct(&self, this: &mut T);
+    #[crate::allow_unrooted]
+    fn destruct(&self, this: &mut T, object: *mut JSObject);
 }
 
 impl<T: ClassDef> __DestructorRegistrar<T> for &__DtorReg<T> {
-    fn destruct(&self, _this: &mut T) {
+    #[crate::allow_unrooted]
+    fn destruct(&self, _this: &mut T, _object: *mut JSObject) {
         // No-op default — no #[destructor] defined
     }
 }
