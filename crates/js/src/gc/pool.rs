@@ -298,8 +298,21 @@ pub struct HandlePool {
     active_head: Cell<*mut ScopeAlloc>,
 }
 
-thread_local! {
-    static HANDLE_POOL: RefCell<Option<Box<PoolRooter>>> = const { RefCell::new(None) };
+/// This module's share of the crate's thread-local state. See [`crate::tls`].
+pub(crate) struct PoolTls {
+    handle_pool: RefCell<Option<Box<PoolRooter>>>,
+}
+
+impl PoolTls {
+    pub(crate) const fn new() -> Self {
+        Self {
+            handle_pool: RefCell::new(None),
+        }
+    }
+}
+
+fn handle_pool<R>(f: impl FnOnce(&RefCell<Option<Box<PoolRooter>>>) -> R) -> R {
+    crate::tls::with(|tls| f(&tls.pool.handle_pool))
 }
 
 /// Create the handle pool for scope-based rooting.
@@ -314,7 +327,7 @@ pub(crate) fn init_pool(cx: &mut JSContext) {
         pool_rooter.add_to_root_stack(cx.raw_cx());
     }
 
-    HANDLE_POOL.with(|hp| {
+    handle_pool(|hp| {
         let mut borrow = hp.borrow_mut();
         assert!(
             borrow.is_none(),
@@ -334,7 +347,7 @@ pub(crate) fn init_pool(cx: &mut JSContext) {
 ///
 /// Panics if no pool has been initialized on this thread.
 pub(crate) fn current_pool() -> *const HandlePool {
-    HANDLE_POOL.with(|hp| {
+    handle_pool(|hp| {
         let borrow = hp.borrow();
         let rooter = borrow
             .as_ref()
@@ -425,7 +438,7 @@ unsafe impl CustomTrace for HandlePool {
 pub type PoolRooter = CustomAutoRooter<HandlePool>;
 
 pub(crate) fn shutdown() {
-    HANDLE_POOL.with(|hp| {
+    handle_pool(|hp| {
         let mut borrow = hp.borrow_mut();
         // Clear the pool rooter from the autoGCRooters stack.
         // SAFETY: This reverses the add_to_root_stack call in init_pool().

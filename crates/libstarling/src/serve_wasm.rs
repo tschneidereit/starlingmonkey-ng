@@ -25,7 +25,7 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use wasip3::http::types::{ErrorCode, Request as WasiRequest, Response as WasiResponse};
 
-thread_local! {
+js::instance_local! {
     /// The JS runtime and its raw context, created once. The single global's realm is entered for
     /// the whole process rather than per request: a per-request `default_global()` would enter
     /// via a `JSAutoRealm`, and those drop non-LIFO under request interleaving, restoring the
@@ -42,7 +42,7 @@ thread_local! {
     /// Signalled on every [`STARTUP`] transition a waiting request cares about: driven to
     /// completion, or handed back by a driver that was cancelled. Every write of `Startup` other
     /// than `Driving` must notify, or a waiter in [`ensure_started`] sleeps through it.
-    static STARTUP_CHANGED: event_listener::Event = event_listener::Event::new();
+    static STARTUP_CHANGED: event_listener::Event = const { event_listener::Event::new() };
 
     /// Set while a Wizer snapshot is being taken, so it is set in the snapshot and the resumed
     /// instance can tell it came from one. See [`fix_up_after_resume`].
@@ -62,6 +62,18 @@ enum Startup {
     Evaluated(OwnedInvocation),
     /// Driven to completion (or there never was one).
     Done,
+}
+
+/// Store the runtime this instance serves from, and hold a reference for the life of the instance.
+///
+/// The held reference is never released, so the runtime is never dropped. Nothing here tears an
+/// instance down except thread-local destruction, and `Runtime::drop` reaches thread-locals in the
+/// `js` crate (the scope handle pool among them) that the same destruction may already have run,
+/// which traps. Dropping it would reclaim nothing either, since the instance's memory goes away
+/// whole. `serve_native` runs the real `Drop`.
+fn install_runtime(pair: (Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts)) {
+    std::mem::forget(Rc::clone(&pair.0));
+    RUNTIME.with(|cell| *cell.borrow_mut() = Some(pair));
 }
 
 /// Get the runtime and its context, creating them on first use: run the content script
@@ -91,7 +103,7 @@ fn runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeout
     let raw_cx = unsafe { scope.raw_cx_no_gc() };
     std::mem::forget(scope);
     let pair = (runtime, raw_cx, timeouts);
-    RUNTIME.with(|cell| *cell.borrow_mut() = Some(pair.clone()));
+    install_runtime(pair.clone());
     Ok(pair)
 }
 

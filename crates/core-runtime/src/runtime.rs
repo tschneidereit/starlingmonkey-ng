@@ -35,7 +35,7 @@ use js::{
 /// Registered initializers are called during `Runtime::new_global()`.
 type GlobalInitFn = for<'a> fn(&'a Scope<'a>, Object<'a>);
 
-thread_local! {
+js::instance_local! {
     /// The runtime whose SpiderMonkey callbacks are installed on this thread.
     ///
     /// A raw pointer, so this key has no destructor and takes no part in
@@ -57,7 +57,7 @@ pub(crate) fn current<'a>() -> Option<&'a Runtime> {
     (!rt.is_null()).then(|| unsafe { &*rt })
 }
 
-thread_local! {
+js::instance_local! {
     static GLOBAL_INITIALIZERS: RefCell<Vec<GlobalInitFn>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -81,7 +81,7 @@ pub fn register_global_initializer(init: GlobalInitFn) {
 /// Callback type for re-establishing state that cannot survive a snapshot.
 type ResumeFixupFn = fn();
 
-thread_local! {
+js::instance_local! {
     static RESUME_FIXUPS: RefCell<Vec<ResumeFixupFn>> = const { RefCell::new(Vec::new()) };
 }
 

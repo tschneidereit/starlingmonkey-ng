@@ -11,8 +11,10 @@ use std::any::TypeId;
 #[cfg(debug_assertions)]
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr, CString};
+use std::hash::BuildHasherDefault;
 use std::marker::PhantomData;
 use std::os::raw::c_char;
 use std::ptr::{self, NonNull};
@@ -945,13 +947,45 @@ unsafe fn get_or_init_class_registry(global: *mut JSObject) -> &'static mut Clas
     let registry = Box::into_raw(Box::new(ClassRegistry::new()));
     let pv = value::from_private(registry as *const c_void);
     crate::object::set_reserved_slot(global, CLASS_REGISTRY_SLOT, &pv);
-    LIVE_REGISTRIES.with(|regs| regs.borrow_mut().push(registry));
+    live_registries(|regs| regs.borrow_mut().push(registry));
     &mut *registry
 }
 
-thread_local! {
+/// This module's share of the crate's thread-local state. See [`crate::tls`].
+pub(crate) struct ClassTls {
     /// All live `ClassRegistry` boxes on this thread, traced by [`trace_class_registries`].
-    static LIVE_REGISTRIES: RefCell<Vec<*mut ClassRegistry>> = const { RefCell::new(Vec::new()) };
+    live_registries: RefCell<Vec<*mut ClassRegistry>>,
+    /// Child-to-parent derivations, keyed by the child's runtime `JSClass` tag.
+    inheritance: RefCell<TagMap<InheritanceInfo>>,
+    /// Per-`ClassDef` property and method tables, built once each.
+    spec_tables: RefCell<TagMap<SpecTables, TypeId>>,
+}
+
+/// A map over keys this crate generates itself, so it needs no random seeding.
+/// `BuildHasherDefault` is const-constructible, which keeps [`crate::tls`]'s key
+/// `const`-initialized.
+type TagMap<V, K = usize> = HashMap<K, V, BuildHasherDefault<DefaultHasher>>;
+
+impl ClassTls {
+    pub(crate) const fn new() -> Self {
+        Self {
+            live_registries: RefCell::new(Vec::new()),
+            inheritance: RefCell::new(HashMap::with_hasher(BuildHasherDefault::new())),
+            spec_tables: RefCell::new(HashMap::with_hasher(BuildHasherDefault::new())),
+        }
+    }
+}
+
+fn live_registries<R>(f: impl FnOnce(&RefCell<Vec<*mut ClassRegistry>>) -> R) -> R {
+    crate::tls::with(|tls| f(&tls.class.live_registries))
+}
+
+fn inheritance_registry<R>(f: impl FnOnce(&RefCell<TagMap<InheritanceInfo>>) -> R) -> R {
+    crate::tls::with(|tls| f(&tls.class.inheritance))
+}
+
+fn spec_tables_map<R>(f: impl FnOnce(&RefCell<TagMap<SpecTables, TypeId>>) -> R) -> R {
+    crate::tls::with(|tls| f(&tls.class.spec_tables))
 }
 
 /// Trace each global's class registry, rooting prototype and shared-function objects.
@@ -961,7 +995,7 @@ thread_local! {
 ///
 /// `trc` must be a valid `JSTracer` provided by SpiderMonkey's GC.
 pub(crate) unsafe extern "C" fn trace_class_registries(trc: *mut JSTracer, _data: *mut c_void) {
-    LIVE_REGISTRIES.with(|regs| {
+    live_registries(|regs| {
         // `as_ptr` bypasses RefCell borrow tracking: GC tracing pauses JS execution, so a borrow
         // held by interrupted code isn't actively used while the list is read here.
         let regs = &*regs.as_ptr();
@@ -1022,7 +1056,7 @@ unsafe extern "C" fn finalize_starling_global(gc: *mut GCContext, obj: *mut JSOb
                 (glue.finalize)(gc, obj);
             }
             // Unregister from the tracer's list before freeing.
-            LIVE_REGISTRIES.with(|regs| regs.borrow_mut().retain(|&r| r != ptr));
+            live_registries(|regs| regs.borrow_mut().retain(|&r| r != ptr));
             drop(Box::from_raw(ptr));
             // Clear the slot so we don't double-free.
             let undef = value::undefined();
@@ -1118,7 +1152,7 @@ struct InheritanceInfo {
 }
 
 pub(crate) fn inherits_from(concrete_tag: usize, target_tag: usize) -> bool {
-    INHERITANCE_REGISTRY.with(|reg| {
+    inheritance_registry(|reg| {
         let map = reg.borrow();
         map.get(&concrete_tag)
             .is_some_and(|info| info.ancestors.contains(&target_tag))
@@ -1127,10 +1161,6 @@ pub(crate) fn inherits_from(concrete_tag: usize, target_tag: usize) -> bool {
 
 // Registry mapping child type tag → parent info.
 // Thread-local because the SpiderMonkey runtime is single-threaded.
-thread_local! {
-    static INHERITANCE_REGISTRY: RefCell<HashMap<usize, InheritanceInfo>> = RefCell::new(HashMap::new());
-}
-
 /// Register a child→parent derivation in the inheritance registry, keyed by the
 /// child's runtime `JSClass` tag.
 ///
@@ -1143,7 +1173,7 @@ fn register_parent_info_raw(
     accessor: unsafe fn(*const c_void) -> *const c_void,
     accessor_mut: unsafe fn(*mut c_void) -> *mut c_void,
 ) {
-    INHERITANCE_REGISTRY.with(|reg| {
+    inheritance_registry(|reg| {
         let mut map = reg.borrow_mut();
 
         // Build the ancestor set: parent + parent's ancestors (if any).
@@ -1271,7 +1301,7 @@ pub unsafe fn get_private_or_ancestor<'a, T: ClassDef>(obj: *mut JSObject) -> Op
 
     // Walk the parent chain
     let data_ptr = get_raw_private(obj)?;
-    INHERITANCE_REGISTRY.with(|reg| {
+    inheritance_registry(|reg| {
         let map = reg.borrow();
         let mut current_tag = concrete_tag;
         let mut current_ptr = data_ptr;
@@ -1310,7 +1340,7 @@ pub unsafe fn get_private_or_ancestor_mut<'a, T: ClassDef>(
     }
 
     let data_ptr = get_raw_private(obj)? as *mut c_void;
-    INHERITANCE_REGISTRY.with(|reg| {
+    inheritance_registry(|reg| {
         let map = reg.borrow();
         let mut current_tag = concrete_tag;
         let mut current_ptr = data_ptr;
@@ -1668,12 +1698,8 @@ struct SpecTables {
     static_properties: *const JSPropertySpec,
 }
 
-thread_local! {
-    static SPEC_TABLES: RefCell<HashMap<TypeId, SpecTables>> = RefCell::new(HashMap::new());
-}
-
 fn spec_tables_for<T: ClassDef>() -> SpecTables {
-    SPEC_TABLES.with(|tables| {
+    spec_tables_map(|tables| {
         if let Some(t) = tables.borrow().get(&TypeId::of::<T>()) {
             return *t;
         }

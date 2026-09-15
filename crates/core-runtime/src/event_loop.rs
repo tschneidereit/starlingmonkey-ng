@@ -71,7 +71,7 @@ pub use interest::{InterestHandle, InterestTracker};
 // Current event loop pointer
 // ---------------------------------------------------------------------------
 
-thread_local! {
+js::instance_local! {
     /// Pointer to the active [`EventLoop`], set by [`with_event_loop`] for the
     /// duration of its closure. `JSNative` callbacks (`setTimeout` etc.) have
     /// no other way to reach Rust state, so they read this pointer via

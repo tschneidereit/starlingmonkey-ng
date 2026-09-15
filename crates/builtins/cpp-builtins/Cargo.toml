@@ -11,7 +11,13 @@ debugmozjs = []
 
 [dependencies]
 js.workspace = true
-mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" }
+# Feature-matched to the `js` crate: cargo unifies features across the graph, so leaving mozjs's
+# defaults on here would pull `libz-sys` back in for every build.
+mozjs = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main", default-features = false, features = [
+  "jit",
+  "libz-rs",
+  "intl",
+] }
 mozjs_sys = { git = "https://github.com/tschneidereit/mozjs.git", branch = "main" }
 
 [build-dependencies]

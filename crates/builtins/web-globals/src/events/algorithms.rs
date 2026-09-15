@@ -32,7 +32,7 @@ pub(crate) struct ListenerOptions<'s> {
     pub(crate) signal: Option<AbortSignal<'s>>,
 }
 
-thread_local! {
+js::instance_local! {
     /// Monotonic source of event-listener ids.
     /// Would theoretically overflow after 2^64 listeners, but that's not a realistic concern.
     static NEXT_LISTENER_ID: Cell<u64> = const { Cell::new(0) };

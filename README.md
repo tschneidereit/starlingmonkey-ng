@@ -617,7 +617,7 @@ for futures resolving to a value.
 
 - [Rust toolchain](./rust-toolchain.toml)
 - [just](https://github.com/casey/just)
-- [WASI-SDK 33](https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-33)
+- [WASI-SDK 34](https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34)
 - [Node.js](https://nodejs.org/), to run the WPT harness
 
 Checking, building, and testing is done using a [`justfile`](justfile).
@@ -644,6 +644,17 @@ just build-wasm        # debug build for wasm32-wasip2
 just test-wasm         # all Rust tests, on wasm32-wasip2
 just check-wasm        # fmt-check + clippy + wasm tests
 ```
+
+`WASM_TARGET` retargets those recipes and the wasm WPT recipes. It accepts `p2`, `p3`, or a
+full triple, and defaults to `p2`:
+
+```bash
+WASM_TARGET=p3 just test-wasm
+WASM_TARGET=p3 just wpt-test-wasm
+```
+
+`rust-toolchain.toml` pins a toolchain that ships no wasm32-wasip3 std, so `p3` builds through
+`cargo +nightly`, and `p3` needs wasi-sdk 34, the first with a wasm32-wasip3 sysroot.
 
 The package builds two targets. `cargo build` produces the native binary
 `target/debug/starlingmonkey`. A wasm build produces the component

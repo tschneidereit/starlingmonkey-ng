@@ -194,15 +194,24 @@ pub unsafe fn set_module_load_hook(
     mozjs::jsapi::SetModuleLoadHook(rt, hook);
 }
 
-thread_local! {
+/// This module's share of the crate's thread-local state. See [`crate::tls`].
+pub(crate) struct ModuleTls {
     /// Outcome of the innermost in-flight [`load_requested_modules`] call:
     /// `None` until one of its callbacks fires, `Some(Ok(()))` once the graph
     /// has loaded, `Some(Err(ExnThrown))` once it has failed.
-    static LOAD_OUTCOME: Cell<Option<Result<(), ExnThrown>>> = const { Cell::new(None) };
+    load_outcome: Cell<Option<Result<(), ExnThrown>>>,
+}
+
+impl ModuleTls {
+    pub(crate) const fn new() -> Self {
+        Self {
+            load_outcome: Cell::new(None),
+        }
+    }
 }
 
 fn load_outcome<R>(f: impl FnOnce(&Cell<Option<Result<(), ExnThrown>>>) -> R) -> R {
-    LOAD_OUTCOME.with(f)
+    crate::tls::with(|tls| f(&tls.module.load_outcome))
 }
 
 unsafe extern "C" fn load_resolved(

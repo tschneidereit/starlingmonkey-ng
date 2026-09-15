@@ -38,7 +38,7 @@ enum TimerHandler {
     Code(String),
 }
 
-thread_local! {
+js::instance_local! {
     /// The HTML "timer nesting level" of the timer task currently running on this
     /// thread (0 outside timer tasks). The timer initialization steps read it to
     /// clamp deeply nested zero-delay timers, and each fired timer's handler runs
