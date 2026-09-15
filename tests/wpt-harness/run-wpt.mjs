@@ -14,7 +14,7 @@
 //   --wpt-root=PATH            Path to WPT checkout (default: deps/wpt)
 //   --target=[native|wasm]     Execution target (default: native)
 //   --permissive               Run with the request restrictions disabled
-//   --runtime=PATH             Path to starling binary (default: target/debug/starling)
+//   --runtime=PATH             Path to the starlingmonkey binary (default: target/debug/starlingmonkey)
 //   --expectations=PATH        Path to expectations dir (default: tests/wpt-harness/expectations)
 //   --update-expectations      Update expectation files with current results
 //   -v                         Verbose output
@@ -83,7 +83,7 @@ const LogLevel = { Quiet: 0, Verbose: 1, VeryVerbose: 2 };
 
 const config = {
   // Default automatically adjusted to "target/wasm32-wasip2/debug/starling.wasm" for wasm target.
-  runtime: "target/debug/starling",
+  runtime: "target/debug/starlingmonkey",
   target: "native", // "native" or "wasm"
   // How the runtime executes each test: "cli" runs it as a one-shot command, "serve" POSTs it to a
   // long-running server built from the same binary (see wpt-server.js). Serve mode is the
@@ -132,7 +132,7 @@ const config = {
 
 const ArgParsers = {
   "--runtime": {
-    help: `Path to starling binary (default: ${config.runtime})`,
+    help: `Path to the starlingmonkey binary (default: ${config.runtime})`,
     cmd: (val) => {
       config.runtime = val;
     },
@@ -271,7 +271,7 @@ function applyConfig(argv) {
   }
 
   // When targeting wasm, adjust the runtime path if not explicitly set.
-  if (config.target === "wasm" && config.runtime === "target/debug/starling") {
+  if (config.target === "wasm" && config.runtime === "target/debug/starlingmonkey") {
     config.runtime = "target/wasm32-wasip2/debug/starling.wasm";
   }
 

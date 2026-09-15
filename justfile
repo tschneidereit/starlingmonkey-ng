@@ -55,7 +55,7 @@ wpt-test *PATTERN:
 [group('wpt')]
 wpt-test-release *PATTERN:
     @just build-release
-    node tests/wpt-harness/run-wpt.mjs --runtime=target/release/starling {{PATTERN}}
+    node tests/wpt-harness/run-wpt.mjs --runtime=target/release/starlingmonkey {{PATTERN}}
 
 # Run WPT tests with verbose output.
 [group('wpt')]

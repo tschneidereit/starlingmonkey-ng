@@ -13,7 +13,7 @@ use std::process::Command;
 /// the exit into a SIGABRT.
 #[test]
 fn initializer_error_exits_with_code_one() {
-    let out = Command::new(env!("CARGO_BIN_EXE_starling"))
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
         .args(["-i", "/nonexistent/init.js", "/nonexistent/app.js"])
         .output()
         .expect("failed to run starling");
@@ -46,7 +46,7 @@ fn initializer_event_loop_semantics() {
         "if (globalThis._fromInit !== 'ready') { throw new Error('initializer microtask not drained'); }",
     )
     .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_starling"))
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
         .args(["-i", &init.to_string_lossy(), &main.to_string_lossy()])
         .output()
         .expect("failed to run starling");
@@ -61,7 +61,7 @@ fn initializer_event_loop_semantics() {
     // pending when the initializer ends is an error.
     let init_timer = dir.path().join("init_timer.js");
     std::fs::write(&init_timer, "setTimeout(() => {}, 1000);").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_starling"))
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
         .args(["-i", &init_timer.to_string_lossy(), &main.to_string_lossy()])
         .output()
         .expect("failed to run starling");
@@ -79,7 +79,7 @@ fn initializer_event_loop_semantics() {
         "globalThis._fromInit = 'ready'; var t = setTimeout(() => {}, 1000); clearTimeout(t);",
     )
     .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_starling"))
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
         .args([
             "-i",
             &init_cleared.to_string_lossy(),
