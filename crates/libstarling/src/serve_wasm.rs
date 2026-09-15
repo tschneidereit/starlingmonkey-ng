@@ -151,6 +151,10 @@ pub async fn pre_initialize() -> Result<(), String> {
                 .to_string(),
         );
     }
+    // Define every standard class the global has not resolved yet, so the snapshot holds them
+    // all and an instance restored from it defines none of them on first use.
+    js::class::enumerate_standard_classes(&scope, scope.global().handle())
+        .map_err(|_| "defining the standard classes failed".to_string())?;
     // Store the event loop, in case it has tasks to resume after snapshot restoration.
     STARTUP.with(|cell| *cell.borrow_mut() = Startup::Evaluated(invocation));
     Ok(())
