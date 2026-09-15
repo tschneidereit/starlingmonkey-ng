@@ -138,7 +138,7 @@ impl Response {
         //     realm`, whose `header list` is `this`’s `response`’s `header list` and `guard` is
         //     "`response`".
         let headers = js::class::create_instance_with::<HeadersImpl>(scope, |_| HeadersImpl {
-            header_list: HeaderList::new(),
+            header_list: HeaderList::new().into(),
             guard: Guard::Response,
         })?;
         self.data_mut().headers = Some(Heap::from(headers));

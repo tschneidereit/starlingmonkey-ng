@@ -2,6 +2,9 @@
 
 //! <https://fetch.spec.whatwg.org/>
 
+use std::cell::OnceCell;
+use std::ops::{Deref, DerefMut};
+
 use core_runtime::{webidl_interface, webidl_methods, webidl_union};
 use js::class::{get_iterator_prototype, get_prototype_for};
 use js::conversion::{Record, ToJSVal};
@@ -32,6 +35,45 @@ use crate::byte_string::ByteString;
 // If that's too much of a DoS vector, Cow might work instead, with the most common
 // names being interned.
 pub(crate) type HeaderList = Vec<(String, String)>;
+
+/// A `Headers` object's header list together with the result of `sort and combine` on it,
+/// computed on first use and dropped by every mutable access to the list.
+#[derive(Default)]
+pub(crate) struct CachedHeaderList {
+    list: HeaderList,
+    sorted_and_combined: OnceCell<HeaderList>,
+}
+
+impl CachedHeaderList {
+    /// <https://fetch.spec.whatwg.org/#concept-header-list-sort-and-combine> of the list.
+    pub(crate) fn sorted_and_combined(&self) -> &HeaderList {
+        self.sorted_and_combined
+            .get_or_init(|| sort_and_combine_a_header_list(&self.list))
+    }
+}
+
+impl From<HeaderList> for CachedHeaderList {
+    fn from(list: HeaderList) -> Self {
+        Self {
+            list,
+            sorted_and_combined: OnceCell::new(),
+        }
+    }
+}
+
+impl Deref for CachedHeaderList {
+    type Target = HeaderList;
+    fn deref(&self) -> &HeaderList {
+        &self.list
+    }
+}
+
+impl DerefMut for CachedHeaderList {
+    fn deref_mut(&mut self) -> &mut HeaderList {
+        self.sorted_and_combined.take();
+        &mut self.list
+    }
+}
 
 /// A headers guard.
 ///
@@ -65,7 +107,8 @@ pub struct Headers {
     /// (a header list), which is initially empty. The spec allows this to be a pointer to
     /// another object's header list (e.g. a request's); here the `Headers` object owns its
     /// list and `Request`/`Response` reference the `Headers` object.
-    pub(crate) header_list: HeaderList,
+    #[no_trace]
+    pub(crate) header_list: CachedHeaderList,
     /// <https://fetch.spec.whatwg.org/#concept-headers-guard>
     /// which is a headers guard. A headers guard is "immutable", "request", "request-no-cors",
     /// "response" or "none".
@@ -90,7 +133,7 @@ impl Headers {
     /// Create a `Headers` instance from a header list and guard.
     pub fn from_list(list: HeaderList, guard: Guard) -> Self {
         Self {
-            header_list: list,
+            header_list: list.into(),
             guard,
         }
     }
@@ -264,12 +307,19 @@ impl Headers {
         // iteration sees. Recompute rather than iterating a snapshot taken up front.
         let mut index = 0;
         loop {
-            let combined = algorithms::sort_and_combine_a_header_list(&self.data().header_list);
-            let Some((name, value)) = combined.get(index) else {
-                break;
+            // The callback may mutate the list, which drops the cached result these references
+            // point into, so none of them may outlive this block.
+            let (value_js, name_js) = {
+                let data = self.data();
+                let combined = data.header_list.sorted_and_combined();
+                let Some((name, value)) = combined.get(index) else {
+                    break;
+                };
+                (
+                    value.as_str().to_jsval_throwing(scope)?,
+                    name.as_str().to_jsval_throwing(scope)?,
+                )
             };
-            let value_js = value.as_str().to_jsval_throwing(scope)?;
-            let name_js = name.as_str().to_jsval_throwing(scope)?;
             let self_js = scope.root_value(self.as_value());
             Function::call(
                 scope,
@@ -344,7 +394,8 @@ impl HeadersIterator {
         let index = self.data().index;
         let kind = self.data().kind;
         let headers = self.data().headers.get(scope);
-        let combined = sort_and_combine_a_header_list(&headers.data().header_list);
+        let headers_data = headers.data();
+        let combined = headers_data.header_list.sorted_and_combined();
 
         if let Some((name, value)) = combined.get(index) {
             let js_value = match kind {

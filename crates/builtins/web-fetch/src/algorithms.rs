@@ -936,7 +936,7 @@ pub(crate) fn refill_headers_from_own_list(headers: &Headers<'_>) {
 
     let guard = headers.data().guard;
     debug_assert!(matches!(guard, Guard::Request | Guard::RequestNoCors));
-    let list = std::mem::take(&mut headers.data_mut().header_list);
+    let list = std::mem::take(&mut *headers.data_mut().header_list);
     for (name, value) in list {
         match guard {
             // `validate` Step 3: If _headers_’s `guard` is "`request`" and (_name_, _value_) is a
