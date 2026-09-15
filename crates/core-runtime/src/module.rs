@@ -195,6 +195,47 @@ pub fn remove_module_gc_tracer(cx: &js::native::JSContext, rt: *const crate::Run
     };
 }
 
+/// Classify a module's evaluation result once microtasks have drained.
+///
+/// `JS::ModuleEvaluate` reports a top-level throw by rejecting the promise it
+/// returns and clearing the pending exception, so a caller that only checks for
+/// a pending exception reports success for a module that threw.
+///
+/// Returns the promise while a top-level `await` leaves it pending, `None` once
+/// it has fulfilled, and `Err` with `context: reason` once it has rejected. A
+/// classic script's completion value is not a promise and gives `None`.
+// TODO: this is kinda messy and hard to understand and we should clean it up.
+pub fn settled_module_evaluation<'s>(
+    scope: &'s Scope<'_>,
+    eval_result: HandleValue<'s>,
+    context: &str,
+) -> Result<Option<js::Promise<'s>>, String> {
+    let Some(promise) = js::Object::from_value(scope, eval_result.get())
+        .ok()
+        .and_then(|object| object.cast::<js::Promise>().ok())
+    else {
+        return Ok(None);
+    };
+
+    if promise.is_pending() {
+        return Ok(Some(promise));
+    }
+    if !promise.is_rejected() {
+        return Ok(None);
+    }
+
+    // Re-raise the reason so the shared capture path formats it the same way a
+    // thrown exception is formatted, then clear it again.
+    let Some(reason) = promise.result(scope) else {
+        return Err(context.to_string());
+    };
+    js::exception::set_pending(scope, reason, js::native::ExceptionStackBehavior::Capture);
+    match ExnThrown::capture(scope).message {
+        Some(message) => Err(format!("{context}: {message}")),
+        None => Err(context.to_string()),
+    }
+}
+
 // ============================================================================
 // Module load hook
 // ============================================================================

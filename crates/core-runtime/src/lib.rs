@@ -92,8 +92,7 @@ pub fn content_script(config: &config::RuntimeConfig) -> Result<(String, String)
 ///
 /// # Safety
 ///
-/// `scope`'s realm must be entered and, in module mode, the module loader must have been
-/// initialized by [`Runtime::init`].
+/// In module mode, the module loader must have been initialized by [`Runtime::init`].
 pub unsafe fn evaluate_content_script(
     scope: &js::gc::scope::Scope<'_>,
     event_loop: &event_loop::EventLoop,
@@ -119,20 +118,16 @@ pub unsafe fn evaluate_content_script(
         return Err(format!("Script evaluation failed with error {exn}"));
     }
 
-    // `ModuleEvaluate` hands back the evaluation promise, which a top-level `await` leaves
-    // pending. A classic script's completion value is whatever it evaluated to, and is not one.
-    let evaluation = js::Object::from_value(scope, value)
-        .ok()
-        .and_then(|object| object.cast::<js::Promise>().ok());
-
     event_loop::with_event_loop(event_loop, |_| {
         event_loop::run_microtasks(scope);
     });
 
-    // Read after the drain: the microtasks above are often exactly what settles it.
-    let pending = evaluation
-        .filter(|promise| promise.is_pending())
-        .map(js::gc::handle::RootedHeap::new);
+    let pending = if module_mode {
+        module::settled_module_evaluation(scope, value, "Script evaluation failed")?
+            .map(js::gc::handle::RootedHeap::new)
+    } else {
+        None
+    };
     Ok(ScriptEvaluation { pending })
 }
 
