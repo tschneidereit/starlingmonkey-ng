@@ -31,11 +31,18 @@ pub fn use_internal_job_queues(scope: &Scope<'_>) -> Result<(), ExnThrown> {
     ExnThrown::check(ok)
 }
 
-/// Enqueue `job` on the job queue: it runs as its own microtask, called with
-/// no arguments, in the same FIFO the engine uses for promise reactions.
+/// Enqueue `job` on the job queue: it runs as its own microtask, in the same
+/// FIFO the engine uses for promise reactions.
+///
+/// The queue holds only engine-internal job records, so `job` is enqueued as a
+/// fulfillment reaction on an already-resolved promise. It is therefore called
+/// with one argument, that promise's `undefined` result. An exception it throws
+/// rejects a promise the engine allocates for the reaction, which counts as an
+/// unhandled rejection. Observing that requires the embedding to install a
+/// promise rejection tracker.
 pub fn queue_microtask(scope: &Scope<'_>, job: &crate::Function<'_>) -> Result<(), ExnThrown> {
-    let ok = unsafe { wrappers2::EnqueueJob(scope.cx_mut(), job.handle()) };
-    ExnThrown::check(ok)
+    let resolved = crate::Promise::shared_resolved_undefined(scope)?;
+    resolved.add_reactions(scope, Some(**job), None)
 }
 
 /// Drain the job queue, executing all pending microtasks.

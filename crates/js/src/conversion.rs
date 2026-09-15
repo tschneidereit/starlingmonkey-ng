@@ -33,7 +33,7 @@ use mozjs::jsapi::AssertSameCompartment;
 use mozjs::jsapi::JS_DefineElement;
 use mozjs::jsapi::JS;
 use mozjs::jsapi::{ForOfIterator, ForOfIterator_NonIterableBehavior};
-use mozjs::jsapi::{JSContext, JSObject, JSString, PropertyDescriptor, RootedObject, RootedValue};
+use mozjs::jsapi::{JSObject, JSString, PropertyDescriptor, RootedObject, RootedValue};
 use mozjs::jsapi::{JS_NewStringCopyUTF8N, JSPROP_ENUMERATE};
 use mozjs::jsval::{
     BooleanValue, DoubleValue, Int32Value, JSVal, ObjectOrNullValue, StringValue, SymbolValue,
@@ -390,7 +390,7 @@ fn convert_int_from_jsval<T, M>(
     scope: &Scope<'_>,
     value: HandleValue,
     option: ConversionBehavior,
-    convert_fn: unsafe fn(*mut JSContext, HandleValue) -> Result<M, ()>,
+    convert_fn: unsafe fn(&mut mozjs::context::JSContext, HandleValue) -> Result<M, ()>,
 ) -> Result<T, ConversionError>
 where
     T: Number + As<f64> + PrimInt,
@@ -399,9 +399,9 @@ where
 {
     let result = match option {
         ConversionBehavior::Default => {
-            unsafe { convert_fn(scope.cx_mut().raw_cx(), value) }.map(|v| v.cast())
+            unsafe { convert_fn(scope.cx_mut(), value) }.map(|v| v.cast())
         }
-        _ => match unsafe { ToNumber(scope.cx_mut().raw_cx(), value) } {
+        _ => match unsafe { ToNumber(scope.cx_mut(), value) } {
             Ok(num) => {
                 if matches!(option, ConversionBehavior::EnforceRange) {
                     enforce_range(scope, num)
@@ -613,7 +613,7 @@ impl FromJSVal<'_, '_> for f32 {
         val: HandleValue,
         _option: (),
     ) -> Result<f32, ConversionError> {
-        match unsafe { ToNumber(scope.cx_mut().raw_cx(), val) } {
+        match unsafe { ToNumber(scope.cx_mut(), val) } {
             Ok(result) => Ok(result as f32),
             Err(_) => Err(ConversionError::ExnPending),
         }
@@ -638,7 +638,7 @@ impl FromJSVal<'_, '_> for f64 {
         val: HandleValue,
         _option: (),
     ) -> Result<f64, ConversionError> {
-        match unsafe { ToNumber(scope.cx_mut().raw_cx(), val) } {
+        match unsafe { ToNumber(scope.cx_mut(), val) } {
             Ok(result) => Ok(result),
             Err(_) => Err(ConversionError::ExnPending),
         }
@@ -726,7 +726,7 @@ impl<'s> ToJSVal<'s> for Finite<f64> {
 /// Converts a `JSString` into a `String`, regardless of used encoding.
 pub fn jsstr_to_string(scope: &Scope<'_>, jsstr: NonNull<JSString>) -> String {
     // SAFETY: the scope provides a valid context, and `jsstr` is non-null.
-    unsafe { mozjs::conversions::jsstr_to_string(scope.cx_mut().raw_cx(), jsstr) }
+    unsafe { mozjs::conversions::jsstr_to_string(scope.cx_mut(), jsstr) }
 }
 
 // https://heycam.github.io/webidl/#es-USVString
@@ -758,7 +758,7 @@ impl<'s> ToJSVal<'s> for String {
 impl FromJSVal<'_, '_> for String {
     type Config = ();
     fn from_jsval(scope: &Scope<'_>, val: HandleValue, _: ()) -> Result<String, ConversionError> {
-        let jsstr = unsafe { ToString(scope.cx_mut().raw_cx(), val) };
+        let jsstr = unsafe { ToString(scope.cx_mut(), val) };
         let Some(jsstr) = NonNull::new(jsstr) else {
             return Err(ConversionError::ExnPending);
         };
@@ -1148,7 +1148,7 @@ where
         // [[OwnPropertyKeys]] set, then manually filter out symbols and
         // non-enumerable properties (per spec step 4).
         unsafe {
-            let mut ids = mozjs::rust::IdVector::new(scope.cx_mut().raw_cx());
+            let mut ids = mozjs::rust::IdVector::new(scope.cx_mut());
 
             // Use JSITER_OWNONLY | JSITER_HIDDEN | JSITER_SYMBOLS to match
             // [[OwnPropertyKeys]] ordering.

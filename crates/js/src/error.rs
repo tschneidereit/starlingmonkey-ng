@@ -109,15 +109,14 @@ impl ExnThrown {
             let mut stack = None;
             if exc_val.is_object() {
                 let exc_obj = Object::from_value(scope, *exc_val).unwrap();
-                let report = mozjs::jsapi::JS_ErrorFromException(raw, exc_obj.handle().into());
 
                 // Try to extract the stack trace from the exception object.
                 let maybe_stack =
                     Object::from_raw(scope, wrappers2::ExceptionStackOrNull(exc_obj.handle()));
                 if let Some(stack_obj) = maybe_stack {
                     rooted!(in(raw) let mut stack_str: *mut JSString = ptr::null_mut());
-                    let ok = mozjs::rust::wrappers::BuildStackString(
-                        raw,
+                    let ok = wrappers2::BuildStackString(
+                        scope.cx_mut(),
                         ptr::null_mut(),
                         stack_obj.handle(),
                         stack_str.handle_mut(),
@@ -132,8 +131,9 @@ impl ExnThrown {
                     }
                 }
 
-                if !report.is_null() {
-                    let report = &*report;
+                if let Some(report) =
+                    crate::exception::error_from_exception(scope, exc_obj.handle())
+                {
                     let msg_ptr = report._base.message_.data_;
                     let message = if msg_ptr.is_null() {
                         None
