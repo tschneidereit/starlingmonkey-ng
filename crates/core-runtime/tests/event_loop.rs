@@ -14,9 +14,10 @@ use js::gc::scope::Scope;
 use js::native::JSTracer;
 
 use js::error::ExnThrown;
+use platform::clock::Instant;
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Helper: create a tokio current-thread runtime with timer support and
 /// block on `run_to_completion` using `tokio::time::sleep`.

@@ -52,10 +52,11 @@
 pub mod interest;
 pub mod timer;
 
+use platform::clock::Instant;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use event_listener::{Event, EventListener};
 use js::error::ExnThrown;
@@ -228,6 +229,9 @@ struct TaskEntry {
     ready: bool,
     /// For timer tasks: the `Instant` at which this task becomes ready.
     /// `None` for non-timer tasks.
+    ///
+    /// The reading comes from `platform::clock`, not `std::time`, so a deadline
+    /// taken before a Wizer snapshot is already past when the instance resumes.
     deadline: Option<Instant>,
 }
 

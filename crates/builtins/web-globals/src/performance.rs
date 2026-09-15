@@ -5,8 +5,6 @@
 //! Implements [Performance] API from the High Resolution Time specification
 //! The time origin is the moment the runtime was initialized with the Performance Global
 
-use std::time::Instant;
-
 use core_runtime::{webidl_interface, webidl_methods};
 use js::error::ExnThrown;
 use js::gc::scope::Scope;
@@ -16,41 +14,59 @@ use crate::events::event_target::{EventTarget, EventTargetImpl};
 
 #[derive(Clone, Copy)]
 struct TimeOriginSnapshot {
-    /// The monotonic clock instant when the time origin was captured.
-    instant: Instant,
-    /// ECMA-262 timestamp (ms since Unix epoch) at the time of the snapshot.
-    /// Used to compute `timeOrigin` that is stable against system clock changes.
+    /// The monotonic clock reading, in nanoseconds, when the time origin was captured.
+    monotonic_ns: u64,
+    /// ECMA-262 timestamp (ms since Unix epoch) for the same moment. Used to compute `timeOrigin`
+    /// that is stable against system clock changes.
     epoch_ms: f64,
 }
 
-/// Held behind a lock rather than in a `OnceLock` because it has to be *replaceable*: a time
-/// origin cannot survive a Wizer snapshot. Its monotonic instant belongs to the process that took
-/// the snapshot, while a resumed instance starts a fresh monotonic clock — so the origin sits in
-/// that instance's future, and `now()` saturates to zero for as long as it takes to catch up.
-/// [`reset_time_origin`] re-establishes it on resume.
+/// Held behind a lock rather than in a `OnceLock` because it has to be replaceable: an origin
+/// captured before a Wizer snapshot holds the wall-clock time of the machine that took the
+/// snapshot, which bears no relation to when the resumed instance runs. [`reset_time_origin`]
+/// re-establishes that half on resume. The monotonic half stays as captured, since
+/// [`platform::clock`](platform::clock) already puts a resumed instance's readings past it.
 static TIME_ORIGIN: std::sync::RwLock<Option<TimeOriginSnapshot>> = std::sync::RwLock::new(None);
 
-fn capture_time_origin() -> TimeOriginSnapshot {
-    let instant = Instant::now();
-    let epoch_ms = std::time::SystemTime::now()
+/// The current wall-clock time as an ECMA-262 timestamp (ms since Unix epoch).
+fn epoch_ms_now() -> f64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is before Unix epoch")
         .as_secs_f64()
-        * 1_000.;
-    TimeOriginSnapshot { instant, epoch_ms }
+        * 1_000.
+}
+
+fn capture_time_origin() -> TimeOriginSnapshot {
+    TimeOriginSnapshot {
+        monotonic_ns: platform::clock::monotonic_ns(),
+        epoch_ms: epoch_ms_now(),
+    }
+}
+
+/// Milliseconds elapsed since `origin` was captured.
+fn elapsed_ms(origin: &TimeOriginSnapshot) -> f64 {
+    platform::clock::monotonic_ns().saturating_sub(origin.monotonic_ns) as f64 / 1_000_000.
 }
 
 fn init_time_origin() {
     let _ = time_origin();
 }
 
-/// Re-establish the time origin at the current instant.
+/// Re-anchor the time origin's wall clock to the instance running now.
 ///
-/// For an embedder resuming a pre-initialized (Wizer) snapshot: the origin captured while the
-/// snapshot was taken is meaningless in the resumed instance, so it is re-taken once execution
-/// really begins. Idempotent, and a no-op for anyone who never snapshots.
+/// A pre-initialized (Wizer) snapshot includes an origin captured while the snapshot was taken, so
+/// `timeOrigin` would report the wall-clock time of whoever took it. The origin's monotonic half
+/// stays valid, since a resumed instance reads the clock through an offset past everything the
+/// snapshot holds. Only the wall clock is re-read, from the elapsed time that monotonic half
+/// gives, so `timeOrigin + performance.now()` is the current time and `now()` counts on across the
+/// snapshot rather than restarting from zero. A no-op for anyone who never snapshots.
 pub fn reset_time_origin() {
-    *TIME_ORIGIN.write().expect("time origin lock poisoned") = Some(capture_time_origin());
+    let mut origin = TIME_ORIGIN.write().expect("time origin lock poisoned");
+    match origin.as_mut() {
+        Some(snapshot) => snapshot.epoch_ms = epoch_ms_now() - elapsed_ms(snapshot),
+        None => *origin = Some(capture_time_origin()),
+    }
 }
 
 fn time_origin() -> TimeOriginSnapshot {
@@ -70,7 +86,7 @@ pub struct Performance {
 }
 
 pub fn now() -> f64 {
-    time_origin().instant.elapsed().as_secs_f64() * 1_000.
+    elapsed_ms(&time_origin())
 }
 
 #[webidl_methods]

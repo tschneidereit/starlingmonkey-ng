@@ -149,6 +149,24 @@ pub mod engine {
     pub use mozjs::rust::{JSEngine, JSEngineHandle, RealmOptions, Runtime as MozJSRuntime};
 }
 
+/// The monotonic clock the engine reads.
+///
+/// Only on wasm, where the clock is scoped to the instance and an instance resuming from a Wizer
+/// snapshot has to be given the reading the snapshot ended at.
+#[cfg(target_arch = "wasm32")]
+pub mod clock {
+    /// Add `nanoseconds` to every monotonic clock reading the engine takes afterwards.
+    ///
+    /// A resumed instance reads the clock from zero again, while the timestamps the engine kept
+    /// across the snapshot (GC phase times, the last collection's end) were taken before it and so
+    /// sit in the resumed instance's future. Pass the reading taken when the snapshot was made, so
+    /// that no reading afterwards precedes them. Calls accumulate.
+    pub fn advance_monotonic_clock(nanoseconds: u64) {
+        // SAFETY: the glue function adds to a process-wide counter and touches nothing else.
+        unsafe { mozjs::glue::AdvanceMonotonicClock(nanoseconds) }
+    }
+}
+
 /// Context and native callback types.
 ///
 /// Used by code that implements `JSNative` callbacks, GC trace hooks,

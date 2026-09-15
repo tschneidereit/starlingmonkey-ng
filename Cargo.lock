@@ -382,6 +382,7 @@ dependencies = [
  "futures-lite",
  "js",
  "oxc_resolver",
+ "platform",
  "shlex 2.0.1",
  "tempfile",
  "tokio",
@@ -3099,6 +3100,7 @@ dependencies = [
  "encoding_rs",
  "js",
  "libstarling",
+ "platform",
  "url",
 ]
 
