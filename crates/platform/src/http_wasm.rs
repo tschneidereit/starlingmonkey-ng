@@ -349,7 +349,7 @@ pub async fn send(request: Request) -> Result<Response, Error> {
         Fields::from_list(&header_entries).map_err(|e| Error(format!("invalid headers: {e:?}")))?;
 
     let (body, trailers_tx) = body_contents(request.body);
-    let (wasi_request, _result) = WasiRequest::new(fields, body.contents, body.trailers, None);
+    let (wasi_request, transmitted) = WasiRequest::new(fields, body.contents, body.trailers, None);
 
     wasi_request
         .set_method(&method_of_string(&request.method))
@@ -369,6 +369,13 @@ pub async fn send(request: Request) -> Result<Response, Error> {
     // writer here: the host reads its stream directly.
     // No timeout: the serve timeouts bound responses, not an outgoing request's body.
     drop(spawn_body_writer(body.writer, trailers_tx, None, None));
+
+    // wasmtime aborts the request's connection when this future is dropped, cutting off the
+    // response body at whatever the host has already buffered. Awaiting it keeps the connection
+    // open until the exchange is over, including for a response body handed on to the host.
+    wit_bindgen::spawn_local(async move {
+        let _ = transmitted.await;
+    });
 
     // Send the request via the outgoing HTTP client.
     let response = wasip3::http::client::send(wasi_request)
