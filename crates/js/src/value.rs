@@ -131,7 +131,9 @@ pub fn from_function(fun: HandleFunction) -> JSVal {
 
 /// Create a value from a raw function pointer.
 ///
-/// SAFETY: `fun` must be a valid, non-null, rooted `JSFunction` pointer.
+/// # Safety
+///
+/// `fun` must be a valid, non-null, rooted `JSFunction` pointer.
 #[inline]
 pub unsafe fn from_raw_function(fun: *mut JSFunction) -> JSVal {
     ObjectValue(mozjs::jsapi::JS_GetFunctionObject(fun))

@@ -513,7 +513,7 @@ impl Drop for Runtime {
         module::remove_module_gc_tracer(self.mozjs_rt().cx_no_gc(), self_ptr as *const Self);
         // Only if this is still the current runtime: a second one created on
         // this thread has already replaced the pointer with its own.
-        if CURRENT.get() == self as *const Self {
+        if std::ptr::eq(CURRENT.get(), self) {
             CURRENT.set(std::ptr::null());
         }
         js::gc::shutdown(self.mozjs_rt().cx_no_gc());

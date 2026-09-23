@@ -9,6 +9,9 @@ edition.workspace = true
 [features]
 debugmozjs = []
 
+[lints]
+workspace = true
+
 [dependencies]
 js.workspace = true
 # Feature-matched to the `js` crate: cargo unifies features across the graph, so leaving mozjs's
