@@ -19,7 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  WASI_SDK_VERSION: "33"
+  WASI_SDK_VERSION: "34"
   RUSTC_WRAPPER: sccache
   CCACHE: sccache
   # Bump to purge the sccache GHA cache.
@@ -27,7 +27,7 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Cargo tests: {native, wasm32-wasip2} × {debug+debugmozjs, release}
+  # Cargo tests: {native, wasm32-wasip2, wasm32-wasip3} × {debug+debugmozjs, release}
   # The wasm recipes also run the serve end-to-end suite (`just test-serve-wasm`).
   # ---------------------------------------------------------------------------
   test:
@@ -35,15 +35,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [native, wasm32-wasip2]
+        target: [native, wasm32-wasip2, wasm32-wasip3]
         profile: [debug, release]
         include:
           - { target: native, profile: debug, recipe: test }
           - { target: native, profile: release, recipe: test-release }
           - { target: wasm32-wasip2, profile: debug, recipe: test-wasm }
           - { target: wasm32-wasip2, profile: release, recipe: test-wasm-release }
+          - { target: wasm32-wasip3, profile: debug, recipe: test-wasm }
+          - { target: wasm32-wasip3, profile: release, recipe: test-wasm-release }
     runs-on: ubuntu-latest
     env:
+      # Only the wasm recipes read this.
+      WASM_TARGET: ${{ matrix.target }}
       WASMTIME_BACKTRACE_DETAILS: '1'
       RUST_BACKTRACE: 'full'
     steps:
@@ -57,20 +61,21 @@ jobs:
         run: just ${{ matrix.recipe }}
 
       - name: Run example tests
-        if: matrix.target == 'wasm32-wasip2'
+        if: matrix.target != 'native'
         run: just ${{ matrix.recipe }} --examples
 
   # ---------------------------------------------------------------------------
-  # WPT suite: {native, wasm32-wasip2}
+  # WPT suite: {native, wasm32-wasip2, wasm32-wasip3}
   # ---------------------------------------------------------------------------
   wpt:
     name: WPT (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
-        target: [native, wasm32-wasip2]
+        target: [native, wasm32-wasip2, wasm32-wasip3]
     runs-on: ubuntu-latest
     env:
+      WASM_TARGET: ${{ matrix.target }}
       WASMTIME_BACKTRACE_DETAILS: '1'
       RUST_BACKTRACE: 'full'
     steps:
@@ -93,7 +98,7 @@ jobs:
       # The recipes build the runtime before running the harness.
       - name: Run WPT tests
         run: |
-          if [[ "${{ matrix.target }}" == "wasm32-wasip2" ]]; then
+          if [[ "${{ matrix.target }}" != "native" ]]; then
             just wpt-test-wasm -v
           else
             just wpt-test -v
