@@ -10,7 +10,7 @@
 #   2. Runs `cargo check` with RUSTC_WRAPPER=crown and --features "js/crown"
 #
 # The `crown` Cargo feature propagates through the workspace:
-#   starling → libstarling → core-runtime + simple-http → mozjs → mozjs_sys
+#   starling → libstarling → core-runtime → js → mozjs → mozjs_sys
 # enabling the `#[must_root]` / `#[allow_unrooted_interior]` annotations
 # on GC-related types.
 #
