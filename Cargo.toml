@@ -35,28 +35,17 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 js = { path = "crates/js" }
 libstarling = { path = "crates/libstarling" }
-oxc_allocator = "0.142.0"
-oxc_ast = "0.142.0"
-oxc_parser = "0.142.0"
 oxc_resolver = "11"
-oxc_span = "0.142.0"
 platform = { path = "crates/platform" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 serve-test-support = { path = "crates/serve-test-support" }
 starling-macro = { path = "crates/starling-macro" }
 tokio = { version = "1", features = ["rt", "time", "net", "io-util"] }
 url = "2.5.8"
-uuid = { version = "1.23", features = ["v4"] }
 wasip3 = { version = "0.9.0", features = ["http-compat"] }
 # Must equal the `wit-bindgen` version `wasip3` depends on. See `starling/Cargo.toml`.
 wit-bindgen = { version = "=0.62.0", features = ["macros"] }
 wpt-support = { path = "crates/wpt-support" }
-
-# bindgen = { version = "0.72", default-features = false, features = [
-#     "runtime",
-#     "prettyplease",
-#     "experimental",
-# ] }
 
 # Builtins
 fetch-event = { path = "crates/builtins/fetch-event" }
@@ -79,9 +68,6 @@ lto = false
 # published. Any other level falls back to building SpiderMonkey from source.
 [profile.dev.package.mozjs_sys]
 opt-level = 3
-
-# [profile.dev.build-override]
-# opt-level = 3
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(crown)'] }
