@@ -35,9 +35,9 @@ build-release *TARGET:
 test *TARGET:
     cargo test --features debugmozjs --workspace {{TARGET}}
 
-# Run all Rust tests in release mode.
+# Run all Rust tests in the `test-release` profile: release optimizations without LTO.
 test-release *TARGET:
-    cargo test --release --workspace {{TARGET}}
+    cargo test --profile test-release --workspace {{TARGET}}
 
 # Run the starling shell with the given args.
 run *ARGS:
@@ -143,10 +143,10 @@ test-wasm *TARGET:
     {{_wasm_cargo}} test --target {{WASM_TARGET}} --features debugmozjs --workspace {{TARGET}}
     @{{ if TARGET == "" { "just test-serve-wasm" } else { "echo 'Skipped the wasm serve end-to-end suite; run it with: just test-serve-wasm'" } }}
 
-# Run all Rust tests in release mode. A run with no arguments also runs the wasm serve
-# end-to-end suite.
+# Run all Rust tests in the `test-release` profile: release optimizations without LTO. A run with
+# no arguments also runs the wasm serve end-to-end suite against the full release build.
 test-wasm-release *TARGET:
-    {{_wasm_cargo}} test --target {{WASM_TARGET}} --release --workspace {{TARGET}}
+    {{_wasm_cargo}} test --target {{WASM_TARGET}} --profile test-release --workspace {{TARGET}}
     @{{ if TARGET == "" { "just test-serve-wasm-release" } else { "echo 'Skipped the wasm serve end-to-end suite; run it with: just test-serve-wasm-release'" } }}
 
 # Snapshot the component with `wasmtime wizer` and serve the result. Needs wasmtime on PATH.
