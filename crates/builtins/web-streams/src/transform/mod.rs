@@ -2,14 +2,11 @@
 
 //! <https://streams.spec.whatwg.org/#rs-model>
 
-pub(crate) mod algorithms;
+mod algorithms;
 
-pub mod readable_writable_pair;
-pub mod transform_stream;
-pub mod transform_stream_default_controller;
-pub mod transformer;
+pub(crate) mod readable_writable_pair;
+pub(crate) mod transform_stream;
+pub(crate) mod transform_stream_default_controller;
+mod transformer;
 
-pub use readable_writable_pair::ReadableWritablePair;
-pub use transform_stream::TransformStream;
-pub use transform_stream_default_controller::TransformStreamDefaultController as ReadableStreamDefaultController;
-pub use transformer::Transformer;
+pub use transform_stream::{TransformStream, TransformStreamImpl};
