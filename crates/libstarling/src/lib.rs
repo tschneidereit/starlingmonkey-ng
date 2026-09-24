@@ -34,6 +34,7 @@ pub fn register_builtins() {
     runtime::register_global_initializer(web_url::add_to_global);
     runtime::register_global_initializer(web_fetch::add_to_global);
     runtime::register_global_initializer(fetch_event::add_to_global);
+    runtime::register_global_initializer(web_file::add_to_global);
     runtime::register_global_initializer(|scope, global| unsafe {
         cpp_builtins::install(scope.cx_mut().raw_cx(), global.handle());
     });

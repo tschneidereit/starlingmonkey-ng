@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
-mod text_decoder;
-mod text_encoder;
+pub mod text_decoder;
+pub mod text_encoder;
 
 use js::gc::scope::Scope;
 use js::Object;
