@@ -58,8 +58,11 @@ cpp-builtins = { path = "crates/builtins/cpp-builtins" }
 
 [profile.release]
 lto = "thin"
-panic = 'abort'
 strip = "symbols"
+
+[profile.test-release]
+inherits = "release"
+lto = false
 
 [profile.dev]
 lto = false
