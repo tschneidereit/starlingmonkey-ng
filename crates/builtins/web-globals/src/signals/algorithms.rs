@@ -212,10 +212,7 @@ fn run_the_abort_steps(
                 // callback is reported and must not keep the remaining
                 // algorithms, the `abort` event (step 3), or dependent
                 // signals' abort steps (signal abort step 6) from running.
-                let callback_val = scope.root_value(callback.as_value());
-                if js::Function::call(scope, HandleValue::undefined(), callback_val, &[reason])
-                    .is_err()
-                {
+                if Function::call(scope, HandleValue::undefined(), callback, &[reason]).is_err() {
                     js::exception::report_and_clear(scope, "abort algorithm");
                 }
                 script_stack_state.clean_up_after_running_script(scope);

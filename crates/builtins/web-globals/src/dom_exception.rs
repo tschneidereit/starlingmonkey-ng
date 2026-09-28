@@ -6,12 +6,13 @@
 //! including the constructor, prototype accessors, legacy error code constants,
 //! and the `Symbol.toStringTag` property.
 //!
-//! Uses `#[webidl_interface]` and `#[jsmethods]` proc macros for declarative
+//! Uses `#[webidl_interface]` and `#[webidl_methods]` proc macros for declarative
 //! class registration.
 //!
 //! [`DOMException`]: https://webidl.spec.whatwg.org/#idl-DOMException
 
 use core_runtime::{webidl_interface, webidl_methods};
+use js::class::Ref;
 use js::error::{ExnThrown, ThrowException};
 use js::gc::scope::Scope;
 use js::native::ExceptionStackBehavior;
@@ -130,14 +131,16 @@ impl DOMException {
 
     /// https://webidl.spec.whatwg.org/#dom-domexception-name
     #[getter]
-    fn name(&self) -> String {
-        self.data().name.clone()
+    fn name(&self) -> Ref<'_, str> {
+        // Return `this`'s `name`.
+        Ref::map(self.data(), |data| data.name.as_str())
     }
 
     /// https://webidl.spec.whatwg.org/#dom-domexception-message
     #[getter]
-    fn message(&self) -> String {
-        self.data().message.clone()
+    fn message(&self) -> Ref<'_, str> {
+        // Return `this`'s `message`.
+        Ref::map(self.data(), |data| data.message.as_str())
     }
 
     /// https://webidl.spec.whatwg.org/#dom-domexception-code
@@ -157,8 +160,6 @@ impl DOMException {
 /// Throw a DOMException with the given name and message.
 ///
 /// This creates a new DOMException object and sets it as the pending exception.
-/// Returns `false` to indicate an exception has been thrown (for use in
-/// JSNative return values).
 pub fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) -> ExnThrown {
     // Get the DOMException constructor from the global.
     let exception = match DOMException::new(scope, Some(message.into()), Some(name.into())) {
@@ -260,8 +261,8 @@ mod dom_exception_integration {
         let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
         let scope = rt.default_global();
         let e = super::DOMException::new(&scope, None, None).unwrap();
-        assert_eq!(e.name(), "Error");
-        assert_eq!(e.message(), "");
+        assert_eq!(&*e.name(), "Error");
+        assert_eq!(&*e.message(), "");
         assert_eq!(e.code(), 0);
     }
 

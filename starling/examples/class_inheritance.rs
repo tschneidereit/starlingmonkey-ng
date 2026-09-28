@@ -9,6 +9,7 @@
 //! - Constructor with parent initialization
 
 use js::compile::evaluate_with_filename;
+use js::conversion::FromJSVal;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use libstarling::config::RuntimeConfig;
@@ -277,8 +278,7 @@ r.join(", ")
 /// Helper: extract a Rust String from a JS string value.
 fn val_to_string(scope: &Scope<'_>, val: &HandleValue) -> String {
     assert!(val.is_string(), "Expected string value");
-    let s = js::JSString::from_value(scope, *val).expect("null string");
-    s.to_utf8(scope).expect("utf8 conversion failed")
+    String::from_jsval(scope, *val, ()).expect("ToString succeeds")
 }
 
 #[test]

@@ -6,6 +6,7 @@
 
 use bitflags::bitflags;
 use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods};
+use js::class::Ref;
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 
@@ -79,8 +80,8 @@ impl Event {
 
     /// <https://dom.spec.whatwg.org/#dom-event-type>
     #[getter(name = "type")]
-    pub fn get_type(&self) -> String {
-        self.data().event_type.clone()
+    pub fn get_type(&self) -> Ref<'_, str> {
+        Ref::map(self.data(), |data| data.event_type.as_str())
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-target>

@@ -106,11 +106,8 @@ impl<'s, T: JSType> Stack<'s, T> {
     }
 
     /// Get the JS value representation.
-    ///
-    /// # Safety
-    ///
-    /// The handle is rooted, so the object is guaranteed to be alive.
     pub fn as_value(self) -> crate::native::Value {
+        // SAFETY: the handle is rooted, so the object is alive.
         unsafe { crate::value::from_object(self.handle.get()) }
     }
 
@@ -365,7 +362,7 @@ impl<T: JSType> Heap<T> {
     }
 
     pub fn eq_stack(&self, other: &Stack<'_, T>) -> bool {
-        unsafe { self.as_ptr() == other.as_raw() }
+        unsafe { self.as_ptr().eq(&other.as_raw()) }
     }
 }
 
@@ -529,10 +526,16 @@ impl From<crate::native::Value> for Heap<crate::native::Value> {
     }
 }
 
+/// Panics on a null (default-constructed) `Heap`, as [`Heap::get`] does.
 impl<T: JSType> ToJSVal<'_> for Heap<T> {
     #[inline]
     fn to_jsval_raw(&self, _scope: &Scope<'_>) -> Result<crate::value::Value, ConversionError> {
-        Ok(ObjectValue(self.heap.get()))
+        let obj = self.heap.get();
+        debug_assert!(
+            !obj.is_null(),
+            "converted a null (default-constructed) Heap"
+        );
+        Ok(ObjectValue(obj))
     }
 }
 
@@ -568,18 +571,19 @@ impl<T: JSType> RootedHeap<T> {
     /// Returns `T::Rooted<'s>`, the stack-rooted type for `Heap<T>`.
     pub fn get<'s>(&self, scope: &'s Scope<'_>) -> T::Rooted<'s> {
         let obj = self.boxed.get();
-        let handle = scope.root_object(NonNull::new(obj).expect("BoxedHeap::get can't fail"));
+        let handle = scope.root_object(NonNull::new(obj).expect("RootedHeap holds an object"));
         T::Rooted::from(Stack {
             handle,
             _marker: PhantomData,
         })
     }
 
-    /// Return a raw pointer to the references `JSObject`
+    /// The referenced `JSObject`'s current address, for identity comparison.
     ///
     /// # Safety
     ///
-    /// The returned pointer must either be used in  rooted immeda
+    /// The returned pointer is not rooted. It must not be dereferenced or held across anything
+    /// that can GC. Use [`get`](Self::get) for any other use.
     pub unsafe fn as_ptr(&self) -> *mut JSObject {
         self.boxed.get()
     }

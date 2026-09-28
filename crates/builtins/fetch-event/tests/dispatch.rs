@@ -61,7 +61,7 @@ fn install_globals(scope: &Scope) {
 fn response_marker(scope: &Scope, event: &FetchEvent) -> String {
     event
         .potential_response(scope)
-        .map(|response| response.status_text())
+        .map(|response| response.status_text().to_string())
         .unwrap_or_default()
 }
 

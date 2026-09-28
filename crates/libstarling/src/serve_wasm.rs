@@ -117,6 +117,8 @@ fn start_runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeT
     // single one, harmless for a long-running server). The raw context stays valid as long as the
     // runtime (held in this thread-local) lives.
     let scope = runtime.default_global();
+    // SAFETY: the context lives as long as `runtime`, which `install_runtime` keeps for the
+    // process lifetime. The drivers `raw_cx` is handed to root what they hold.
     let raw_cx = unsafe { scope.raw_cx_no_gc() };
     std::mem::forget(scope);
     let pair = (runtime, raw_cx, timeouts);
@@ -230,24 +232,16 @@ async fn ensure_started(raw_cx: *mut js::native::RawJSContext) {
         }
         let action = STARTUP.with(|cell| {
             let mut state = cell.borrow_mut();
-            match &*state {
-                Startup::Pending(..) => {
-                    let Startup::Pending(invocation, evaluation) =
-                        std::mem::replace(&mut *state, Startup::Driving)
-                    else {
-                        unreachable!("matched Pending above")
-                    };
+            match std::mem::replace(&mut *state, Startup::Done) {
+                Startup::Pending(invocation, evaluation) => {
+                    *state = Startup::Driving;
                     Action::Drive(invocation, evaluation)
                 }
-                Startup::Evaluated(..) => {
-                    let Startup::Evaluated(invocation) =
-                        std::mem::replace(&mut *state, Startup::Done)
-                    else {
-                        unreachable!("matched Evaluated above")
-                    };
-                    Action::Keep(invocation)
+                Startup::Evaluated(invocation) => Action::Keep(invocation),
+                Startup::Driving => {
+                    *state = Startup::Driving;
+                    Action::Wait
                 }
-                Startup::Driving => Action::Wait,
                 Startup::Done => Action::Ready,
             }
         });
@@ -535,6 +529,7 @@ where
     let sending = async {
         let mut body_done = std::pin::pin!(body_done);
         let ended = futures_lite::future::or(async { Some(body_done.as_mut().await) }, async {
+            // SAFETY: this function's caller keeps `raw_cx` valid for the call.
             unsafe {
                 core_runtime::event_loop::run_until(raw_cx, event_loop, &sleep, |_| false).await
             };

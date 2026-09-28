@@ -115,8 +115,11 @@ impl AbortSignal {
         // Step 1: Throw this's abort reason, if this is aborted.
         if !self.data().abort_reason.is_undefined() {
             let reason = self.data().abort_reason.get(scope);
-            js::exception::set_pending(scope, reason, ExceptionStackBehavior::DoNotCapture);
-            return Err(ExnThrown);
+            return Err(js::exception::set_pending(
+                scope,
+                reason,
+                ExceptionStackBehavior::DoNotCapture,
+            ));
         }
         Ok(())
     }

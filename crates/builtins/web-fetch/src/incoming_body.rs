@@ -5,7 +5,8 @@
 //! Used as the underlying source for a `body` [`ReadableStream`], or directly in
 //! [`consume_host_body`] for `text`/`json`/`arrayBuffer`/`bytes`.
 
-use crate::algorithms::{convert_owned_bytes_to_js_value, ConsumeType};
+use crate::algorithms::{convert_owned_bytes_to_js_value, Body, BodySource, ConsumeType};
+use crate::body_mixin::BodyStorage;
 use core_runtime::jsclass;
 use core_runtime::jsmethods;
 use js::conversion::FromJSVal;
@@ -168,43 +169,87 @@ enum CloseStream {
 
 /// A `Request` or `Response` carrying a body still unread on the host.
 ///
-/// Both keep the same quartet of fields — the body record, the unread host body,
-/// the `.body` stream it materializes into, and that stream's native source — so
-/// the operations over them ([`materialize_host_body`], [`clone_body_onto`],
-/// [`crate::outgoing_body::consume_outgoing_body`]) are written here once rather than
-/// once per interface. The
-/// accessors are deliberately fine-grained rather than one `&mut`-fields
-/// accessor, because a caller must not hold a borrow of the object's data across
-/// [`host_body_stream`]: allocating the stream can trigger a GC, whose trace of
-/// this object reads the same data.
+/// Both keep a [`BodyStorage`], so the operations over it ([`materialize_host_body`],
+/// [`clone_body_onto`], [`crate::outgoing_body::consume_outgoing_body`]) are written here once
+/// rather than once per interface. The provided methods each take the storage borrow only for
+/// their own duration, because a caller must not hold a borrow of the object's data across
+/// [`host_body_stream`]: allocating the stream can trigger a GC, whose trace of this object
+/// reads the same data.
 pub(crate) trait HostBackedBodyOwner {
+    /// Run `f` on this object's body storage. `f` must not allocate GC things.
+    fn with_body<R>(&self, f: impl FnOnce(&mut BodyStorage) -> R) -> R;
+
+    /// This object.
+    fn object(&self) -> js::Object<'_>;
+
+    /// Attribute the body's byte source to this object for the GC, replacing the previous
+    /// amount. Called wherever the byte source is set, taken, or dropped.
+    fn sync_body_accounting(&self) {
+        let object = self.object();
+        self.with_body(|body| body.sync_accounting(object));
+    }
+
     /// Take the host body, but only while it is still unread — once a `.body`
     /// stream exists it owns the body, and the caller has nothing to do.
-    fn take_unread_host_body(&self) -> Option<IncomingBody>;
+    fn take_unread_host_body(&self) -> Option<IncomingBody> {
+        self.with_body(|body| body.stream.is_none().then(|| body.host.take())?)
+    }
 
     /// Store the stream the host body materialized into, and its native source.
-    fn set_host_body_stream(&self, stream: ReadableStream<'_>, source: HostBodySource<'_>);
+    fn set_host_body_stream(&self, stream: ReadableStream<'_>, source: HostBodySource<'_>) {
+        self.with_body(|body| {
+            debug_assert!(body.stream.is_none());
+            body.stream = Some(Heap::from(stream));
+            body.source = Some(Heap::from(source));
+        });
+    }
 
     /// The body record, if this object has a body. A copy: a [`BodySource::Bytes`] it carries is
     /// refcounted, so holding the copy holds the buffer.
-    ///
-    /// [`BodySource::Bytes`]: crate::algorithms::BodySource::Bytes
-    fn body_record(&self) -> Option<crate::algorithms::Body>;
+    fn body_record(&self) -> Option<Body> {
+        self.with_body(|body| body.record.clone())
+    }
 
     /// Take the body's in-memory bytes, leaving it marked as read. The emptied source stays a byte
     /// source, so a `.body` asked for later still materializes the consumed stream it would have.
-    fn take_byte_source(&self) -> Option<bytes::Bytes>;
+    fn take_byte_source(&self) -> Option<bytes::Bytes> {
+        let taken = self.with_body(|body| {
+            let record = body.record.as_mut()?;
+            let BodySource::Bytes(bytes) = &mut record.source else {
+                return None;
+            };
+            record.source_disturbed = true;
+            Some(std::mem::take(bytes))
+        })?;
+        self.sync_body_accounting();
+        Some(taken)
+    }
 
     /// The `.body` stream, once materialized.
-    fn body_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>>;
+    fn body_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>> {
+        self.with_body(|body| body.stream.get(scope))
+    }
 
     /// Take the host body whether or not a stream exists (the outgoing path,
     /// which hands it straight to the transport).
-    fn take_host_body(&self) -> Option<IncomingBody>;
+    fn take_host_body(&self) -> Option<IncomingBody> {
+        self.with_body(|body| body.host.take())
+    }
 
     /// Replace the `.body` stream, and drop the byte and host sources it now
     /// supersedes — used after teeing, when the bytes live in the tee branches.
-    fn replace_body_stream_after_tee(&self, scope: &Scope<'_>, stream: ReadableStream<'_>);
+    fn replace_body_stream_after_tee(&self, stream: ReadableStream<'_>) {
+        self.with_body(|body| {
+            debug_assert!(body.stream.is_some());
+            body.stream = Some(Heap::from(stream));
+            if let Some(record) = body.record.as_mut() {
+                record.source = BodySource::Null;
+            }
+            body.host = None;
+            body.source = None;
+        });
+        self.sync_body_accounting();
+    }
 }
 
 /// `clone a body` for a host-backed owner: materialize the stream if the body is

@@ -217,13 +217,7 @@ pub fn fire_on_new_global_object(scope: &Scope<'_>, global: HandleObject) {
 /// This checks the object's direct class — not the prototype chain.
 /// Returns `false` for null objects or objects of different classes.
 ///
-/// Unlike `JS_InstanceOf`, this does **not** throw on failure: pass `null`
-/// for the `args` parameter to suppress the TypeError.
-///
-/// # Safety
-///
-/// `obj` must be a valid rooted object handle. `clasp` must point to a
-/// valid `JSClass` that will remain valid for the duration of the call.
+/// Unlike a throwing `JS_InstanceOf` call, this does not throw on failure.
 pub fn instance_of(scope: &Scope<'_>, obj: HandleObject, clasp: &JSClass) -> bool {
     // Safety: JS_InstanceOf with a null CallArgs pointer performs a
     // non-throwing check: it returns true if `obj` has `clasp` as its
@@ -246,10 +240,6 @@ pub fn instance_of(scope: &Scope<'_>, obj: HandleObject, clasp: &JSClass) -> boo
 // In practice, classes are defined via the [`#[jsclass]`] and [`#[jsmethods]`]
 // proc macros.
 // ============================================================================
-
-// The code below was originally in core-runtime/src/class.rs. All of its
-// imports reference `crate::*` (i.e. the `js` crate). No external
-// dependencies on core-runtime are needed.
 
 // ============================================================================
 // Marker types
@@ -2760,8 +2750,7 @@ pub fn define_to_string_tag(
     let tag_key = crate::symbol::get_well_known_key(scope, SymbolCode::toStringTag);
     let tag_str = crate::string::Str::from_str(scope, tag_value)
         .expect("failed to create toStringTag string");
-    // SAFETY: tag_str is a live JSString* from `from_str` above, valid in the current scope.
-    let str_val = unsafe { value::from_string_raw(tag_str.as_raw()) };
+    let str_val = tag_str.as_value();
 
     rooted!(in(unsafe { scope.raw_cx_no_gc() }) let desc = crate::native::PropertyDescriptor {
         _bitfield_align_1: [0; 0],
@@ -2782,10 +2771,9 @@ pub fn define_to_string_tag(
         value_: str_val,
     });
 
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let tag_id = tag_key);
     let proto_obj = Object::from_handle(proto).expect("prototype is null");
     proto_obj
-        .define_property_by_id(scope, tag_id.handle(), desc.handle())
+        .define_property_by_id(scope, scope.root_id(tag_key), desc.handle())
         .expect("failed to define Symbol.toStringTag");
 }
 

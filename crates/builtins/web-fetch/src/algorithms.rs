@@ -10,7 +10,7 @@ use crate::incoming_body::HostBackedBodyOwner;
 use crate::response::{is_null_body_status, Response, ResponseInit, ResponseRecord};
 use js::conversion::ToJSVal;
 use js::error::{throw_type_error, ExnThrown, RangeError};
-use js::gc::handle::{Heap, OptionHeapExt};
+use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::{ArrayBuffer, Promise, Uint8Array};
@@ -105,7 +105,7 @@ pub(crate) fn extract_body<'r>(
         //     `application/x-www-form-urlencoded` serializer` with _object_’s `list`. Set _type_
         //     to `application/x-www-form-urlencoded;charset=UTF-8`.
         BodyInitOrBytes::BodyInit(BodyInit::URLSearchParams(params)) => {
-            let serialized = params.to_string(scope)?;
+            let serialized = params.to_string();
             source = BodySource::Bytes(bytes::Bytes::from(serialized.into_bytes()));
             content_type = Some(Cow::Borrowed(
                 "application/x-www-form-urlencoded;charset=UTF-8",
@@ -539,7 +539,7 @@ pub(crate) fn clone_a_body<'r>(
     let (out1, out2) = stream.tee(scope, true)?;
 
     // Step 2: Set _body_’s `stream` to _out1_.
-    body_owner.replace_body_stream_after_tee(scope, out1);
+    body_owner.replace_body_stream_after_tee(out1);
 
     // Step 3: Return a `body` whose `stream` is _out2_ and other members are copied from _body_.
     // _out2_ is returned alongside the cloned record. The source bytes now live in the teed
@@ -1207,7 +1207,7 @@ pub(crate) fn initialize_a_response<'r>(
     // Step 5: If _init_["``headers``"] `exists`, then `fill` _response_’s `headers` with
     //     _init_["``headers``"].
     if let Some(init_headers) = init_headers {
-        let headers = response.data().headers.get(scope).unwrap();
+        let headers = response.data().headers.get(scope);
         fill_headers(scope, &headers, init_headers)?;
     }
     // Step 6: If _body_ is non-null, then:
@@ -1222,9 +1222,9 @@ pub(crate) fn initialize_a_response<'r>(
             ));
         }
         // Step 6.2: Set _response_’s `body` to _body_’s `body`.
-        response.data_mut().body = Some(body_record);
+        response.data_mut().body.record = Some(body_record);
         if let Some(stream) = stream {
-            response.data_mut().body_stream = Some(Heap::from(stream));
+            response.data_mut().body.stream = Some(Heap::from(stream));
         }
         // Step 6.3: If _body_’s `type` is non-null and _response_’s `header list` `does not
         //     contain` ``Content-Type``, then `append` (``Content-Type``, _body_’s `type`) to

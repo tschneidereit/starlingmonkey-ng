@@ -245,6 +245,7 @@ impl Runtime {
     /// be read, throws, or leaves asynchronous work behind.
     pub fn init(config: &RuntimeConfig) -> Result<Rc<Self>, String> {
         crate::config::set_enforce_fetch_restrictions(config.enforce_fetch_restrictions());
+        // SAFETY: no parent runtime is given, which is the only condition.
         let mut mozjs_rt =
             unsafe { MozJSRuntime::create_with_internal_job_queues(engine_handle(), None) };
         js::gc::init(mozjs_rt.cx());
@@ -506,7 +507,8 @@ impl Drop for Runtime {
 /// - `data` must point to a live `Runtime` instance.
 #[js::allow_unrooted]
 unsafe extern "C" fn trace_runtime_cb(trc: *mut JSTracer, data: *mut c_void) {
-    let rt = &*(data as *const Runtime);
+    // SAFETY: the caller guarantees `data` points to a live `Runtime`.
+    let rt = unsafe { &*(data as *const Runtime) };
     rt.default_global.trace(trc);
     // Trace all event loops across registered invocations.
     //
@@ -515,6 +517,7 @@ unsafe extern "C" fn trace_runtime_cb(trc: *mut JSTracer, data: *mut c_void) {
     // on the caller's stack aren't being actively used — no aliasing hazard.
     // A normal `borrow()` would panic when the invocation registry is
     // already borrowed mutably.
+    // SAFETY: as described above, nothing uses a borrow of the registry while the GC traces.
     let invocations = unsafe { &*rt.invocations.as_ptr() };
     invocations.trace(trc);
 }

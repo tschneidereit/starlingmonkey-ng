@@ -41,9 +41,8 @@ pub trait JSType: Sized + 'static {
 
     /// The `JSClass` pointer that identifies objects of this type.
     ///
-    /// Used by [`Stack::is`](Stack::is) and
-    /// [`Stack::from_object`](Stack::from_object) for type-checked
-    /// conversions.
+    /// Used by [`Stack::is`](Stack::is) and [`Stack::cast`](Stack::cast) for
+    /// type-checked conversions.
     fn js_class() -> *const crate::class_spec::JSClass;
 
     /// Test whether `obj` is an instance of this type.

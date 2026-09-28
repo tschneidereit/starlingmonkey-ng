@@ -165,8 +165,8 @@ impl<'cx> Scope<'cx> {
     ///
     /// # Safety
     ///
-    /// The returned pointer must only be used for operations that cannot
-    /// trigger GC.
+    /// The pointer is valid while the context lives. As with [`Scope::cx_mut`], a use that can
+    /// trigger a GC must keep every GC value the caller holds rooted.
     pub unsafe fn raw_cx_no_gc(&self) -> *mut RawJSContext {
         *self.raw_cx.get()
     }
@@ -465,8 +465,8 @@ impl<'cx, S> RootScope<'cx, S> {
     ///
     /// # Safety
     ///
-    /// The returned pointer must only be used for operations that cannot
-    /// trigger GC.
+    /// The pointer is valid while the context lives. As with [`Scope::cx_mut`], a use that can
+    /// trigger a GC must keep every GC value the caller holds rooted.
     pub unsafe fn raw_cx_no_gc(&self) -> *mut RawJSContext {
         *self.raw_cx.get()
     }

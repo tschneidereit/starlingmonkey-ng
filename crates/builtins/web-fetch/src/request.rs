@@ -8,10 +8,12 @@ use super::{
     headers::{Guard, HeaderList, Headers, HeadersImpl, HeadersInit},
 };
 use crate::body_mixin::BodyInit;
-use crate::incoming_body::{HostBackedBodyOwner, HostBodySource};
+use crate::body_mixin::BodyStorage;
+use crate::incoming_body::HostBackedBodyOwner;
 use core_runtime::config;
 use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods, webidl_union};
 use js::class::create_instance_with;
+use js::class::Ref;
 use js::error::{throw_type_error, ExnThrown};
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
@@ -20,7 +22,7 @@ use js::{Object, Promise};
 use url::Url;
 use web_globals::signals::algorithms::create_dependent_abort_signal;
 use web_globals::signals::{AbortSignal, AbortSignalImpl};
-use web_streams::readable::readable_stream::{ReadableStream, ReadableStreamImpl};
+use web_streams::readable::readable_stream::ReadableStream;
 
 js::webidl_enum! {
     pub enum RequestDestination {
@@ -220,29 +222,13 @@ pub struct Request {
     /// Note: The header list lives in `headers` and the body in `body`/`body_stream`.
     #[no_trace]
     request: RequestRecord,
-    /// <https://fetch.spec.whatwg.org/#concept-request-body>
-    #[no_trace]
-    body: Option<Body>,
-    /// The body's `ReadableStream`: a user-provided stream, or one materialized lazily from the
-    /// body's byte source or host body on `.body` access.
-    body_stream: Option<Heap<ReadableStreamImpl>>,
-    /// The incoming request's body, set only for a request built by [`Request::from_incoming`]).
-    /// Consumed by the first of `consume`/`.body`.
-    #[no_trace]
-    host_body: Option<platform::http::IncomingBody>,
-    /// The `body`'s byte source, attributed to this object for the GC. Kept in sync by
-    /// `sync_body_accounting`.
-    #[no_trace]
-    accounted: js::gc::AssociatedMemory,
-    /// The `.body` stream's native host source. Set when `.body` materializes a host-backed
-    /// stream.
-    body_source: Option<Heap<crate::incoming_body::HostBodySourceImpl>>,
+    /// <https://fetch.spec.whatwg.org/#concept-request-body>, with its stream and host body.
+    /// The host body is set only for a request built by [`Request::from_incoming`].
+    body: BodyStorage,
     /// <https://fetch.spec.whatwg.org/#request-headers>
-    /// initially null.
-    headers: Option<Heap<HeadersImpl>>,
+    headers: Heap<HeadersImpl>,
     /// <https://fetch.spec.whatwg.org/#request-signal>
-    /// initially null.
-    signal: Option<Heap<AbortSignalImpl>>,
+    signal: Heap<AbortSignalImpl>,
 }
 
 /// <https://fetch.spec.whatwg.org/#requestinfo>
@@ -259,7 +245,7 @@ impl Request {
     #[destructor]
     fn release_body_accounting(&mut self, object: *mut js::native::JSObject) {
         // SAFETY: `object` is the object being finalized, whose private data this is.
-        unsafe { self.accounted.release(object) };
+        unsafe { self.body.accounted.release(object) };
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-request>
@@ -314,14 +300,15 @@ impl Request {
                 // Step 6.2: Set _request_ to _input_’s `request`.
                 request = input_req.data().request.clone();
                 // Step 6.3: Set _signal_ to _input_’s `signal`.
-                signal = input_req.data().signal.get(scope);
+                signal = Some(input_req.data().signal.get(scope));
                 init_header_list = input_req
                     .data()
                     .headers
                     .get(scope)
-                    .map(|headers| headers.data().header_list.clone())
-                    .unwrap_or_default();
-                input_body = input_req.data().body.clone();
+                    .data()
+                    .header_list
+                    .clone();
+                input_body = input_req.data().body.record.clone();
                 input_request = Some(input_req);
                 fallback_mode = None;
             }
@@ -339,7 +326,7 @@ impl Request {
         // the request-restrictions switch.)
         if config::enforce_fetch_restrictions() {
             if let Some(window) = init.as_ref().and_then(|i| i.window.as_ref()) {
-                if !window.get().is_null() && !window.get().is_undefined() {
+                if !window.is_null_or_undefined() {
                     return Err(throw_type_error(scope, c"Request window must be null"));
                 }
             }
@@ -520,7 +507,7 @@ impl Request {
             Some(signal) => create_dependent_abort_signal(scope, std::slice::from_ref(signal))?,
             None => create_dependent_abort_signal(scope, &[])?,
         };
-        self.data_mut().signal = Some(Heap::from(dependent));
+        self.data_mut().signal.set(dependent);
         // Step 31: Set `this`’s `headers` to a `new` `Headers` object with `this`’s `relevant
         //     realm`, whose `header list` is _request_’s `header list` and `guard` is "`request`".
         let headers = Headers::from_list(scope, init_header_list, Guard::Request)?;
@@ -565,7 +552,7 @@ impl Request {
                 }
             }
         }
-        self.data_mut().headers = Some(Heap::from(headers));
+        self.data_mut().headers.set(headers);
         // Step 34: Let _inputBody_ be _input_’s `request`’s `body` if _input_ is a `Request`
         //     object; otherwise null.
         // (Captured as `input_body` in step 6.)
@@ -604,7 +591,7 @@ impl Request {
             //     contain` `Content-Type`, then `append` (`Content-Type`, _type_) to `this`’s
             //     `headers`.
             if let Some(content_type) = content_type {
-                let headers = self.data().headers.get(scope).unwrap();
+                let headers = self.data().headers.get(scope);
                 if !algorithms::contains(&headers.data().header_list, "Content-Type") {
                     // The simple `push` here is equivalent to `append`ing, since the checks
                     // that operation does are guaranteed to succeed if we got here.
@@ -661,7 +648,7 @@ impl Request {
             }
             let input_stream = input_request
                 .as_ref()
-                .and_then(|req| req.data().body_stream.get(scope));
+                .and_then(|req| req.data().body.stream.get(scope));
             // Step 41.1: If _inputBody_ is `unusable`, then `throw` a `TypeError`.
             let unusable = input_body
                 .as_ref()
@@ -685,10 +672,10 @@ impl Request {
             (None, None)
         };
         // Step 42: Set `this`’s `request`’s `body` to _finalBody_.
-        self.data_mut().body = final_body;
+        self.data_mut().body.record = final_body;
         self.sync_body_accounting();
         if let Some(stream) = final_stream {
-            self.data_mut().body_stream.set(stream);
+            self.data_mut().body.stream.set(stream);
         }
         // When the input is a Request with a body, constructing a new Request from it consumes
         // (disturbs) the input's body.
@@ -698,7 +685,7 @@ impl Request {
             // bytes, so the input's own handle on them holds the buffer for a body it can no
             // longer read.
             let _ = input_request.take_byte_source();
-            if let Some(body) = input_request.data_mut().body.as_mut() {
+            if let Some(body) = input_request.data_mut().body.record.as_mut() {
                 body.source_disturbed = true;
             }
         }
@@ -737,38 +724,34 @@ impl Request {
         let headers = Headers::from_list(scope, headers, Guard::Immutable)?;
         Ok(Self {
             request: record,
-            body: body_record,
-            body_stream: None,
-            host_body: body,
-            accounted: Default::default(),
-            body_source: None,
-            headers: Some(Heap::from(headers)),
-            signal: Some(Heap::from(signal)),
+            body: BodyStorage {
+                host: body,
+                ..BodyStorage::new(body_record, None)
+            },
+            headers: Heap::from(headers),
+            signal: Heap::from(signal),
         })
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-request-method>
     #[getter]
-    fn method(&self) -> String {
+    fn method(&self) -> Ref<'_, str> {
         // Step 1: Return `this`’s `request`’s `method`.
-        self.data().request.method.clone()
+        Ref::map(self.data(), |data| data.request.method.as_str())
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-request-url>
     #[getter]
-    fn url(&self) -> String {
+    fn url(&self) -> Ref<'_, str> {
         // Step 1: Return `this`’s `request`’s `URL`, `serialized`.
-        self.data().request.current_url().to_string()
+        Ref::map(self.data(), |data| data.request.current_url().as_str())
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-request-headers>
     #[getter]
     fn headers<'r>(&self, scope: &'r Scope<'_>) -> Headers<'r> {
         // Step 1: Return `this`’s `headers`.
-        self.data()
-            .headers
-            .get(scope)
-            .expect("headers are set during construction")
+        self.data().headers.get(scope)
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-request-destination>
@@ -863,10 +846,7 @@ impl Request {
     pub fn signal<'r>(&self, scope: &'r Scope<'_>) -> AbortSignal<'r> {
         // WebIDL: AbortSignal
         // Step 1: Return `this`’s `signal`.
-        self.data()
-            .signal
-            .get(scope)
-            .expect("signal is set during construction")
+        self.data().signal.get(scope)
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-request-duplex>
@@ -908,7 +888,7 @@ impl Request {
         let cloned_record = self.data().request.clone();
         let (cloned_body, cloned_stream) = crate::incoming_body::clone_body_onto(scope, self)?;
         // Step 3: `Assert`: `this`’s `signal` is non-null.
-        let this_signal = self.data().signal.get(scope).expect("signal is non-null");
+        let this_signal = self.data().signal.get(scope);
         // Step 4: Let _clonedSignal_ be the result of `creating a dependent abort signal` from «
         //     `this`’s `signal` », using `AbortSignal` and `this`’s `relevant realm`.
         let cloned_signal =
@@ -920,7 +900,7 @@ impl Request {
         //     `Headers` object with _realm_, whose `headers list` is _request_’s `headers list`
         //     and `guard` is _guard_.
         let (header_list, guard) = {
-            let headers = self.data().headers.get(scope).expect("headers set");
+            let headers = self.data().headers.get(scope);
             let header_list = headers.data().header_list.clone();
             let guard = headers.data().guard;
             (header_list, guard)
@@ -931,15 +911,11 @@ impl Request {
         //     _requestObject_’s `signal` to _signal_.
         let cloned_object = create_instance_with::<RequestImpl>(scope, |_| RequestImpl {
             request: cloned_record,
-            body: cloned_body,
-            body_stream: cloned_stream.map(Heap::from),
             // A cloned request reads through its teed stream; the host body stays with the
             // source (whose stream is the other tee branch).
-            host_body: None,
-            accounted: Default::default(),
-            body_source: None,
-            headers: Some(Heap::from(cloned_headers)),
-            signal: Some(Heap::from(cloned_signal)),
+            body: BodyStorage::new(cloned_body, cloned_stream),
+            headers: Heap::from(cloned_headers),
+            signal: Heap::from(cloned_signal),
         })?;
         cloned_object.sync_body_accounting();
         // [inlined create a Request object] Step 5: Return _requestObject_.
@@ -1003,26 +979,20 @@ impl Request<'_> {
         let mut has_accept = false;
         let mut has_content_length = false;
 
-        let mut headers: Vec<(String, String)> = self
+        let request_headers = self.data().headers.get(scope);
+        let mut headers: Vec<(String, String)> = request_headers
             .data()
-            .headers
-            .get(scope)
-            .map(|headers| {
-                headers
-                    .data()
-                    .header_list
-                    .iter()
-                    .map(|(name, value)| {
-                        if name.eq_ignore_ascii_case("accept") {
-                            has_accept = true;
-                        } else if name.eq_ignore_ascii_case("content-length") {
-                            has_content_length = true;
-                        }
-                        (name.clone(), value.clone())
-                    })
-                    .collect()
+            .header_list
+            .iter()
+            .map(|(name, value)| {
+                if name.eq_ignore_ascii_case("accept") {
+                    has_accept = true;
+                } else if name.eq_ignore_ascii_case("content-length") {
+                    has_content_length = true;
+                }
+                (name.clone(), value.clone())
             })
-            .unwrap_or_default();
+            .collect();
         // [inlined fetch](https://fetch.spec.whatwg.org/#concept-fetch) Step 12: If _request_'s
         //     `header list` `does not contain` `Accept`, then:
         // [inlined fetch] Step 12.1: Let _value_ be `*/*`.
@@ -1037,7 +1007,7 @@ impl Request<'_> {
         // gets none, so it is sent chunked.
         //
         // Read before the body is taken, which empties a byte source of its bytes.
-        let content_length = match self.data().body.as_ref() {
+        let content_length = match self.data().body.record.as_ref() {
             None => (method == "POST" || method == "PUT").then_some(0),
             Some(body) => match &body.source {
                 BodySource::Bytes(bytes) => Some(bytes.len() as u64),
@@ -1083,89 +1053,15 @@ impl BodyMixin for Request<'_> {
     const UNUSABLE_MESSAGE: &'static std::ffi::CStr = c"Request body is unusable";
     const TEXT_STREAM_UNSUPPORTED: &'static std::ffi::CStr =
         c"Request.textStream() is not yet supported";
-
-    fn set_body_stream(&self, stream: ReadableStream<'_>) {
-        debug_assert!(self.data().body_stream.is_none());
-        self.data_mut().body_stream = Some(Heap::from(stream));
-    }
-
-    fn set_source_disturbed(&self) {
-        if let Some(body) = self.data_mut().body.as_mut() {
-            body.source_disturbed = true;
-        }
-    }
 }
 
 impl HostBackedBodyOwner for Request<'_> {
-    fn take_unread_host_body(&self) -> Option<platform::http::IncomingBody> {
-        let mut data = self.data_mut();
-        data.body_stream.is_none().then(|| data.host_body.take())?
+    fn with_body<R>(&self, f: impl FnOnce(&mut BodyStorage) -> R) -> R {
+        f(&mut self.data_mut().body)
     }
 
-    fn set_host_body_stream(&self, stream: ReadableStream<'_>, source: HostBodySource<'_>) {
-        debug_assert!(self.data().body_stream.is_none());
-        let mut data = self.data_mut();
-        data.body_stream = Some(Heap::from(stream));
-        data.body_source = Some(Heap::from(source));
-    }
-
-    fn body_record(&self) -> Option<Body> {
-        self.data().body.clone()
-    }
-
-    fn take_byte_source(&self) -> Option<bytes::Bytes> {
-        let taken = {
-            let mut data = self.data_mut();
-            let body = data.body.as_mut()?;
-            let BodySource::Bytes(bytes) = &mut body.source else {
-                return None;
-            };
-            let bytes = std::mem::take(bytes);
-            body.source_disturbed = true;
-            bytes
-        };
-        self.sync_body_accounting();
-        Some(taken)
-    }
-
-    fn body_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>> {
-        self.data().body_stream.get(scope)
-    }
-
-    fn take_host_body(&self) -> Option<platform::http::IncomingBody> {
-        self.data_mut().host_body.take()
-    }
-
-    fn replace_body_stream_after_tee(&self, _scope: &Scope<'_>, stream: ReadableStream<'_>) {
-        debug_assert!(self.data().body_stream.is_some());
-        {
-            let mut data = self.data_mut();
-            data.body_stream = Some(Heap::from(stream));
-            // The source's bytes now live in the teed stream, so read via that branch, not the
-            // byte/host fast paths: drop the byte source and the now-stale host source.
-            if let Some(body) = data.body.as_mut() {
-                body.source = BodySource::Null;
-            }
-            data.host_body = None;
-            data.body_source = None;
-        }
-        self.sync_body_accounting();
-    }
-}
-
-impl Request<'_> {
-    /// Attribute the `body`'s byte source to this object for the GC, replacing the previous
-    /// amount. Called wherever the byte source is set, taken, or dropped.
-    pub(crate) fn sync_body_accounting(&self) {
-        let mut data = self.data_mut();
-        let bytes = match &data.body {
-            Some(Body {
-                source: BodySource::Bytes(bytes),
-                ..
-            }) => bytes.len(),
-            _ => 0,
-        };
-        data.accounted.set(self.as_object(), bytes);
+    fn object(&self) -> js::Object<'_> {
+        self.as_object()
     }
 }
 

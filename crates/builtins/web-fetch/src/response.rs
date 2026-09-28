@@ -3,18 +3,19 @@
 //! <https://fetch.spec.whatwg.org/>
 
 use super::algorithms::{self, Body, BodySource};
-use super::body_mixin::{BodyInit, BodyMixin};
+use super::body_mixin::{BodyInit, BodyMixin, BodyStorage};
 use super::headers::{Guard, HeaderList, Headers, HeadersImpl, HeadersInit};
+use super::incoming_body::HostBackedBodyOwner;
 use super::request::RequestRedirect;
 use core_runtime::webidl_methods;
 use core_runtime::{webidl_dictionary, webidl_interface};
+use js::class::Ref;
 use js::error::{throw_type_error, ExnThrown, RangeError};
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::Promise;
 use url::Url;
-use web_streams::readable::readable_stream::ReadableStreamImpl;
 use web_streams::readable::ReadableStream;
 
 js::webidl_enum! {
@@ -102,23 +103,11 @@ pub struct Response {
     /// <https://fetch.spec.whatwg.org/#concept-response-response>
     #[no_trace]
     pub(crate) response: ResponseRecord,
-    /// <https://fetch.spec.whatwg.org/#concept-response-body>
-    #[no_trace]
-    pub(crate) body: Option<Body>,
-    /// The body's `ReadableStream`, stored separately for easier GC-rooting.
-    pub(crate) body_stream: Option<Heap<ReadableStreamImpl>>,
-    /// The network response body for incoming responses.
-    #[no_trace]
-    pub(crate) host_body: Option<platform::http::IncomingBody>,
-    /// The `body`'s byte source, attributed to this object for the GC. Kept in sync by
-    /// `sync_body_accounting`.
-    #[no_trace]
-    pub(crate) accounted: js::gc::AssociatedMemory,
-    /// The `.body` stream's native byte source, kept so an abort can cancel an in-flight host
-    /// read. Set when `.body` materializes a host-backed stream.
-    pub(crate) body_source: Option<Heap<crate::incoming_body::HostBodySourceImpl>>,
+    /// <https://fetch.spec.whatwg.org/#concept-response-body>, with its stream and host body.
+    /// The host body is set only for an incoming response.
+    pub(crate) body: BodyStorage,
     /// <https://fetch.spec.whatwg.org/#response-headers>
-    pub(crate) headers: Option<Heap<HeadersImpl>>,
+    pub(crate) headers: Heap<HeadersImpl>,
     /// The `fetch` abort algorithm's state, for a response delivered by `fetch` whose body was
     /// still abortable when the fetch settled. Set so consuming the body can detach the
     /// algorithm from the `AbortSignal`, which would otherwise keep it, and this response,
@@ -133,7 +122,7 @@ impl Response {
     #[destructor]
     fn release_body_accounting(&mut self, object: *mut js::native::JSObject) {
         // SAFETY: `object` is the object being finalized, whose private data this is.
-        unsafe { self.accounted.release(object) };
+        unsafe { self.body.accounted.release(object) };
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-response>
@@ -153,7 +142,7 @@ impl Response {
             header_list: HeaderList::new().into(),
             guard: Guard::Response,
         })?;
-        self.data_mut().headers = Some(Heap::from(headers));
+        self.data_mut().headers.set(headers);
         // Step 3: Let _bodyWithType_ be null.
         // Step 4: If _body_ is non-null, then set _bodyWithType_ to the result of `extracting`
         //     _body_.
@@ -177,12 +166,8 @@ impl Response {
     ) -> Self {
         Self {
             response: record,
-            body,
-            body_stream: body_stream.map(Heap::from),
-            host_body: None,
-            accounted: Default::default(),
-            body_source: None,
-            headers: Some(Heap::from(headers)),
+            body: BodyStorage::new(body, body_stream),
+            headers: Heap::from(headers),
             abort_state: None,
         }
     }
@@ -196,17 +181,13 @@ impl Response {
 
     /// <https://fetch.spec.whatwg.org/#dom-response-url>
     #[getter(name = "url")]
-    pub fn url_string(&self) -> String {
+    pub fn url_string(&self) -> Ref<'_, str> {
         // Step 1: Return the empty string if `this`’s `response`’s `URL` is null; otherwise
         //     `this`’s `response`’s `URL`, `serialized` with `_exclude fragment_` set to true.
-        match self.data().response.url() {
-            None => String::new(),
-            Some(url) => {
-                let mut url = url.clone();
-                url.set_fragment(None);
-                url.to_string()
-            }
-        }
+        Ref::map(self.data(), |data| match data.response.url() {
+            None => "",
+            Some(url) => &url[..url::Position::AfterQuery],
+        })
     }
 
     /// Returns a reference to the [`Url`] of this response.
@@ -239,19 +220,16 @@ impl Response {
 
     /// <https://fetch.spec.whatwg.org/#dom-response-statustext>
     #[getter]
-    pub fn status_text(&self) -> String {
+    pub fn status_text(&self) -> Ref<'_, str> {
         // Step 1: Return `this`’s `response`’s `status message`.
-        self.data().response.status_message.clone()
+        Ref::map(self.data(), |data| data.response.status_message.as_str())
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-response-headers>
     #[getter]
     pub fn headers<'r>(&self, scope: &'r Scope<'_>) -> Headers<'r> {
         // Step 1: Return `this`’s `headers`.
-        self.data()
-            .headers
-            .get(scope)
-            .expect("headers are set during construction")
+        self.data().headers.get(scope)
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-body-body>
@@ -400,7 +378,7 @@ impl Response {
         let value = parsed.to_string();
         // Step 7: `Append` (`Location`, _value_) to _responseObject_’s `response`’s `header
         //     list`.
-        let headers = response.data().headers.get(scope).unwrap();
+        let headers = response.data().headers.get(scope);
         algorithms::append_a_header(
             &mut headers.data_mut().header_list,
             "Location".to_string(),
@@ -466,31 +444,17 @@ impl Response<'_> {
     pub(crate) fn clear_body(&self) {
         {
             let mut data = self.data_mut();
-            data.body = None;
-            data.body_stream = None;
-            data.host_body = None;
-            data.body_source = None;
+            data.body.record = None;
+            data.body.stream = None;
+            data.body.host = None;
+            data.body.source = None;
         }
         self.sync_body_accounting();
     }
 
-    /// Attribute the `body`'s byte source to this object for the GC, replacing the previous
-    /// amount. Called wherever the byte source is set, taken, or dropped.
-    pub(crate) fn sync_body_accounting(&self) {
-        let mut data = self.data_mut();
-        let bytes = match &data.body {
-            Some(Body {
-                source: BodySource::Bytes(bytes),
-                ..
-            }) => bytes.len(),
-            _ => 0,
-        };
-        data.accounted.set(self.as_object(), bytes);
-    }
-
     /// Whether a host body is still sitting unread on this response.
     pub(crate) fn has_unread_host_body(&self) -> bool {
-        self.data().host_body.is_some()
+        self.data().body.host.is_some()
     }
 
     /// Remember the `fetch` abort algorithm's state, so consuming the body can detach it.
@@ -510,7 +474,8 @@ impl Response<'_> {
     /// would still have an observable effect.
     pub(crate) fn body_stream_is_unfinished(&self, scope: &Scope<'_>) -> bool {
         self.data()
-            .body_stream
+            .body
+            .stream
             .get(scope)
             .is_some_and(|stream| stream.is_readable())
     }
@@ -520,13 +485,13 @@ impl Response<'_> {
     /// host body, which closes the connection. Called by the `fetch` abort algorithm.
     pub(crate) fn abort_body(&self, scope: &Scope<'_>, reason: HandleValue<'_>) {
         // Drop an unread host body (the `.body`/consume path never ran): closes the connection.
-        self.data_mut().host_body = None;
+        self.data_mut().body.host = None;
         // Stop an in-flight host read driving the `.body` stream.
-        if let Some(source) = self.data().body_source.get(scope) {
+        if let Some(source) = self.data().body.source.get(scope) {
             source.abort(scope);
         }
         // Error the `.body` stream so pending and future reads reject.
-        if let Some(stream) = self.data().body_stream.get(scope) {
+        if let Some(stream) = self.data().body.stream.get(scope) {
             stream.error(scope, reason);
         }
     }
@@ -684,7 +649,7 @@ pub(crate) fn response_from_platform<'r>(
         None,
     )?;
     if has_body {
-        response_object.data_mut().host_body = Some(response.body);
+        response_object.data_mut().body.host = Some(response.body);
     }
     Ok(response_object)
 }
@@ -694,16 +659,6 @@ impl BodyMixin for Response<'_> {
     const TEXT_STREAM_UNSUPPORTED: &'static std::ffi::CStr =
         c"Response.textStream() is not yet supported";
 
-    fn set_body_stream(&self, stream: web_streams::readable::readable_stream::ReadableStream<'_>) {
-        self.data_mut().body_stream = Some(Heap::from(stream));
-    }
-
-    fn set_source_disturbed(&self) {
-        if let Some(body) = self.data_mut().body.as_mut() {
-            body.source_disturbed = true;
-        }
-    }
-
     /// The body is being read to completion, so an abort can no longer error it:
     /// drop the `fetch` abort algorithm that was keeping this response alive.
     fn on_body_consumed(&self, scope: &Scope<'_>) {
@@ -711,70 +666,13 @@ impl BodyMixin for Response<'_> {
     }
 }
 
-impl crate::incoming_body::HostBackedBodyOwner for Response<'_> {
-    fn take_unread_host_body(&self) -> Option<platform::http::IncomingBody> {
-        let mut data = self.data_mut();
-        data.body_stream.is_none().then(|| data.host_body.take())?
+impl HostBackedBodyOwner for Response<'_> {
+    fn with_body<R>(&self, f: impl FnOnce(&mut BodyStorage) -> R) -> R {
+        f(&mut self.data_mut().body)
     }
 
-    fn set_host_body_stream(
-        &self,
-        stream: web_streams::readable::readable_stream::ReadableStream<'_>,
-        source: crate::incoming_body::HostBodySource<'_>,
-    ) {
-        let mut data = self.data_mut();
-        data.body_stream = Some(Heap::from(stream));
-        data.body_source = Some(Heap::from(source));
-    }
-
-    fn body_record(&self) -> Option<Body> {
-        self.data().body.clone()
-    }
-
-    fn take_byte_source(&self) -> Option<bytes::Bytes> {
-        let taken = {
-            let mut data = self.data_mut();
-            let body = data.body.as_mut()?;
-            let BodySource::Bytes(bytes) = &mut body.source else {
-                return None;
-            };
-            let bytes = std::mem::take(bytes);
-            body.source_disturbed = true;
-            bytes
-        };
-        self.sync_body_accounting();
-        Some(taken)
-    }
-
-    fn body_stream<'r>(
-        &self,
-        scope: &'r Scope<'_>,
-    ) -> Option<web_streams::readable::readable_stream::ReadableStream<'r>> {
-        self.data().body_stream.get(scope)
-    }
-
-    fn take_host_body(&self) -> Option<platform::http::IncomingBody> {
-        self.data_mut().host_body.take()
-    }
-
-    fn replace_body_stream_after_tee(
-        &self,
-        scope: &Scope<'_>,
-        stream: web_streams::readable::readable_stream::ReadableStream<'_>,
-    ) {
-        let _ = scope;
-        {
-            let mut data = self.data_mut();
-            data.body_stream = Some(Heap::from(stream));
-            // The source's bytes now live in the teed stream, so read via that branch, not the
-            // byte/host fast paths: drop the byte source and the now-stale host source.
-            if let Some(body) = data.body.as_mut() {
-                body.source = BodySource::Null;
-            }
-            data.host_body = None;
-            data.body_source = None;
-        }
-        self.sync_body_accounting();
+    fn object(&self) -> js::Object<'_> {
+        self.as_object()
     }
 }
 

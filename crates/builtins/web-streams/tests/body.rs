@@ -27,7 +27,7 @@ fn run_with_stream(bytes: &[u8], code: &str) -> String {
     let global = scope.global();
     let stream = ReadableStream::from_bytes(&scope, bytes).expect("create stream from bytes");
     global
-        .set_property(&scope, c"__stream", scope.root_value(stream.as_value()))
+        .set_property(&scope, c"__stream", stream)
         .expect("expose __stream");
     eval_and_read_out(&scope, code)
 }

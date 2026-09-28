@@ -211,19 +211,17 @@ impl Headers {
 
     /// <https://fetch.spec.whatwg.org/#dom-headers-getsetcookie>
     #[method]
-    pub fn get_set_cookie(&self, scope: &Scope<'_>) -> Result<Vec<String>, ExnThrown> {
-        let _ = scope;
+    pub fn get_set_cookie(&self) -> Vec<String> {
         // Step 1: If `this`’s `header list` `does not contain` `Set-Cookie`, then return « ».
         // Step 2: Return the `values` of all `headers` in `this`’s `header list` whose `name` is a
         //     `byte-case-insensitive` match for `Set-Cookie`, in order.
         // An empty header list yields an empty sequence, subsuming step 1.
-        Ok(self
-            .data()
+        self.data()
             .header_list
             .iter()
             .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
             .map(|(_, value)| value.clone())
-            .collect())
+            .collect()
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-headers-has>

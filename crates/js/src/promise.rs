@@ -117,10 +117,12 @@ impl<'s> Stack<'s, Promise> {
             std::ptr::from_ref(&KEY) as usize,
             |scope| {
                 let p = Self::new_resolved_with_value(scope, crate::value::undefined())?;
-                Object::from_value(scope, p.as_value()).map_err(|_| ExnThrown)
+                Ok(*p)
             },
         )?;
-        obj.cast::<crate::Promise>().map_err(|_| ExnThrown)
+        Ok(obj
+            .cast::<crate::Promise>()
+            .expect("the shared resolved promise is a Promise"))
     }
 
     /// Check whether an object is a `Promise`.
@@ -330,6 +332,7 @@ impl<'s> Stack<'s, Promise> {
         let vector = mozjs::rust::RootedObjectVectorWrapper::new(scope.cx_mut());
         for promise in promises {
             if !vector.append(promise.get()) {
+                crate::exception::report_out_of_memory(scope);
                 return Err(ExnThrown);
             }
         }

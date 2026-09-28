@@ -199,12 +199,7 @@ fn return_result_check(
     args: CallbackArgs<'_>,
     _payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    if !args.get(0).is_object() {
-        return Err(crate::error::throw_type_error(
-            scope,
-            c"iterator result is not an object",
-        ));
-    }
+    iter_result_object(scope, args.get(0))?;
     Ok(value::undefined())
 }
 
@@ -216,7 +211,7 @@ fn is_callable(scope: &Scope<'_>, v: HandleValue<'_>) -> bool {
 
 /// `GetMethod`-style check: undefined/null yields `None`; a non-callable
 /// throws a `TypeError`; a callable is returned.
-fn ensure_is_method<'r>(
+pub(crate) fn ensure_is_method<'r>(
     scope: &'r Scope<'_>,
     v: HandleValue<'r>,
 ) -> Result<Option<HandleValue<'r>>, ExnThrown> {
@@ -512,14 +507,8 @@ pub fn iter_result_object<'r>(
     scope: &'r Scope<'_>,
     result: HandleValue<'_>,
 ) -> Result<Object<'r>, ExnThrown> {
-    if !result.is_object() {
-        Err(crate::error::throw_type_error(
-            scope,
-            c"iterator result is not an object",
-        ))
-    } else {
-        Ok(Object::from_value(scope, *result).unwrap())
-    }
+    Object::from_value(scope, *result)
+        .map_err(|_| crate::error::throw_type_error(scope, c"iterator result is not an object"))
 }
 
 /// `IteratorComplete(iterResult)`: `Get(iterResult, "done")`, coerced to a

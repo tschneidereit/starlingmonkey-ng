@@ -23,3 +23,19 @@ pub(crate) fn api_url_parser(url: &str, base: Option<&str>) -> Option<Url> {
     };
     basic_url_parser(url, parsed_base.as_ref())
 }
+
+/// <https://url.spec.whatwg.org/#concept-urlencoded-parser>
+pub(crate) fn urlencoded_parse(input: &str) -> Vec<(String, String)> {
+    form_urlencoded::parse(input.as_bytes())
+        .into_owned()
+        .collect()
+}
+
+/// <https://url.spec.whatwg.org/#concept-urlencoded-serializer>
+pub(crate) fn urlencoded_serialize(tuples: &[(String, String)]) -> String {
+    let mut serializer = form_urlencoded::Serializer::new(String::new());
+    for (name, value) in tuples {
+        serializer.append_pair(name, value);
+    }
+    serializer.finish()
+}

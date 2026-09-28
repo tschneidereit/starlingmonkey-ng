@@ -35,19 +35,26 @@ impl URLSearchParams<'_> {
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-urlsearchparams>
     #[constructor]
     fn new(&self, init: Option<URLSearchParamsInit>) -> Result<(), TypeError> {
+        // Step 1 (for a string _init_) is below.
         // Step 2: `Initialize` `this` with _init_.
+        // (inlined) <https://url.spec.whatwg.org/#urlsearchparams-initialize>
         let list = match init {
             None => Vec::new(),
+            // [inlined] Step 1: If _init_ is a `sequence`, then `for each` _innerSequence_ of
+            //                   _init_:
             Some(URLSearchParamsInit::Pairs(pairs)) => {
                 let mut list = Vec::with_capacity(pairs.len());
                 for pair in pairs {
-                    // Each inner sequence must contain exactly two items.
+                    // [inlined] Step 1.1: If _innerSequence_'s `size` is not 2, then `throw` a
+                    //                     ``TypeError``.
                     if pair.len() != 2 {
                         return Err(TypeError(
                             "Each URLSearchParams sequence element must contain exactly two items"
                                 .into(),
                         ));
                     }
+                    // [inlined] Step 1.2: `Append` (_innerSequence_[0], _innerSequence_[1]) to
+                    //                     _query_'s `list`.
                     let mut iter = pair.into_iter();
                     let name = iter.next().unwrap();
                     let value = iter.next().unwrap();
@@ -55,14 +62,19 @@ impl URLSearchParams<'_> {
                 }
                 list
             }
+            // [inlined] Step 2: Otherwise, if _init_ is a `record`, then `for each` _name_ →
+            //                   _value_ of _init_, `append` (_name_, _value_) to _query_'s `list`.
             Some(URLSearchParamsInit::Record(record)) => record.into_iter().collect(),
+            // [inlined] Step 3: Otherwise:
+            // [inlined] Step 3.1: Assert: _init_ is a string.
             Some(URLSearchParamsInit::Str(mut s)) => {
                 // Step 1: If _init_ is a string and starts with U+003F (?), then remove
                 //         the first code point from _init_.
                 if s.starts_with('?') {
                     s.remove(0);
                 }
-                form_urlencoded::parse(s.as_bytes()).into_owned().collect()
+                // [inlined] Step 3.2: Set _query_'s `list` to the result of `parsing` _init_.
+                crate::algorithms::urlencoded_parse(&s)
             }
         };
 
@@ -116,65 +128,45 @@ impl URLSearchParams<'_> {
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-get>
     #[method]
-    pub fn get(&self, scope: &Scope<'_>, name: String) -> Result<Option<String>, ExnThrown> {
+    pub fn get(&self, name: String) -> Option<String> {
         // Step 1: Return the value of the first tuple whose name is name in this’s list, if there
         //         is such a tuple; otherwise null.
-        let _ = scope;
-        Ok(self
-            .data()
+        self.data()
             .list
             .iter()
             .find(|(tuple_name, _)| tuple_name == &name)
-            .map(|(_, value)| value.clone()))
+            .map(|(_, value)| value.clone())
     }
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-getall>
     #[method]
-    pub fn get_all(&self, scope: &Scope<'_>, name: String) -> Result<Vec<String>, ExnThrown> {
+    pub fn get_all(&self, name: String) -> Vec<String> {
         // Step 1: Return the values of all tuples whose name is name in this’s list, in list
         //         order; otherwise the empty sequence.
-        let _ = scope;
-        Ok(self
-            .data()
+        self.data()
             .list
             .iter()
             .filter(|(tuple_name, _)| tuple_name == &name)
             .map(|(_, value)| value.clone())
-            .collect())
+            .collect()
     }
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-has>
     #[method]
-    pub fn has(
-        &self,
-        scope: &Scope<'_>,
-        name: String,
-        value: Option<String>,
-    ) -> Result<bool, ExnThrown> {
+    pub fn has(&self, name: String, value: Option<String>) -> bool {
         // Step 1: If _value_ is given and there is a `tuple` whose name is _name_ and value is
         //         _value_ in `this`’s `list`, then return true.
         // Step 2: If _value_ is not given and there is a `tuple` whose name is _name_ in `this`’s
         //         `list`, then return true.
-        let _ = scope;
-        if let Some(value) = value {
-            return Ok(self
-                .data()
+        // Step 3: Return false.
+        let data = self.data();
+        match value {
+            Some(value) => data
                 .list
                 .iter()
-                .any(|(tuple_name, tuple_value)| tuple_name == &name && tuple_value == &value));
+                .any(|(tuple_name, tuple_value)| tuple_name == &name && tuple_value == &value),
+            None => data.list.iter().any(|(tuple_name, _)| tuple_name == &name),
         }
-
-        if self
-            .data()
-            .list
-            .iter()
-            .any(|(tuple_name, _)| tuple_name == &name)
-        {
-            return Ok(true);
-        }
-
-        // Step 3: Return false.
-        Ok(false)
     }
 
     /// <https://url.spec.whatwg.org/#dom-urlsearchparams-set>
@@ -248,14 +240,12 @@ impl URLSearchParams<'_> {
         })
     }
 
+    /// <https://url.spec.whatwg.org/#urlsearchparams-stringification-behavior>
     #[allow(clippy::wrong_self_convention)]
     #[method]
-    pub fn to_string(&self, _scope: &Scope<'_>) -> Result<String, ExnThrown> {
-        let mut serializer = form_urlencoded::Serializer::new(String::new());
-        for (name, value) in &self.data().list {
-            serializer.append_pair(name, value);
-        }
-        Ok(serializer.finish())
+    pub fn to_string(&self) -> String {
+        // Return the `serialization` of `this`'s `list`.
+        crate::algorithms::urlencoded_serialize(&self.data().list)
     }
 
     /// <https://webidl.spec.whatwg.org/#js-iterable>: `entries`.
@@ -293,25 +283,26 @@ pub fn install_symbol_iterator(scope: &Scope<'_>) {
 }
 
 impl URLSearchParams<'_> {
+    /// <https://url.spec.whatwg.org/#concept-urlsearchparams-update>
     pub(crate) fn update(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
         let data = self.data();
+        // Step 1: If _query_'s `URL object` is null, then return.
         let Some(url_object_heap) = data.url_object.as_ref() else {
             return Ok(());
         };
 
         let url_object = url_object_heap.get(scope);
 
-        let mut serializer = form_urlencoded::Serializer::new(String::new());
-        for (name, value) in &data.list {
-            serializer.append_pair(name, value);
-        }
-        let serialized = serializer.finish();
+        // Step 2: Let _serializedQuery_ be the `serialization` of _query_'s `list`.
+        let serialized = crate::algorithms::urlencoded_serialize(&data.list);
+        // Step 3: If _serializedQuery_ is the empty string, then set _serializedQuery_ to null.
         let serialized_query = if serialized.is_empty() {
             None
         } else {
             Some(serialized)
         };
 
+        // Step 4: Set _query_'s `URL object`'s `URL`'s `query` to _serializedQuery_.
         if let Some(url) = url_object.data_mut().url.as_mut() {
             // Per the URL spec's opaque-path state, a trailing U+0020 SPACE before a query
             // delimiter is stored literally, but must be percent-encoded as %20 when the query

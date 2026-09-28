@@ -1361,14 +1361,7 @@ impl FromJSVal<'_, '_> for AsyncSequence {
                 let key = crate::symbol::get_well_known_key(scope, code);
                 let id = scope.root_id(key);
                 let method_val = obj.get_property_by_id(scope, id)?;
-                if method_val.is_null_or_undefined() {
-                    return Ok(None);
-                }
-                if !method_val.is_object() || !unsafe { JS::IsCallable(method_val.to_object()) } {
-                    throw_type_error(scope, c"iterator method is not callable");
-                    return Err(ConversionError::ExnPending);
-                }
-                Ok(Some(method_val.get()))
+                Ok(crate::iteration::ensure_is_method(scope, method_val)?.map(|m| m.get()))
             };
 
         // Let method be ? GetMethod(V, %Symbol.asyncIterator%).

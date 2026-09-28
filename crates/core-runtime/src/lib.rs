@@ -70,12 +70,6 @@ pub fn content_script(config: &config::RuntimeConfig) -> Result<(String, String)
     Ok((source, path.clone()))
 }
 
-/// Initialize the runtime and evaluate the script (the synchronous portion of an
-/// invocation), draining initial microtasks. Returns the runtime and its
-/// invocation, with the invocation **unregistered** from the GC tracer: it is
-/// registered only for the eval phase here, then unregistered before being moved
-/// out (the registry holds a raw pointer that the move would invalidate). The
-/// caller re-registers at the final location, drives the loop, then unregisters.
 /// Evaluate a content script into `scope` — as a module or as a classic script, per `module_mode`
 /// — with `event_loop` active, and drain the microtasks it queued.
 ///
@@ -147,6 +141,12 @@ impl ScriptEvaluation {
     }
 }
 
+/// Initialize the runtime and evaluate the script (the synchronous portion of an
+/// invocation), draining initial microtasks. Returns the runtime and its
+/// invocation, with the invocation unregistered from the GC tracer. It is
+/// registered only for the eval phase here, then unregistered before being moved
+/// out, since the registry holds a raw pointer that the move would invalidate. The
+/// caller re-registers at the final location, drives the loop, then unregisters.
 fn init_and_eval(
     config: config::RuntimeConfig,
 ) -> Result<

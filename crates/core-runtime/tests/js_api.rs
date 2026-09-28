@@ -526,10 +526,9 @@ fn test_js_api_with_runtime() {
             )
             .expect("new_callback should succeed");
 
-            let fun_val = scope.root_value(fun.as_value());
             scope
                 .global()
-                .set_property(&scope, c"fortyTwo", fun_val)
+                .set_property(&scope, c"fortyTwo", fun)
                 .expect("set_property");
 
             let result =
@@ -553,10 +552,9 @@ fn test_js_api_with_runtime() {
             )
             .expect("new_callback should succeed");
 
-            let fun_val = scope.root_value(fun.as_value());
             scope
                 .global()
-                .set_property(&scope, c"add", fun_val)
+                .set_property(&scope, c"add", fun)
                 .expect("set_property");
 
             let result =
@@ -576,10 +574,9 @@ fn test_js_api_with_runtime() {
             )
             .expect("new_callback should succeed");
 
-            let fun_val = scope.root_value(fun.as_value());
             scope
                 .global()
-                .set_property(&scope, c"fail", fun_val)
+                .set_property(&scope, c"fail", fun)
                 .expect("set_property");
 
             let tc = TryCatch::new(&scope);
@@ -600,10 +597,9 @@ fn test_js_api_with_runtime() {
             )
             .expect("new_callback should succeed");
 
-            let fun_val = scope.root_value(fun.as_value());
             scope
                 .global()
-                .set_property(&scope, c"argInfo", fun_val)
+                .set_property(&scope, c"argInfo", fun)
                 .expect("set_property");
 
             let result = js::compile::evaluate(&scope, "argInfo(1, 2, 3)").expect("evaluate");

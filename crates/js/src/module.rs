@@ -249,7 +249,7 @@ unsafe extern "C" fn load_rejected(
 pub fn load_requested_modules(scope: &Scope<'_>, module_record: Object) -> Result<(), ExnThrown> {
     // `LoadRequestedModules` takes no host-defined data. The callbacks receive
     // this value back and ignore it.
-    let host_defined = scope.root_value(UndefinedValue());
+    let host_defined = HandleValue::undefined();
     // A load hook may itself compile and load a module graph, so save and
     // restore any enclosing call's outcome around this one.
     let enclosing = load_outcome(|outcome| outcome.replace(None));

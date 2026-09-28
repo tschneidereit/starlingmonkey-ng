@@ -4,16 +4,68 @@
 //!
 //! The `Body` interface mixin, which both `Request` and `Response` include.
 
-use crate::algorithms::{self, BodySource, ConsumeType};
-use crate::incoming_body::{consume_host_body, materialize_host_body, HostBackedBodyOwner};
+use crate::algorithms::{self, Body, BodySource, ConsumeType};
+use crate::incoming_body::{
+    consume_host_body, materialize_host_body, HostBackedBodyOwner, HostBodySourceImpl,
+};
 use core_runtime::webidl_union;
 use js::error::{throw_type_error, ExnThrown};
+use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::{ArrayBuffer, ArrayBufferView, Promise};
+use platform::http::IncomingBody;
 use std::ffi::CStr;
 use web_streams::readable::readable_stream::ReadableStream;
+use web_streams::readable::readable_stream::ReadableStreamImpl;
 use web_url::url_search_params::URLSearchParams;
+
+/// The body state of a `Request` or `Response` object.
+#[js::must_root]
+#[derive(core_runtime::Traceable, Default)]
+pub(crate) struct BodyStorage {
+    /// The body record, or `None` for a null body.
+    #[no_trace]
+    pub(crate) record: Option<Body>,
+    /// The body's `ReadableStream`: a user-provided stream, or one materialized lazily from the
+    /// body's byte source or host body on `.body` access.
+    pub(crate) stream: Option<Heap<ReadableStreamImpl>>,
+    /// The body as received from the host, until the first of `consume`/`.body` takes it.
+    #[no_trace]
+    pub(crate) host: Option<IncomingBody>,
+    /// The `.body` stream's native host source, kept so an abort can cancel an in-flight host
+    /// read. Set when `.body` materializes a host-backed stream.
+    pub(crate) source: Option<Heap<HostBodySourceImpl>>,
+    /// The record's byte source, attributed to the owning object for the GC. Kept in sync by
+    /// [`sync_accounting`](Self::sync_accounting).
+    #[no_trace]
+    pub(crate) accounted: js::gc::AssociatedMemory,
+}
+
+impl BodyStorage {
+    /// A body with `record` and, if given, the stream it already has.
+    pub(crate) fn new(record: Option<Body>, stream: Option<ReadableStream<'_>>) -> Self {
+        Self {
+            record,
+            stream: stream.map(Heap::from),
+            ..Default::default()
+        }
+    }
+
+    /// Attribute the record's byte source to `object`, the object owning this storage, for the
+    /// GC, replacing the previous amount. Called wherever the byte source is set, taken, or
+    /// dropped.
+    pub(crate) fn sync_accounting(&mut self, object: js::Object<'_>) {
+        let bytes = match &self.record {
+            Some(Body {
+                source: BodySource::Bytes(bytes),
+                ..
+            }) => bytes.len(),
+            _ => 0,
+        };
+        self.accounted.set(object, bytes);
+    }
+}
 
 #[webidl_union]
 pub enum BodyInit<'a> {
@@ -39,11 +91,22 @@ pub(crate) trait BodyMixin: HostBackedBodyOwner + Sized {
     const TEXT_STREAM_UNSUPPORTED: &'static CStr;
 
     /// Store the `.body` stream materialized from the body's byte source.
-    fn set_body_stream(&self, stream: ReadableStream<'_>);
+    fn set_body_stream(&self, stream: ReadableStream<'_>) {
+        self.with_body(|body| {
+            debug_assert!(body.stream.is_none());
+            body.stream = Some(Heap::from(stream));
+        });
+    }
 
     /// Mark the body's byte source as read — the `disturbed` of the stream it
     /// would have materialized into.
-    fn set_source_disturbed(&self);
+    fn set_source_disturbed(&self) {
+        self.with_body(|body| {
+            if let Some(record) = body.record.as_mut() {
+                record.source_disturbed = true;
+            }
+        });
+    }
 
     /// Run once the body has been consumed. `Response` overrides it to detach
     /// its `fetch` abort algorithm, which can no longer act on a read body.

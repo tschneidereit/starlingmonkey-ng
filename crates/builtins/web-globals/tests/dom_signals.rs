@@ -41,9 +41,8 @@ fn setup() {
             (),
         )
         .expect("create __addAbortAlgorithm");
-        let helper_val = scope.root_value(helper.as_value());
         global
-            .set_property(scope, c"__addAbortAlgorithm", helper_val)
+            .set_property(scope, c"__addAbortAlgorithm", helper)
             .expect("install __addAbortAlgorithm");
     });
 }

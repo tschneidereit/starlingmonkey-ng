@@ -66,11 +66,11 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use mozjs::rust::{JSEngine, Runtime};
-//! use core_runtime::js::prelude::*;
+//! use js::engine::{JSEngine, MozJSRuntime};
+//! use js::prelude::*;
 //!
 //! let engine = JSEngine::init().unwrap();
-//! let runtime = Runtime::new(engine.handle());
+//! let runtime = MozJSRuntime::new(engine.handle());
 //! // ... enter a realm, evaluate scripts, etc.
 //! ```
 //!
