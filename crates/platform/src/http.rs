@@ -129,6 +129,37 @@ pub enum OutgoingBody {
 /// backpressure rather than buffering the whole body.
 pub(crate) const BODY_CHANNEL_CAPACITY: usize = 8;
 
+/// The size up to which [`coalesce_queued_chunks`] appends queued chunks.
+const COALESCE_LIMIT: usize = 64 * 1024;
+
+/// Append chunks already queued in `receiver` to `chunk` without waiting, so the transport can write
+/// them in one call.
+///
+/// Appending stops at the first of:
+/// - `chunk` reaching 64 KiB. The last appended chunk can take it past that.
+/// - an empty queue or a closed channel. The caller's next read from `receiver` reports the close.
+/// - a queued `Err`, which is returned. The body failed after the bytes now in `chunk`.
+pub fn coalesce_queued_chunks(
+    receiver: &mut OutgoingBodyReceiver,
+    chunk: &mut Vec<u8>,
+) -> Option<Error> {
+    while chunk.len() < COALESCE_LIMIT {
+        let next = match receiver.try_recv() {
+            Ok(Ok(next)) => next,
+            Ok(Err(error)) => return Some(error),
+            Err(_) => break,
+        };
+        let len = chunk.len() + next.len();
+        if len > chunk.capacity() {
+            // Reserve up to the limit on the first reallocation, so later appends within the limit
+            // don't copy `chunk` again.
+            chunk.reserve_exact(len.max(COALESCE_LIMIT) - chunk.len());
+        }
+        chunk.extend_from_slice(&next);
+    }
+    None
+}
+
 /// Wait for channel capacity, then enqueue. `futures_channel`'s `Sender` has no
 /// inherent async `send`, so drive `poll_ready` directly (avoids pulling in
 /// `futures-util`'s `SinkExt`). Returns `false` if the receiver was dropped.
@@ -155,9 +186,23 @@ impl BodySender {
         send_on(&mut self.0, Ok(chunk)).await
     }
 
+    /// Append a body chunk if the channel has capacity for it right away. Returns the chunk if it
+    /// has no capacity, or if the receiver was dropped.
+    pub fn try_send_chunk(&mut self, chunk: Vec<u8>) -> Result<(), Vec<u8>> {
+        self.0
+            .try_send(Ok(chunk))
+            .map_err(|error| error.into_inner().expect("the chunk sent above is `Ok`"))
+    }
+
     /// Abort the body with an error (so the send fails), awaiting capacity.
     pub async fn send_error(&mut self, message: String) -> bool {
         send_on(&mut self.0, Err(Error(message))).await
+    }
+
+    /// Abort the body with an error without waiting for capacity. If the channel is full, the
+    /// error is not queued and the body ends after the chunks already queued.
+    pub fn fail(mut self, message: String) {
+        let _ = self.0.try_send(Err(Error(message)));
     }
 }
 

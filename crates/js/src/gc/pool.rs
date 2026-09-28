@@ -1,29 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
-//! Page-based allocator for GC root handles.
+//! Allocator for GC root handles.
 //!
-//! The [`HandlePool`] is a page freelist that hands out fixed-size
-//! [`Page`]s to individual scopes. Each scope owns its own pages and
-//! performs bump allocation locally — no shared cursor, no aliasing
-//! between scopes.
-//!
-//! This design guarantees that dropping one scope cannot invalidate
-//! another scope's handles, which was an unsoundness issue with the
-//! previous shared-cursor approach.
+//! Every scope ([`RootScope`] or [`InnerScope`]) roots values through a [`ScopeAlloc`]. The
+//! innermost live scope bump-allocates on the [`HandlePool`]'s shared root stack. A scope that
+//! roots a value while a scope nested in it is alive gets [`PrivatePages`] instead, since the
+//! nested scope's drop truncates the stack back to where it started.
 //!
 //! # Architecture
 //!
-//! - **[`HandlePool`]**: Owns a freelist of reusable pages and maintains
-//!   an intrusive linked list of active [`ScopeAlloc`]s for GC tracing.
-//! - **[`ScopeAlloc`]**: A per-scope bump allocator. Each scope
-//!   ([`RootScope`] or [`InnerScope`]) owns one. Allocates from a
-//!   current page and requests new pages from the pool when full.
-//! - **[`Page`]**: A fixed-size array of 128 tagged `u64` slots.
+//! - **[`HandlePool`]**: owns the root stack (chunks of [`Page`]s, whose slots never move) and
+//!   one [`Level`] per live scope, a freelist of pages for private allocations, and an intrusive
+//!   linked list of the live [`PrivatePages`] for GC tracing.
+//! - **[`ScopeAlloc`]**: a scope's handle on its level, and its private pages if it has any.
+//!   Dropping it truncates the stack to the level's base once every scope created after it has
+//!   dropped too.
+//! - **[`Page`]**: a fixed-size array of 128 tagged `u64` slots.
 //!
-//! The pool is wrapped in a [`PoolRooter`] — a `#[repr(C)]`
-//! `CustomAutoRooter` that sits on the `autoGCRooters` stack for the
-//! entire lifetime of the [`Runtime`]. During GC, the rooter walks the
-//! active allocator list and traces each scope's live slots.
+//! The pool is wrapped in a [`PoolRooter`], a `#[repr(C)]` `CustomAutoRooter` that sits on the
+//! `autoGCRooters` stack for the entire lifetime of the [`Runtime`]. During GC, it traces the
+//! root stack up to its top and every live private allocation.
 //!
 //! [`RootScope`]: crate::gc::scope::RootScope
 //! [`InnerScope`]: crate::gc::scope::InnerScope
@@ -80,18 +76,84 @@ impl Page {
 }
 
 // ---------------------------------------------------------------------------
-// ScopeAlloc — per-scope bump allocator
+// ScopeAlloc: a scope's root allocation
 // ---------------------------------------------------------------------------
 
-/// A per-scope bump allocator that owns its pages independently.
-///
-/// Each [`RootScope`](crate::gc::scope::RootScope) and
-/// [`InnerScope`](crate::gc::scope::InnerScope) owns a `ScopeAlloc`.
-/// Pages are obtained from the [`HandlePool`] freelist and returned on drop.
-///
-/// `ScopeAlloc` is registered in the pool's intrusive linked list of active
-/// allocators so that the GC tracer can discover all live slots.
+/// A scope's root allocation: its level on the pool's root stack, and the private pages it
+/// roots into while a scope nested in it is alive.
 pub struct ScopeAlloc {
+    /// The pool this allocator roots in.
+    pool: *const HandlePool,
+
+    /// Index of this scope's [`Level`] in the pool.
+    level: usize,
+
+    /// Pages for values rooted while this scope was not the innermost one. `None` until needed.
+    private: Option<Box<PrivatePages>>,
+}
+
+impl ScopeAlloc {
+    /// Create an allocator for a new scope, nested in every scope that is alive.
+    ///
+    /// # Safety
+    ///
+    /// `pool` must point to a valid `HandlePool` that outlives this `ScopeAlloc`.
+    pub unsafe fn new(pool: *const HandlePool) -> Self {
+        // SAFETY: guaranteed by the caller.
+        let level = unsafe { &*pool }.push_level();
+        ScopeAlloc {
+            pool,
+            level,
+            private: None,
+        }
+    }
+
+    /// Allocate a slot for a rooted value.
+    ///
+    /// Returns a stable pointer to the value's `u64` storage. The pointer
+    /// remains valid until this `ScopeAlloc` is dropped.
+    #[inline]
+    pub fn alloc(&mut self, tag: SlotTag, value: u64) -> *mut u64 {
+        // SAFETY: the pool outlives every allocator created from it.
+        let pool = unsafe { &*self.pool };
+        if pool.is_innermost(self.level) {
+            return pool.stack_alloc(tag, value);
+        }
+        self.private_alloc(tag, value)
+    }
+
+    /// Allocate a slot in this scope's private pages, for a scope that is not the innermost one.
+    #[cold]
+    #[inline(never)]
+    fn private_alloc(&mut self, tag: SlotTag, value: u64) -> *mut u64 {
+        self.private
+            // SAFETY: the pool outlives every allocator created from it.
+            .get_or_insert_with(|| unsafe { PrivatePages::new(self.pool) })
+            .alloc(tag, value)
+    }
+
+    /// Get the pool pointer that this allocator roots in.
+    pub fn pool(&self) -> *const HandlePool {
+        self.pool
+    }
+}
+
+impl Drop for ScopeAlloc {
+    fn drop(&mut self) {
+        if let Some(private) = self.private.take() {
+            PrivatePages::recycle(private);
+        }
+        // SAFETY: the pool outlives every allocator created from it.
+        unsafe { &*self.pool }.pop_level(self.level);
+    }
+}
+
+/// A scope's private root pages, for values it roots while a scope nested in it is alive.
+///
+/// Pages are obtained from the [`HandlePool`] freelist and returned on drop. `PrivatePages` is
+/// registered in the pool's intrusive linked list of active allocators so that the GC tracer can
+/// discover its slots.
+pub struct PrivatePages {
     /// The pool this allocator borrows pages from.
     pool: *const HandlePool,
 
@@ -107,41 +169,89 @@ pub struct ScopeAlloc {
 
     /// Intrusive linked-list pointers for the pool's active-allocator list.
     /// These are raw pointers because the list is manually managed.
-    next: *mut ScopeAlloc,
-    prev: *mut ScopeAlloc,
+    next: *mut PrivatePages,
+    prev: *mut PrivatePages,
+
+    /// Whether this allocator is in the pool's active list. False once
+    /// [`release`](Self::release) has run, and while the box waits in the
+    /// pool's allocator freelist.
+    active: bool,
 }
 
-impl ScopeAlloc {
-    /// Create a new scope allocator, boxed for address stability, and register
-    /// it with the pool's active list.
+impl PrivatePages {
+    /// Create private pages, boxed for address stability, and register them
+    /// with the pool's active list.
     ///
-    /// Returns a `Box<ScopeAlloc>` because the intrusive linked list requires
+    /// Returns a `Box<PrivatePages>` because the intrusive linked list requires
     /// a stable address. The box must not be moved out of its allocation.
     ///
     /// No page is allocated until the first `alloc` call (lazy initialization).
+    /// The box comes from the pool's allocator freelist when one is available.
+    /// Pass a box that is done with to [`recycle`](Self::recycle) to return it
+    /// there.
     ///
     /// # Safety
     ///
-    /// `pool` must point to a valid `HandlePool` that outlives this `ScopeAlloc`.
+    /// `pool` must point to a valid `HandlePool` that outlives this `PrivatePages`.
     pub unsafe fn new(pool: *const HandlePool) -> Box<Self> {
+        // SAFETY: guaranteed by the caller.
         let pool_ref = unsafe { &*pool };
-        let mut alloc = Box::new(ScopeAlloc {
-            pool,
-            current_page: None,
-            cursor: 0,
-            full_pages: Vec::new(),
-            next: ptr::null_mut(),
-            prev: ptr::null_mut(),
+        let mut alloc = pool_ref.take_alloc().unwrap_or_else(|| {
+            Box::new(PrivatePages {
+                pool,
+                current_page: None,
+                cursor: 0,
+                full_pages: Vec::new(),
+                next: ptr::null_mut(),
+                prev: ptr::null_mut(),
+                active: false,
+            })
         });
+        debug_assert!(!alloc.active && alloc.current_page.is_none() && alloc.full_pages.is_empty());
+        alloc.pool = pool;
+        alloc.cursor = 0;
+        alloc.active = true;
         // Register using the heap address (stable across moves of the Box pointer).
         pool_ref.register(&mut *alloc);
         alloc
     }
 
+    /// Release `alloc`'s slots and pages, and keep the box in the pool's
+    /// allocator freelist for a later [`new`](Self::new).
+    pub fn recycle(mut alloc: Box<Self>) {
+        alloc.release();
+        // SAFETY: the pool outlives every allocator created from it.
+        let pool = unsafe { &*alloc.pool };
+        pool.return_alloc(alloc);
+    }
+
+    /// Unregister from the pool and return this allocator's pages. Does nothing
+    /// if already released.
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        // SAFETY: pool pointer is valid for the lifetime of the Runtime,
+        // which outlives all scopes.
+        let pool = unsafe { &*self.pool };
+
+        // Unregister from the active allocator list.
+        pool.unregister(self);
+
+        // Return all pages to the pool freelist.
+        if let Some(page) = self.current_page.take() {
+            pool.return_page(page);
+        }
+        for page in self.full_pages.drain(..) {
+            pool.return_page(page);
+        }
+    }
+
     /// Allocate a slot for a rooted value.
     ///
     /// Returns a stable pointer to the value's `u64` storage. The pointer
-    /// remains valid until this `ScopeAlloc` is dropped.
+    /// remains valid until this `PrivatePages` is dropped.
     pub fn alloc(&mut self, tag: SlotTag, value: u64) -> *mut u64 {
         // Ensure we have a page to allocate from.
         if self.current_page.is_none() {
@@ -169,14 +279,6 @@ impl ScopeAlloc {
         ptr
     }
 
-    /// Get the pool pointer that this allocator borrows from.
-    ///
-    /// Used by `Scope::inner_scope()` to create a new `ScopeAlloc` from
-    /// the same pool.
-    pub fn pool(&self) -> *const HandlePool {
-        self.pool
-    }
-
     /// Trace all live slots for GC.
     ///
     /// # Safety
@@ -194,22 +296,9 @@ impl ScopeAlloc {
     }
 }
 
-impl Drop for ScopeAlloc {
+impl Drop for PrivatePages {
     fn drop(&mut self) {
-        // SAFETY: pool pointer is valid for the lifetime of the Runtime,
-        // which outlives all scopes.
-        let pool = unsafe { &*self.pool };
-
-        // Unregister from the active allocator list.
-        pool.unregister(self);
-
-        // Return all pages to the pool freelist.
-        if let Some(page) = self.current_page.take() {
-            pool.return_page(page);
-        }
-        for page in self.full_pages.drain(..) {
-            pool.return_page(page);
-        }
+        self.release();
     }
 }
 
@@ -273,14 +362,21 @@ unsafe fn trace_page(trc: *mut JSTracer, page: &Page, count: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// HandlePool — page freelist + active allocator registry
+// HandlePool: root stack, page freelist, and private allocation registry
 // ---------------------------------------------------------------------------
 
-/// A page freelist and registry of active scope allocators.
+/// A scope's entry on the root stack: the stack's height when the scope was created, and whether
+/// the scope is still alive.
+struct Level {
+    base: usize,
+    alive: bool,
+}
+
+/// The root stack shared by all scopes, a freelist of pages for private allocations, and a
+/// registry of the live [`PrivatePages`].
 ///
-/// The pool owns reusable pages and maintains an intrusive doubly-linked
-/// list of active [`ScopeAlloc`]s. During GC, the tracer walks this list
-/// to discover all live root slots.
+/// During GC, the tracer traces the root stack up to its top and walks the registry to discover
+/// the private slots.
 ///
 /// # Thread safety
 ///
@@ -288,15 +384,36 @@ unsafe fn trace_page(trc: *mut JSTracer, page: &Page, count: usize) {
 /// single-threaded, matching SpiderMonkey's threading model.
 #[derive(Default)]
 pub struct HandlePool {
-    /// Freelist of reusable pages. Pages are returned here when scopes drop
-    /// and reused by new scopes, avoiding repeated heap allocation.
+    /// The root stack's pages. Slot `i` is slot `i % PAGE_SIZE` of page `i / PAGE_SIZE`. Pages are
+    /// added as the stack grows and kept when it shrinks, so slots never move.
+    #[allow(clippy::vec_box)]
+    stack: UnsafeCell<Vec<Box<Page>>>,
+
+    /// The number of slots in use on the root stack.
+    top: Cell<usize>,
+
+    /// One entry per scope, innermost last. Entries of dropped scopes stay until every scope
+    /// created after them has dropped.
+    levels: UnsafeCell<Vec<Level>>,
+
+    /// Freelist of reusable pages for private allocations.
     #[allow(clippy::vec_box)]
     freelist: UnsafeCell<Vec<Box<Page>>>,
 
-    /// Head of the intrusive doubly-linked list of active `ScopeAlloc`s.
-    /// Null when no scopes are active.
-    active_head: Cell<*mut ScopeAlloc>,
+    /// Head of the intrusive doubly-linked list of live `PrivatePages`.
+    /// Null when there are none.
+    active_head: Cell<*mut PrivatePages>,
+
+    /// Released private allocations kept for reuse, at most [`MAX_FREE_ALLOCS`].
+    #[allow(clippy::vec_box)]
+    alloc_freelist: UnsafeCell<Vec<Box<PrivatePages>>>,
+
+    /// Tracers registered with [`crate::gc::add_root_tracer`], run whenever the pool is traced.
+    root_tracers: UnsafeCell<Vec<unsafe fn(*mut JSTracer)>>,
 }
+
+/// The most released private allocations the pool keeps.
+const MAX_FREE_ALLOCS: usize = 32;
 
 /// This module's share of the crate's thread-local state. See [`crate::tls`].
 pub(crate) struct PoolTls {
@@ -337,6 +454,19 @@ pub(crate) fn init_pool(cx: &mut JSContext) {
     });
 }
 
+/// Register `tracer` with the current thread's pool, unless it already is.
+pub(crate) fn add_root_tracer(tracer: unsafe fn(*mut JSTracer)) {
+    // SAFETY: the pool outlives this call, and single-threaded access leaves no other reference to
+    // its tracer list.
+    let tracers = unsafe { &mut *(*current_pool()).root_tracers.get() };
+    if !tracers
+        .iter()
+        .any(|&registered| ptr::fn_addr_eq(registered, tracer))
+    {
+        tracers.push(tracer);
+    }
+}
+
 /// Get a raw pointer to the current thread's HandlePool.
 ///
 /// The returned pointer is valid for the lifetime of the Runtime (until
@@ -364,6 +494,71 @@ impl HandlePool {
         Self::default()
     }
 
+    /// Add a level for a new scope, nested in every live scope, and return its index.
+    #[inline]
+    fn push_level(&self) -> usize {
+        // SAFETY: Single-threaded access, and no reference to `levels` outlives this call.
+        let levels = unsafe { &mut *self.levels.get() };
+        levels.push(Level {
+            base: self.top.get(),
+            alive: true,
+        });
+        levels.len() - 1
+    }
+
+    /// Whether `level` belongs to the innermost live scope.
+    #[inline]
+    fn is_innermost(&self, level: usize) -> bool {
+        // SAFETY: Single-threaded access, and no reference to `levels` outlives this call.
+        let levels = unsafe { &*self.levels.get() };
+        level == levels.len() - 1
+    }
+
+    /// Mark `level`'s scope dropped. If no live scope was created after it, truncate the root stack
+    /// to the base of the oldest of the dropped scopes on top of the level stack, and remove their
+    /// levels.
+    #[inline]
+    fn pop_level(&self, level: usize) {
+        // SAFETY: Single-threaded access, and no reference to `levels` outlives this call.
+        let levels = unsafe { &mut *self.levels.get() };
+        levels[level].alive = false;
+        while let Some(last) = levels.last() {
+            if last.alive {
+                break;
+            }
+            self.top.set(last.base);
+            levels.pop();
+        }
+    }
+
+    /// Push a slot for the innermost scope onto the root stack, and return its storage.
+    #[inline]
+    fn stack_alloc(&self, tag: SlotTag, value: u64) -> *mut u64 {
+        let index = self.top.get();
+        // SAFETY: Single-threaded access, and no reference to `stack` outlives this call.
+        let stack = unsafe { &mut *self.stack.get() };
+        let page_index = index / PAGE_SIZE;
+        if page_index == stack.len() {
+            Self::grow_stack(stack);
+        }
+        let page = &stack[page_index];
+        let slot = index % PAGE_SIZE;
+        page.tags[slot].set(tag);
+        let ptr = page.values[slot].get();
+        // SAFETY: the slot is above the stack's top, so no handle refers to it.
+        unsafe { *ptr = value };
+        self.top.set(index + 1);
+        ptr
+    }
+
+    /// Add a page to the root stack.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::vec_box)]
+    fn grow_stack(stack: &mut Vec<Box<Page>>) {
+        stack.push(Box::new(Page::new()));
+    }
+
     /// Take a page from the freelist, or allocate a new one.
     fn take_page(&self) -> Box<Page> {
         // SAFETY: Single-threaded access.
@@ -378,12 +573,29 @@ impl HandlePool {
         fl.push(page);
     }
 
-    /// Register a `ScopeAlloc` in the active allocator list.
+    /// Take a released allocator from the freelist, if there is one.
+    fn take_alloc(&self) -> Option<Box<PrivatePages>> {
+        // SAFETY: Single-threaded access.
+        let fl = unsafe { &mut *self.alloc_freelist.get() };
+        fl.pop()
+    }
+
+    /// Keep a released allocator for reuse, or drop it if the freelist is full.
+    fn return_alloc(&self, alloc: Box<PrivatePages>) {
+        debug_assert!(!alloc.active);
+        // SAFETY: Single-threaded access.
+        let fl = unsafe { &mut *self.alloc_freelist.get() };
+        if fl.len() < MAX_FREE_ALLOCS {
+            fl.push(alloc);
+        }
+    }
+
+    /// Register a `PrivatePages` in the active allocator list.
     ///
     /// Pushes to the head of the doubly-linked list.
-    fn register(&self, alloc: *mut ScopeAlloc) {
+    fn register(&self, alloc: *mut PrivatePages) {
         let head = self.active_head.get();
-        // SAFETY: alloc is a valid pointer to a ScopeAlloc being constructed.
+        // SAFETY: alloc is a valid pointer to a PrivatePages being constructed.
         unsafe {
             (*alloc).next = head;
             (*alloc).prev = ptr::null_mut();
@@ -394,9 +606,9 @@ impl HandlePool {
         self.active_head.set(alloc);
     }
 
-    /// Unregister a `ScopeAlloc` from the active allocator list.
-    fn unregister(&self, alloc: *const ScopeAlloc) {
-        // SAFETY: alloc is a valid pointer to a ScopeAlloc being dropped.
+    /// Unregister a `PrivatePages` from the active allocator list.
+    fn unregister(&self, alloc: *const PrivatePages) {
+        // SAFETY: alloc is a valid pointer to a PrivatePages being dropped.
         // The linked-list pointers are valid because they were set by register().
         unsafe {
             let prev = (*alloc).prev;
@@ -415,7 +627,7 @@ impl HandlePool {
 }
 
 unsafe impl CustomTrace for HandlePool {
-    /// Trace all live slots across all active scope allocators.
+    /// Trace the root stack up to its top, and the slots of all live private allocations.
     ///
     /// # Safety
     ///
@@ -423,9 +635,26 @@ unsafe impl CustomTrace for HandlePool {
     /// `trc` must be a valid `JSTracer` pointer.
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn trace(&self, trc: *mut JSTracer) {
+        // SAFETY: Single-threaded access. Tracing runs while no allocation is in progress.
+        let stack = unsafe { &*self.stack.get() };
+        let top = self.top.get();
+        for (index, page) in stack.iter().enumerate() {
+            let start = index * PAGE_SIZE;
+            if start >= top {
+                break;
+            }
+            // SAFETY: `trc` is valid per this function's contract, and the slots below `top` hold
+            // values of their tags.
+            unsafe { trace_page(trc, page, (top - start).min(PAGE_SIZE)) };
+        }
+        // SAFETY: Single-threaded access. Registration does not run during tracing.
+        for tracer in unsafe { &*self.root_tracers.get() } {
+            // SAFETY: `trc` is valid per this function's contract.
+            unsafe { tracer(trc) };
+        }
         let mut current = self.active_head.get();
         while !current.is_null() {
-            // SAFETY: The linked list contains only valid ScopeAlloc pointers
+            // SAFETY: The linked list contains only valid PrivatePages pointers
             // because register/unregister maintain the invariant.
             unsafe {
                 (*current).trace(trc);

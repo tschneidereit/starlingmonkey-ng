@@ -30,14 +30,53 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr::NonNull;
 
-use crate::conversion::Utf8Chars;
+use super::error::ExnThrown;
+use crate::conversion::{ConversionError, ToJSVal, Utf8Chars};
 use crate::gc::scope::Scope;
 use mozjs::gc::Handle;
 use mozjs::jsapi::{JSLinearString, JSString};
 use mozjs::jsval::StringValue;
-use mozjs::rust::wrappers2::{self, JS_NewStringCopyUTF8N};
+use mozjs::rust::wrappers2;
+use smallvec::SmallVec;
 
-use super::error::ExnThrown;
+/// Create an unrooted JS string holding `s`, in the smallest encoding that represents it. Returns
+/// null with an exception pending if allocation fails.
+///
+/// ASCII text is copied as Latin-1 directly. Other text that fits in Latin-1 is converted with
+/// `encoding_rs`' vectorized routine before SpiderMonkey copies it, since SpiderMonkey's own
+/// UTF-8 to Latin-1 conversion (`JS_NewStringCopyUTF8N`) converts one code point at a time. Text
+/// that needs UTF-16 goes through `JS_NewStringCopyUTF8N`, which converts it directly into the
+/// string's buffer.
+pub(crate) fn new_js_string(scope: &Scope<'_>, s: &str) -> *mut JSString {
+    let bytes = s.as_bytes();
+    let ascii = encoding_rs::Encoding::ascii_valid_up_to(bytes);
+    if ascii == bytes.len() {
+        // SAFETY: ASCII bytes are valid Latin-1 characters.
+        return unsafe {
+            wrappers2::JS_NewStringCopyN(scope.cx_mut(), bytes.as_ptr().cast(), bytes.len())
+        };
+    }
+    if encoding_rs::mem::is_str_latin1(&s[ascii..]) {
+        // The Latin-1 text has fewer characters than `s` has bytes.
+        let mut latin1: SmallVec<[u8; 256]> = SmallVec::from_elem(0, bytes.len());
+        let written = encoding_rs::mem::convert_utf8_to_latin1_lossy(bytes, &mut latin1);
+        // SAFETY: `latin1[..written]` holds Latin-1 characters.
+        return unsafe {
+            wrappers2::JS_NewStringCopyN(scope.cx_mut(), latin1.as_ptr().cast(), written)
+        };
+    }
+    let utf8 = Utf8Chars::from(s);
+    // SAFETY: `utf8` borrows `s`, which outlives the call.
+    unsafe { wrappers2::JS_NewStringCopyUTF8N(scope.cx_mut(), &*utf8 as *const _) }
+}
+
+/// The characters of a JS string, in the representation the string stores them in.
+pub enum StrChars<'a> {
+    /// One byte per character, U+0000 to U+00FF.
+    Latin1(&'a [u8]),
+    /// UTF-16 code units, which may include unpaired surrogates.
+    TwoByte(&'a [u16]),
+}
 
 // ---------------------------------------------------------------------------
 // Str — scope-rooted JS string handle
@@ -69,13 +108,20 @@ impl<'s> Str<'s> {
     /// this is the standard wrapper for their results.
     fn from_mozjs_rval(scope: &'s Scope<'_>, ptr: *mut JSString) -> Result<Self, ExnThrown> {
         NonNull::new(ptr)
-            .map(|p| Str::from_handle(scope.root_string(p)))
+            .map(|p| Str::from_non_null(scope, p))
             .ok_or(ExnThrown)
     }
 
-    /// Wrap a rooted string handle.
-    pub fn from_handle(handle: Handle<'s, *mut JSString>) -> Self {
-        Str { handle }
+    /// Root `ptr` in `scope`.
+    pub fn from_non_null(scope: &'s Scope<'_>, ptr: NonNull<JSString>) -> Self {
+        Str {
+            handle: scope.root_string(ptr),
+        }
+    }
+
+    /// Wrap a rooted string handle, or `None` if it is null.
+    pub fn from_handle(handle: Handle<'s, *mut JSString>) -> Option<Self> {
+        (!handle.get().is_null()).then_some(Str { handle })
     }
 
     /// Get the underlying rooted handle.
@@ -100,9 +146,17 @@ impl<'s> Str<'s> {
 
     /// Create a new JS string from a Rust `&str`.
     pub fn from_str(scope: &'s Scope<'_>, s: &str) -> Result<Self, ExnThrown> {
-        let s = Utf8Chars::from(s);
-        let jsstr = unsafe { JS_NewStringCopyUTF8N(scope.cx_mut(), &*s as *const _) };
-        Self::from_mozjs_rval(scope, jsstr)
+        Self::from_mozjs_rval(scope, new_js_string(scope, s))
+    }
+
+    /// Create a new JS string from Latin-1 characters, one byte each.
+    // TODO: explore whether we can use the non-copying `JS_NewStrin*` variants here and below.
+    pub fn from_latin1(scope: &'s Scope<'_>, chars: &[u8]) -> Result<Self, ExnThrown> {
+        // SAFETY: every byte is a Latin-1 character.
+        let js_str = unsafe {
+            wrappers2::JS_NewStringCopyN(scope.cx_mut(), chars.as_ptr().cast(), chars.len())
+        };
+        Self::from_mozjs_rval(scope, js_str)
     }
 
     /// Create a new JS string from a null-terminated C string.
@@ -125,17 +179,15 @@ impl<'s> Str<'s> {
         let ptr = unsafe { wrappers2::JS_GetEmptyString(scope.cx()) };
         // SAFETY: The empty string is always present in a valid runtime.
         let nn = unsafe { NonNull::new_unchecked(ptr) };
-        Str::from_handle(scope.root_string(nn))
+        Str::from_non_null(scope, nn)
     }
 
     /// Convert a JS value to a string via the `ToString` abstract operation.
     ///
     /// Throws a `TypeError` for symbols — unlike `String(value)`, which
     /// special-cases them to their description.
-    pub fn from_value(
-        scope: &'s Scope<'_>,
-        val: mozjs::gc::HandleValue,
-    ) -> Result<Self, ExnThrown> {
+    pub fn from_value(scope: &'s Scope<'_>, val: impl ToJSVal<'s>) -> Result<Self, ExnThrown> {
+        let val = val.to_jsval_throwing(scope)?;
         let js_str = unsafe { mozjs::rust::ToString(scope.cx_mut(), val) };
         Self::from_mozjs_rval(scope, js_str)
     }
@@ -146,9 +198,8 @@ impl<'s> Str<'s> {
 
     /// Encode this string to UTF-8, returning an owned Rust [`String`].
     pub fn to_utf8(&self, scope: &Scope<'_>) -> Result<String, ExnThrown> {
-        NonNull::new(self.as_raw())
-            .map(|nn| crate::conversion::jsstr_to_string(scope, nn))
-            .ok_or(ExnThrown)
+        let nn = NonNull::new(self.as_raw()).expect("a Str is never null");
+        Ok(crate::conversion::jsstr_to_string(scope, nn))
     }
 
     /// Get a single character (code unit) at the given index.
@@ -263,6 +314,37 @@ impl<'s> Str<'s> {
         unsafe { mozjs::jsapi::JS_StringIsLinear(self.as_raw()) }
     }
 
+    /// Call `f` with this string's characters, flattening the string first if it is a rope.
+    ///
+    /// # Safety
+    ///
+    /// A garbage collection can move the characters, so `f` must not call into SpiderMonkey.
+    pub unsafe fn with_chars<R>(
+        &self,
+        scope: &Scope<'_>,
+        f: impl FnOnce(StrChars<'_>) -> R,
+    ) -> Result<R, ExnThrown> {
+        let linear = self.ensure_linear(scope)?.as_ptr().cast::<JSString>();
+        let mut length = 0;
+        // SAFETY: `linear` is a live linear string, whose characters stay in place until the next
+        // call into SpiderMonkey, which `f` does not make.
+        unsafe {
+            if mozjs::jsapi::JS_DeprecatedStringHasLatin1Chars(linear) {
+                let chars =
+                    wrappers2::JS_GetLatin1StringCharsAndLength(scope.cx(), linear, &mut length);
+                Ok(f(StrChars::Latin1(std::slice::from_raw_parts(
+                    chars, length,
+                ))))
+            } else {
+                let chars =
+                    wrappers2::JS_GetTwoByteStringCharsAndLength(scope.cx(), linear, &mut length);
+                Ok(f(StrChars::TwoByte(std::slice::from_raw_parts(
+                    chars, length,
+                ))))
+            }
+        }
+    }
+
     /// Ensure this string has a linear (flat) representation.
     ///
     /// Returns the linear string pointer, or an error if allocation fails.
@@ -319,6 +401,29 @@ impl<'s> Str<'s> {
     ) -> Result<Self, ExnThrown> {
         let result = wrappers2::JS_NewExternalUCString(scope.cx_mut(), chars, length, callbacks);
         Self::from_mozjs_rval(scope, result)
+    }
+}
+
+/// The value converted with `ToString`.
+///
+/// Used for WebIDL `DOMString` types.
+impl<'s, 'v> crate::conversion::FromJSVal<'s, 'v> for Str<'s> {
+    type Config = ();
+    fn from_jsval(
+        scope: &'s Scope<'s>,
+        val: mozjs::gc::HandleValue<'v>,
+        _: (),
+    ) -> Result<Self, ConversionError> {
+        // SAFETY: `val` is rooted.
+        let js_str = unsafe { mozjs::rust::ToString(scope.cx_mut(), val) };
+        Str::from_mozjs_rval(scope, js_str).map_err(|_| ConversionError::ExnPending)
+    }
+}
+
+impl ToJSVal<'_> for Str<'_> {
+    #[inline]
+    fn to_jsval_raw(&self, _scope: &Scope<'_>) -> Result<crate::value::Value, ConversionError> {
+        Ok(self.as_value())
     }
 }
 

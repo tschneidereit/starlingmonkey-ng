@@ -32,9 +32,9 @@
 use mozjs::jsapi::AssertSameCompartment;
 use mozjs::jsapi::JS_DefineElement;
 use mozjs::jsapi::JS;
+use mozjs::jsapi::JSPROP_ENUMERATE;
 use mozjs::jsapi::{ForOfIterator, ForOfIterator_NonIterableBehavior};
 use mozjs::jsapi::{JSObject, JSString, PropertyDescriptor, RootedObject, RootedValue};
-use mozjs::jsapi::{JS_NewStringCopyUTF8N, JSPROP_ENUMERATE};
 use mozjs::jsval::{
     BooleanValue, DoubleValue, Int32Value, JSVal, ObjectOrNullValue, StringValue, SymbolValue,
     UInt32Value, UndefinedValue,
@@ -725,8 +725,49 @@ impl<'s> ToJSVal<'s> for Finite<f64> {
 
 /// Converts a `JSString` into a `String`, regardless of used encoding.
 pub fn jsstr_to_string(scope: &Scope<'_>, jsstr: NonNull<JSString>) -> String {
-    // SAFETY: the scope provides a valid context, and `jsstr` is non-null.
-    unsafe { mozjs::conversions::jsstr_to_string(scope.cx_mut(), jsstr) }
+    let jsstr = jsstr.as_ptr();
+    let mut length = 0;
+    // SAFETY: `jsstr` is a live string. The accessors flatten a rope and return its characters,
+    // which stay in place until the next call into SpiderMonkey, and only `encoding_rs` reads them
+    // before then. Each conversion writes valid UTF-8 into the prefix it reports.
+    unsafe {
+        if mozjs::jsapi::JS_DeprecatedStringHasLatin1Chars(jsstr) {
+            let chars = mozjs::rust::wrappers2::JS_GetLatin1StringCharsAndLength(
+                scope.cx(),
+                jsstr,
+                &mut length,
+            );
+            assert!(!chars.is_null());
+            let chars = std::slice::from_raw_parts(chars, length);
+            // An ASCII prefix is copied as is, and each character after it takes at most two
+            // bytes, the size `convert_latin1_to_utf8` requires.
+            let ascii = encoding_rs::Encoding::ascii_valid_up_to(chars);
+            if ascii == length {
+                return String::from_utf8_unchecked(chars.to_vec());
+            }
+            let mut utf8 = Vec::with_capacity(ascii + (length - ascii) * 2);
+            utf8.extend_from_slice(&chars[..ascii]);
+            utf8.resize(utf8.capacity(), 0);
+            let written =
+                encoding_rs::mem::convert_latin1_to_utf8(&chars[ascii..], &mut utf8[ascii..]);
+            utf8.truncate(ascii + written);
+            String::from_utf8_unchecked(utf8)
+        } else {
+            let chars = mozjs::rust::wrappers2::JS_GetTwoByteStringCharsAndLength(
+                scope.cx(),
+                jsstr,
+                &mut length,
+            );
+            assert!(!chars.is_null());
+            let chars = std::slice::from_raw_parts(chars, length);
+            // `convert_utf16_to_utf8` requires three bytes per code unit, and replaces unpaired
+            // surrogates with U+FFFD.
+            let mut utf8 = vec![0; length * 3];
+            let written = encoding_rs::mem::convert_utf16_to_utf8(chars, &mut utf8);
+            utf8.truncate(written);
+            String::from_utf8_unchecked(utf8)
+        }
+    }
 }
 
 // https://heycam.github.io/webidl/#es-USVString
@@ -734,11 +775,7 @@ impl<'s> ToJSVal<'s> for str {
     #[inline]
     #[deny(unsafe_op_in_unsafe_fn)]
     fn to_jsval_raw(&self, scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
-        // Spidermonkey will automatically only copy latin1
-        // or similar if the given encoding can be small enough.
-        // So there is no need to distinguish between ascii only or similar.
-        let s = Utf8Chars::from(self);
-        let jsstr = unsafe { JS_NewStringCopyUTF8N(scope.cx_mut().raw_cx(), &*s as *const _) };
+        let jsstr = crate::string::new_js_string(scope, self);
         if jsstr.is_null() {
             return Err(ConversionError::ExnPending);
         }

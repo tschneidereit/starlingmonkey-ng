@@ -678,3 +678,90 @@ fn test_queue_microtask() {
     let joined = String::from_jsval(&scope, joined, ()).unwrap();
     assert_eq!(joined, "abc");
 }
+
+/// `ArrayBuffer::transfer` moves the contents into a new buffer and detaches the original, for
+/// empty buffers too.
+#[test]
+fn array_buffer_transfer_moves_the_contents() {
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
+    let scope = rt.default_global();
+
+    let value = js::compile::evaluate(&scope, "new Uint8Array([1, 2, 3, 4]).buffer").unwrap();
+    let source = js::ArrayBuffer::from_jsval(&scope, value, ()).unwrap();
+    let moved = source.transfer(&scope).unwrap();
+    assert!(source.is_detached());
+    assert_eq!(moved.byte_length(), 4);
+    // SAFETY: nothing allocates while the slice is read.
+    assert_eq!(unsafe { moved.bytes() }, &[1, 2, 3, 4]);
+
+    let empty = js::ArrayBuffer::new(&scope, 0).unwrap();
+    let moved_empty = empty.transfer(&scope).unwrap();
+    assert!(empty.is_detached());
+    assert_eq!(moved_empty.byte_length(), 0);
+}
+
+/// Strings created from Rust text hold the same UTF-16 code units as the text, whether it is
+/// ASCII, Latin-1, other BMP characters, or characters outside the BMP, and whether the
+/// non-ASCII part starts at the beginning or after an ASCII prefix longer than the conversion
+/// buffers' inline capacity.
+#[test]
+fn strings_from_rust_text_hold_its_utf16_code_units() {
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
+    let scope = rt.default_global();
+
+    let long_prefix = "a".repeat(300);
+    let samples = [
+        String::new(),
+        "plain ascii".to_string(),
+        "héllo wörld ÿ".to_string(),
+        "é".to_string(),
+        "日本語 ✓".to_string(),
+        "emoji 🦀 and ☃".to_string(),
+        format!("{long_prefix}é"),
+        format!("{long_prefix}日"),
+        format!("{long_prefix}🦀"),
+    ];
+    for text in &samples {
+        let expected: Vec<u16> = text.encode_utf16().collect();
+        let from_str = js::string::Str::from_str(&scope, text).unwrap();
+        let converted = js::string::Str::from_value(&scope, text.as_str()).unwrap();
+        for s in [from_str, converted] {
+            assert_eq!(s.len(), expected.len(), "{text:?}");
+            let units: Vec<u16> = (0..s.len())
+                .map(|i| s.char_at(&scope, i).unwrap())
+                .collect();
+            assert_eq!(units, expected, "{text:?}");
+            assert_eq!(s.to_utf8(&scope).unwrap(), *text);
+        }
+    }
+}
+
+/// Converting a JS string to UTF-8 flattens ropes, encodes Latin-1 characters after any ASCII
+/// prefix as two bytes each, and replaces unpaired surrogates with U+FFFD.
+#[test]
+fn strings_convert_to_utf8_from_either_representation() {
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
+    let scope = rt.default_global();
+
+    let long_prefix = "a".repeat(300);
+    let cases = [
+        ("''", String::new()),
+        ("'ÿé'", "ÿé".to_string()),
+        ("'abc ÿé'", "abc ÿé".to_string()),
+        ("'\\uD800x\\uDC00'", "\u{FFFD}x\u{FFFD}".to_string()),
+        ("'\\uD83E\\uDD80'", "🦀".to_string()),
+        (
+            "let a = 'a'.repeat(300); a + String.fromCharCode(0xe9)",
+            format!("{long_prefix}é"),
+        ),
+        (
+            "let b = 'a'.repeat(300); b + String.fromCharCode(0x65e5)",
+            format!("{long_prefix}日"),
+        ),
+    ];
+    for (source, expected) in &cases {
+        let value = js::compile::evaluate(&scope, source).unwrap();
+        let s = js::string::Str::from_value(&scope, value).unwrap();
+        assert_eq!(s.to_utf8(&scope).unwrap(), *expected, "{source}");
+    }
+}

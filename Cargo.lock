@@ -1436,10 +1436,13 @@ dependencies = [
 name = "js"
 version = "0.3.0"
 dependencies = [
+ "encoding_rs",
  "indexmap",
  "mozjs",
  "mozjs_sys",
  "num-traits",
+ "rustc-hash",
+ "smallvec",
  "starling-macro",
 ]
 
@@ -1958,6 +1961,7 @@ dependencies = [
  "futures-channel",
  "futures-lite",
  "http",
+ "libc",
  "reqwest",
  "url",
  "wasip3",
@@ -3051,6 +3055,7 @@ dependencies = [
  "js",
  "libstarling",
  "platform",
+ "smallvec",
  "tokio",
  "url",
  "web-globals",

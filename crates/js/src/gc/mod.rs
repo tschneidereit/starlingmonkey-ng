@@ -50,6 +50,28 @@ pub fn shutdown(cx: &JSContext) {
     pool::shutdown();
 }
 
+/// Register `tracer` to run whenever the current runtime's GC traces its roots, minor collections
+/// included, until the runtime shuts down. Values it traces are roots of every collection, so
+/// storing them needs no write barriers. Registering the same function again has no effect.
+pub fn add_root_tracer(tracer: unsafe fn(*mut crate::native::JSTracer)) {
+    pool::add_root_tracer(tracer);
+}
+
+/// Trace `value` as a root, updating it if the collection moves what it refers to. For use from a
+/// tracer registered with [`add_root_tracer`].
+///
+/// # Safety
+///
+/// `trc` must be the tracer the registered function was called with, and `value` must point to a
+/// valid `Value`.
+pub unsafe fn trace_value_root(
+    trc: *mut crate::native::JSTracer,
+    value: *mut crate::native::Value,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { mozjs::glue::CallValueRootTracer(trc, value, c"root-value".as_ptr()) };
+}
+
 /// Trigger a full, non-incremental garbage collection.
 pub fn gc(scope: &Scope<'_>, reason: GCReason) {
     unsafe { wrappers2::JS_GC(scope.cx_mut(), reason) }

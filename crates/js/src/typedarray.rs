@@ -269,24 +269,30 @@ impl<'s> Stack<'s, ArrayBuffer> {
     ///
     /// This is the WHATWG abstract operation `TransferArrayBuffer`: the returned
     /// buffer holds the receiver's bytes and the receiver is left detached
-    /// (zero-length). The receiver must not already be detached.
-    ///
-    /// The contents are copied rather than moved. A zero-copy steal/adopt is
-    /// possible (`StealArrayBufferContents` + `NewArrayBufferWithContents`) but
-    /// the adopt half lives in an awkward-to-reach glue module; the copy is
-    /// correct and the streams paths transfer small chunks.
+    /// (zero-length). The receiver must not already be detached. The contents are
+    /// moved, not copied.
     pub fn transfer(self, scope: &'s Scope<'_>) -> Result<Self, ExnThrown> {
-        // `CopyArrayBuffer` of a zero-length buffer can yield null (no pending
-        // exception), which would surface as a spurious `ExnThrown`; hand back a
-        // fresh empty buffer instead. The receiver is still detached, matching
-        // `TransferArrayBuffer`'s observable effect.
-        if self.byte_length() == 0 {
+        let length = self.byte_length();
+        // A zero-length buffer may have no contents to steal. Hand back a fresh empty buffer
+        // instead. The receiver is still detached, matching `TransferArrayBuffer`'s observable
+        // effect.
+        if length == 0 {
             self.detach(scope)?;
             return Self::new(scope, 0);
         }
-        let copy = Self::copy_from(scope, self.handle())?;
-        self.detach(scope)?;
-        Ok(copy)
+        // SAFETY: `self` is a rooted `ArrayBuffer`. Stealing detaches it and returns its
+        // contents, or null with an exception pending.
+        let contents =
+            unsafe { wrappers2::StealArrayBufferContents(scope.cx_mut(), self.handle()) };
+        if contents.is_null() {
+            return Err(ExnThrown);
+        }
+        // SAFETY: `contents` holds `length` bytes allocated by the JS allocator, as
+        // `StealArrayBufferContents` returns them. The call takes ownership of `contents`,
+        // including freeing it if creating the buffer fails.
+        let obj =
+            unsafe { wrappers2::NewArrayBufferWithContents(scope.cx_mut(), length, contents) };
+        root_or_throw(scope, obj)
     }
 
     /// Clone the region `[byte_offset, byte_offset + length)` of this buffer into

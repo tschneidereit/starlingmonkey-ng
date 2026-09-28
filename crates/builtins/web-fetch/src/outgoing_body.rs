@@ -132,13 +132,33 @@ fn outgoing_body_inner(
     }
 }
 
-/// State for the body pump: the reader being drained and the channel's write
-/// end. The sender is dropped (closing the body) when the stream ends or errors.
+/// State for the body pump: the reader being drained, the channel's write end, and the bytes read
+/// but not yet sent. The sender is taken out while a send waits for channel capacity, and dropped
+/// (closing the body) when the stream ends or errors.
 #[jsclass(hidden)]
 pub struct OutgoingBodyPump {
     reader: Heap<DefaultReaderImpl>,
     #[no_trace]
     sender: Option<BodySender>,
+    /// Bytes of the chunks read since the last send.
+    #[no_trace]
+    batch: Vec<u8>,
+    /// How the stream ended, once its close or error steps ran, or a chunk was not a
+    /// `Uint8Array`.
+    #[no_trace]
+    end: Option<StreamEnd>,
+    /// Whether a read request is waiting for a chunk.
+    #[no_trace]
+    reading: bool,
+    /// Whether [`run`] is on the stack.
+    #[no_trace]
+    running: bool,
+}
+
+/// How a pumped stream ended.
+enum StreamEnd {
+    Closed,
+    Errored(String),
 }
 
 #[jsmethods]
@@ -149,6 +169,10 @@ impl OutgoingBodyPump {
         OutgoingBodyPumpImpl {
             reader: Heap::default(),
             sender: None,
+            batch: Vec::new(),
+            end: None,
+            reading: false,
+            running: false,
         }
     }
 }
@@ -217,19 +241,100 @@ fn pump_body_from_stream(
     let state = create_instance_with::<OutgoingBodyPumpImpl>(scope, |_| OutgoingBodyPumpImpl {
         reader: Heap::from(reader),
         sender: Some(sender),
+        batch: Vec::new(),
+        end: None,
+        reading: false,
+        running: false,
     })?;
-    read_next(scope, &state)?;
+    run(scope, &state);
     Ok(body)
 }
 
-/// The pump's native read-request steps. Each chunk pauses the loop until the
-/// channel accepted it (`spawn_send` resumes via [`read_next`]), so the pump
-/// never outruns the peer and queued chunks cannot recurse.
+/// The most bytes the pump reads into one batch before sending it.
+const BATCH_LIMIT: usize = 64 * 1024;
+
+/// The pump's native read-request steps. Each records what it received in the pump's state and
+/// then calls [`run`], which does nothing when the step ran from inside it.
 const PUMP_STEPS: NativeReadSteps = NativeReadSteps {
     chunk: pump_chunk_step,
     close: pump_close_step,
     error: pump_error_step,
 };
+
+/// Advance the pump. Reads chunks into the batch for as long as reads complete synchronously and
+/// the batch is below [`BATCH_LIMIT`], then sends the batch once a read has to wait, the batch is
+/// full, or the stream has ended. A batch the channel accepts right away is followed by more
+/// reads. Otherwise the pump waits until the channel accepts it (`spawn_send` resumes it), so it
+/// never outruns the peer. At most one read or send is outstanding at a time.
+fn run(scope: &Scope<'_>, state: &OutgoingBodyPump<'_>) {
+    if state.data().running {
+        return;
+    }
+    state.data_mut().running = true;
+    loop {
+        while can_read(state) {
+            state.data_mut().reading = true;
+            if read_next(scope, state).is_err() {
+                js::exception::report_and_clear(scope, "reading a request or response body");
+                state.data_mut().reading = false;
+                fail_body(state, "the body stream could not be read");
+            }
+            if state.data().reading {
+                break;
+            }
+        }
+        if !send_batch(scope, state) {
+            break;
+        }
+    }
+    state.data_mut().running = false;
+}
+
+/// Whether the pump may issue another read: the channel is not waiting for a send, the stream has
+/// not ended, no read is outstanding, and the batch has room.
+fn can_read(state: &OutgoingBodyPump<'_>) -> bool {
+    let data = state.data();
+    data.sender.is_some() && data.end.is_none() && !data.reading && data.batch.len() < BATCH_LIMIT
+}
+
+/// Send the batch, or end the body, if there is reason to. Returns whether [`run`] should continue
+/// reading: true if the channel accepted the batch right away.
+fn send_batch(scope: &Scope<'_>, state: &OutgoingBodyPump<'_>) -> bool {
+    let mut data = state.data_mut();
+    if data.sender.is_none() {
+        // A send is waiting for capacity, or the body is done.
+        return false;
+    }
+    let ready = data.reading || data.end.is_some() || data.batch.len() >= BATCH_LIMIT;
+    if !data.batch.is_empty() && ready {
+        let batch = std::mem::take(&mut data.batch);
+        let sent = data
+            .sender
+            .as_mut()
+            .expect("checked above")
+            .try_send_chunk(batch);
+        drop(data);
+        return match sent {
+            Ok(()) => true,
+            Err(batch) => {
+                spawn_send(scope, state, Send::Chunk(batch));
+                false
+            }
+        };
+    }
+    if data.batch.is_empty() {
+        match data.end.take() {
+            // End of body: dropping the sender closes the channel.
+            Some(StreamEnd::Closed) => data.sender = None,
+            Some(StreamEnd::Errored(message)) => {
+                drop(data);
+                spawn_send(scope, state, Send::Error(message));
+            }
+            None => {}
+        }
+    }
+    false
+}
 
 /// Issue the next internal read, delivering to the pump's steps.
 fn read_next(scope: &Scope<'_>, state: &OutgoingBodyPump<'_>) -> Result<(), ExnThrown> {
@@ -237,16 +342,16 @@ fn read_next(scope: &Scope<'_>, state: &OutgoingBodyPump<'_>) -> Result<(), ExnT
     native_reader_read(scope, reader, PUMP_STEPS, state.as_object())
 }
 
-/// A pending send to the body channel: a data chunk (after which the next chunk
-/// is read) or a terminal error (after which the pump stops).
+/// A pending send to the body channel: a batch of bytes (after which the pump reads on) or a
+/// terminal error (after which the pump stops).
 enum Send {
     Chunk(Vec<u8>),
     Error(String),
 }
 
-/// Chunk steps: send a `Uint8Array` chunk to the channel; anything else aborts
-/// the body (the spec's transmit-body chunk steps treat a non-`Uint8Array`
-/// chunk as a fatal error).
+/// Chunk steps: append a `Uint8Array` chunk's bytes to the batch. Anything else ends the body with
+/// an error, since the spec's transmit-body chunk steps treat a non-`Uint8Array` chunk as a fatal
+/// error.
 fn pump_chunk_step(
     scope: &Scope<'_>,
     payload: Object<'_>,
@@ -255,34 +360,47 @@ fn pump_chunk_step(
     let state = payload
         .cast::<OutgoingBodyPump>()
         .expect("payload is an OutgoingBodyPump");
-    let chunk_array = Uint8Array::from_jsval(scope, chunk, ()).ok();
-    match chunk_array {
-        // SAFETY: the slice is copied immediately; nothing here can GC or
-        // detach the chunk's buffer.
-        Some(array) => {
-            let bytes = unsafe { array.as_slice() }.to_vec();
-            spawn_send(scope, &state, Send::Chunk(bytes));
+    let mut data = state.data_mut();
+    data.reading = false;
+    match Uint8Array::from_jsval(scope, chunk, ()) {
+        // The spec's "a copy of chunk": the chunk's bytes are copied once, into the batch.
+        Ok(array) => {
+            // SAFETY: the view's bytes are only read by the copy, which cannot run JS or trigger a
+            // GC.
+            let bytes = unsafe { array.as_array_buffer_view().bytes() };
+            // Appending to a batch reserves room up to the limit, so the batch is copied once
+            // rather than through every doubling of its capacity.
+            if !data.batch.is_empty() && data.batch.capacity() - data.batch.len() < bytes.len() {
+                let wanted = BATCH_LIMIT.max(data.batch.len() + bytes.len()) - data.batch.len();
+                data.batch.reserve_exact(wanted);
+            }
+            data.batch.extend_from_slice(bytes);
         }
-        None => spawn_send(
-            scope,
-            &state,
-            Send::Error("Body stream chunks must be of type Uint8Array".to_string()),
-        ),
+        Err(_) => {
+            data.end = Some(StreamEnd::Errored(
+                "Body stream chunks must be of type Uint8Array".to_string(),
+            ))
+        }
     }
+    drop(data);
+    run(scope, &state);
     Ok(())
 }
 
-/// Close steps: end of body — drop the sender, closing the channel.
+/// Close steps: end of body, after the batch is sent.
 fn pump_close_step(scope: &Scope<'_>, payload: Object<'_>) -> Result<(), ExnThrown> {
     let state = payload
         .cast::<OutgoingBodyPump>()
         .expect("payload is an OutgoingBodyPump");
-    let _ = scope;
-    state.data_mut().sender = None;
+    let mut data = state.data_mut();
+    data.reading = false;
+    data.end = Some(StreamEnd::Closed);
+    drop(data);
+    run(scope, &state);
     Ok(())
 }
 
-/// Error steps: abort the body with the stream's error.
+/// Error steps: abort the body with the stream's error, after the batch is sent.
 fn pump_error_step(
     scope: &Scope<'_>,
     payload: Object<'_>,
@@ -291,24 +409,36 @@ fn pump_error_step(
     let state = payload
         .cast::<OutgoingBodyPump>()
         .expect("payload is an OutgoingBodyPump");
-    spawn_send(
-        scope,
-        &state,
-        Send::Error("body stream errored".to_string()),
-    );
+    let mut data = state.data_mut();
+    data.reading = false;
+    data.end = Some(StreamEnd::Errored("body stream errored".to_string()));
+    drop(data);
+    run(scope, &state);
     Ok(())
 }
 
+/// End the pump's body with an error, so the transport fails the send instead of treating the
+/// body as complete.
+fn fail_body(state: &OutgoingBodyPump<'_>, message: &str) {
+    if let Some(sender) = state.data_mut().sender.take() {
+        sender.fail(message.to_string());
+    }
+}
+
 /// Send `item` to the body channel (taking the sender out of the pump), awaiting
-/// channel capacity for backpressure. For a chunk, the next `read()` is issued
-/// only once the chunk is accepted (so the pump never outruns the peer); for an
-/// error, the pump stops and the sender is dropped (closing the channel after the
-/// queued error).
+/// channel capacity for backpressure. After a batch is accepted, the pump runs again.
+/// After an error, the pump stops and the sender is dropped (closing the channel after
+/// the queued error).
 fn spawn_send(scope: &Scope<'_>, state: &OutgoingBodyPump<'_>, item: Send) {
-    let Some(sender) = state.data_mut().sender.take() else {
+    if state.data().sender.is_none() {
+        return;
+    }
+    let Ok(promise) = Promise::new_pending(scope) else {
+        js::exception::report_and_clear(scope, "sending a request or response body");
+        fail_body(state, "the body could not be sent");
         return;
     };
-    let Ok(promise) = Promise::new_pending(scope) else {
+    let Some(sender) = state.data_mut().sender.take() else {
         return;
     };
     let _ = promise.set_any_is_handled(scope);
@@ -331,10 +461,8 @@ fn spawn_send(scope: &Scope<'_>, state: &OutgoingBodyPump<'_>, item: Send) {
             if is_chunk {
                 let state = state.get(scope);
                 if accepted {
-                    // For an accepted chunk, restore the sender and read the next
-                    // one.
                     state.data_mut().sender = Some(sender);
-                    let _ = read_next(scope, &state);
+                    run(scope, &state);
                 } else {
                     // A refused chunk means the receiver is gone: the peer stopped reading the
                     // body, typically because the client disconnected. Cancel the stream, and

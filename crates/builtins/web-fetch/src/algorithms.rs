@@ -14,6 +14,7 @@ use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::{ArrayBuffer, Promise, Uint8Array};
+use smallvec::SmallVec;
 use web_streams::readable::readable_stream::ReadableStream;
 
 /// The source of a [`Body`]'s bytes.
@@ -169,7 +170,7 @@ pub(crate) fn contains(list: &HeaderList, name: &str) -> bool {
 
 /// <https://fetch.spec.whatwg.org/#concept-header-list-get>
 /// To get a header name name from a header list list, run these steps. They return null or a header value.
-pub(crate) fn get_header_name<'l>(list: &'l HeaderList, name: &str) -> Option<Cow<'l, str>> {
+pub(crate) fn get_header_for_name<'l>(list: &'l HeaderList, name: &str) -> Option<Cow<'l, str>> {
     debug_assert!(is_header_name(name));
 
     // Step 1: If _list_ `does not contain` _name_, then return null.
@@ -178,9 +179,16 @@ pub(crate) fn get_header_name<'l>(list: &'l HeaderList, name: &str) -> Option<Co
     //     `byte-case-insensitive` match for _name_, separated from each other by 0x2C 0x20, in
     //     order.
     // A single value — the common case — is borrowed rather than combined into a fresh allocation.
+    // We lowercase _name_ once, so each comparison lowercases only the list's names.
+    let lowercase: SmallVec<[u8; 64]> = name.bytes().map(|b| b.to_ascii_lowercase()).collect();
     let mut values = list
         .iter()
-        .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+        .filter(|(n, _)| {
+            n.len() == lowercase.len()
+                && n.bytes()
+                    .zip(&lowercase)
+                    .all(|(a, &b)| a.to_ascii_lowercase() == b)
+        })
         .map(|(_, v)| v.as_str());
     let first = values.next()?;
     let Some(second) = values.next() else {
@@ -300,7 +308,7 @@ pub(crate) fn sort_and_combine_a_header_list(list: &HeaderList) -> HeaderList {
             // Step 3.2.1: Let _value_ be the result of `getting` _name_ from _list_.
             // Step 3.2.2: `Assert`: _value_ is non-null.
             // Step 3.2.3: `Append` (_name_, _value_) to _headers_.
-            let value = get_header_name(list, &name)
+            let value = get_header_for_name(list, &name)
                 .expect("name is in list")
                 .into_owned();
             headers.push((name, value));
@@ -813,7 +821,7 @@ pub(crate) fn append_to_headers(
     {
         let safelisted = {
             let data = headers.data();
-            let existing = get_header_name(&data.header_list, &name);
+            let existing = get_header_for_name(&data.header_list, &name);
             is_no_cors_safelisted_request_header_after_append(&name, existing.as_deref(), &value)
         };
         if !safelisted {
@@ -951,7 +959,7 @@ pub(crate) fn refill_headers_from_own_list(headers: &Headers<'_>) {
             Guard::RequestNoCors => {
                 let safelisted = {
                     let data = headers.data();
-                    let existing = get_header_name(&data.header_list, &name);
+                    let existing = get_header_for_name(&data.header_list, &name);
                     is_no_cors_safelisted_request_header_after_append(
                         &name,
                         existing.as_deref(),
@@ -1017,7 +1025,11 @@ pub(crate) enum ConsumeType {
 /// UTF-8 decode: strip a leading UTF-8 BOM, then decode (malformed sequences become U+FFFD).
 fn utf8_decode(bytes: &[u8]) -> Cow<'_, str> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
-    String::from_utf8_lossy(bytes)
+    // Validating first is much faster than `from_utf8_lossy` for the common, valid case.
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Cow::Borrowed(text),
+        Err(_) => String::from_utf8_lossy(bytes),
+    }
 }
 
 /// Run `convertBytesToJSValue` for the given `ConsumeType`.

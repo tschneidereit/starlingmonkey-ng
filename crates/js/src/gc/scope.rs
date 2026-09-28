@@ -9,19 +9,19 @@
 //!
 //! # Design
 //!
-//! Each scope owns its own [`ScopeAlloc`](mozjs::gc::pool::ScopeAlloc) — a
-//! per-scope bump allocator that draws pages from the [`HandlePool`]
-//! freelist. This ensures that different scopes have disjoint storage:
-//! dropping one scope cannot invalidate another scope's handles.
+//! Each scope roots through its own [`ScopeAlloc`](mozjs::gc::pool::ScopeAlloc). The innermost
+//! live scope pushes its roots onto the [`HandlePool`]'s root stack, and the stack is truncated
+//! when the scope drops. A scope that roots a value while a scope nested in it is alive puts it in
+//! pages of its own instead, so dropping one scope cannot invalidate another scope's handles.
 //!
 //! The pool is wrapped in a `PoolRooter` that sits on the `autoGCRooters`
 //! stack for the entire lifetime of the [`Runtime`]. During GC, the
-//! rooter walks all active scope allocators and traces their live slots.
+//! rooter traces the root stack and every scope's own pages.
 //!
 //! # Type hierarchy
 //!
 //! - [`Scope<'cx>`] — the core scope type. Holds a `JSContext` pointer
-//!   and a per-scope bump allocator. All rooting methods and `cx()`/`cx_mut()`
+//!   and the scope's root allocation. All rooting methods and `cx()`/`cx_mut()`
 //!   access are defined here. This is the parameter type for most
 //!   [`mozjs::js`](mozjs::js) API functions.
 //!
@@ -32,17 +32,16 @@
 //!   - [`EnteredRealm`]: a realm is active. `Deref`s to `&Scope<'cx>`,
 //!     providing all rooting methods.
 //!
-//! - [`InnerScope<'parent>`] — a nested scope with its own allocator.
+//! - [`InnerScope<'parent>`]: a nested scope with its own root allocation.
 //!   `Deref`s to `&Scope<'parent>`, so it can be used wherever `&Scope`
 //!   is expected. Values rooted via the inner scope are freed when it
 //!   drops, independently of the parent scope's roots.
 //!
 //! # Nested scopes
 //!
-//! Call [`Scope::inner_scope`] to create a child scope. Because each
-//! scope owns separate storage, rooting on the parent while an inner
-//! scope is alive is safe — the parent's handles are not affected when
-//! the inner scope drops.
+//! Call [`Scope::inner_scope`] to create a child scope. Rooting on the parent while an inner
+//! scope is alive is safe: those roots go to the parent's own pages, so the parent's handles are
+//! not affected when the inner scope drops.
 //!
 //! # Example
 //!
@@ -87,9 +86,8 @@ pub struct EnteredRealm(());
 
 /// The core scope type for rooting GC values.
 ///
-/// Each `Scope` owns its own [`ScopeAlloc`] — a per-scope bump allocator
-/// backed by pages from the [`HandlePool`]. This ensures that different
-/// scopes have disjoint storage and cannot corrupt each other's roots.
+/// Each `Scope` roots through its own [`ScopeAlloc`], which keeps its roots apart from every
+/// other scope's, so no scope's drop can corrupt another scope's roots.
 ///
 /// Both [`RootScope<'cx, EnteredRealm>`] and [`InnerScope`] deref to
 /// `&Scope`, so all API functions that take `scope: &Scope<'_>` work
@@ -104,22 +102,17 @@ pub struct Scope<'cx> {
     /// mutability (same rationale as `RootScope`).
     raw_cx: UnsafeCell<*mut RawJSContext>,
 
-    /// Per-scope bump allocator, boxed for stable heap address.
-    ///
-    /// The `Box` guarantees that the `ScopeAlloc`'s address doesn't change
-    /// when the `Scope` is moved (e.g. during `RootScope::enter_realm`).
-    /// This is essential because the pool's intrusive linked list stores
-    /// raw pointers to active allocators.
+    /// This scope's root allocation.
     ///
     /// Wrapped in `UnsafeCell` because rooting methods take `&self`
     /// (to allow multiple live handles) but the allocator needs mutation.
-    alloc: UnsafeCell<Box<ScopeAlloc>>,
+    alloc: UnsafeCell<ScopeAlloc>,
 
     _phantom: PhantomData<&'cx mut ()>,
 }
 
 impl<'cx> Scope<'cx> {
-    /// Create a new Scope with its own boxed allocator.
+    /// Create a new Scope, nested in every live scope.
     fn new(raw_cx: *mut RawJSContext) -> Self {
         let pool = super::pool::current_pool();
         // SAFETY: The pool pointer is valid for the lifetime of the Runtime
@@ -140,8 +133,7 @@ impl<'cx> Scope<'cx> {
     ///    immediately for a single `alloc()` call and released.
     #[allow(clippy::mut_from_ref)]
     fn alloc_mut(&self) -> &mut ScopeAlloc {
-        // SAFETY: The Box provides a stable heap address. We deref through
-        // the UnsafeCell to get the Box, then deref the Box to get the alloc.
+        // SAFETY: the borrow is never stored, see above.
         unsafe { &mut *self.alloc.get() }
     }
 
@@ -262,15 +254,14 @@ impl<'cx> Scope<'cx> {
 
     /// Create a nested inner scope.
     ///
-    /// The inner scope has its own allocator backed by separate pages. Values
-    /// rooted in the inner scope are freed when it drops, without affecting
+    /// Values rooted in the inner scope are freed when it drops, without affecting
     /// the parent scope's roots.
     ///
     /// The returned [`InnerScope`] dereferences to [`Scope`] and can be used
     /// anywhere a `&Scope` is accepted.
     ///
-    /// Handles rooted in an inner scope cannot outlive it — their slots are
-    /// returned to the pool when the inner scope drops:
+    /// Handles rooted in an inner scope cannot outlive it, since their slots are
+    /// released when the inner scope drops:
     ///
     /// ```compile_fail,E0597
     /// fn escape(scope: &js::gc::scope::Scope<'_>, v: js::native::Value) {
@@ -281,7 +272,6 @@ impl<'cx> Scope<'cx> {
     ///     let _ = h.get();
     /// }
     /// ```
-    // TODO: can we make InnerScope cheaper by sharing the allocator and just tracking a "high water mark" for roots at the time of creation, freeing anything above that on drop?
     pub fn inner_scope(&self) -> InnerScope<'_> {
         InnerScope {
             scope: Scope::new(unsafe { *self.raw_cx.get() }),
@@ -483,14 +473,14 @@ impl<'cx, S> RootScope<'cx, S> {
 }
 
 // ---------------------------------------------------------------------------
-// InnerScope — nested scope with its own allocator
+// InnerScope: nested scope
 // ---------------------------------------------------------------------------
 
-/// A nested scope that owns its own allocator backed by separate pages.
+/// A nested scope, whose roots are freed when it drops.
 ///
 /// Created by [`Scope::inner_scope`]. Dereferences to `&Scope`, so all
-/// rooting methods and `cx()`/`cx_mut()` are available. Each inner scope
-/// has disjoint storage from its parent, allowing concurrent use of both.
+/// rooting methods and `cx()`/`cx_mut()` are available. Its roots are kept
+/// apart from its parent's, so both can be used while it is alive.
 pub struct InnerScope<'parent> {
     scope: Scope<'parent>,
 }

@@ -360,11 +360,25 @@ fn test_scope_gc_zeal() {
                 let arr = Array::with_contents(&inner, &[sv, iv]).unwrap();
                 assert_eq!(arr.length(&inner).unwrap(), 2);
                 let got = arr.get_element(&inner, 0).unwrap();
-                let got_str = js::JSString::from_handle(
-                    inner.root_string(std::ptr::NonNull::new(got.to_string()).unwrap()),
+                let got_str = js::JSString::from_non_null(
+                    &inner,
+                    std::ptr::NonNull::new(got.to_string()).unwrap(),
                 );
                 assert_eq!(got_str.to_utf8(&inner).unwrap(), "compact_contents");
                 assert_eq!(arr.get_element(&inner, 1).unwrap().to_int32(), 7);
+            }
+
+            // Each `&str` element allocates a fresh string when converted, so the
+            // strings converted first must already be traced while the later
+            // ones allocate.
+            {
+                let words = ["alpha", "beta", "gamma", "delta"];
+                let arr = Array::with_contents(&inner, &words).unwrap();
+                for (i, word) in words.iter().enumerate() {
+                    let got = arr.get_element(&inner, i as u32).unwrap();
+                    let got = js::JSString::from_value(&inner, got).unwrap();
+                    assert_eq!(got.to_utf8(&inner).unwrap(), *word);
+                }
             }
 
             reset_zeal(&inner);
@@ -460,5 +474,62 @@ fn test_scope_gc_zeal() {
 
             reset_zeal(&scope);
         }
+    }
+}
+
+/// Roots survive a compacting GC when a parent scope roots values while a nested scope is alive,
+/// when scopes drop in a different order than they were created in, and when a scope's roots
+/// span several pages of the root stack.
+#[test]
+fn scope_roots_survive_nesting_out_of_order_drops_and_page_spans() {
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
+    let scope = rt.default_global();
+    let compact = |s: &js::gc::scope::Scope<'_>| {
+        gc::prepare_for_full_gc(s);
+        gc::non_incremental_gc(s, GCOptions::Shrink, GCReason::API);
+    };
+
+    // The parent roots a value while a nested scope is alive, and again after it dropped.
+    let before = js::JSString::from_str(&scope, "before").unwrap();
+    let during;
+    {
+        let inner = scope.inner_scope();
+        let inner_value = js::JSString::from_str(&inner, "inner").unwrap();
+        during = js::JSString::from_str(&scope, "during").unwrap();
+        compact(&inner);
+        assert_eq!(inner_value.to_utf8(&inner).unwrap(), "inner");
+    }
+    let after = js::JSString::from_str(&scope, "after").unwrap();
+    compact(&scope);
+    assert_eq!(before.to_utf8(&scope).unwrap(), "before");
+    assert_eq!(during.to_utf8(&scope).unwrap(), "during");
+    assert_eq!(after.to_utf8(&scope).unwrap(), "after");
+
+    // A scope drops while a scope created after it is still alive.
+    // SAFETY: a realm is entered, and both scopes drop before `scope` is used again.
+    unsafe {
+        let raw_cx = scope.raw_cx_no_gc();
+        let first = js::gc::scope::RootScope::from_current_realm(raw_cx);
+        let second = js::gc::scope::RootScope::from_current_realm(raw_cx);
+        let first_value = js::JSString::from_str(&first, "first").unwrap();
+        let second_value = js::JSString::from_str(&second, "second").unwrap();
+        assert_eq!(first_value.to_utf8(&first).unwrap(), "first");
+        drop(first);
+        compact(&second);
+        assert_eq!(second_value.to_utf8(&second).unwrap(), "second");
+    }
+    let later = js::JSString::from_str(&scope, "later").unwrap();
+    compact(&scope);
+    assert_eq!(later.to_utf8(&scope).unwrap(), "later");
+    assert_eq!(after.to_utf8(&scope).unwrap(), "after");
+
+    // More roots than fit in one page of the root stack.
+    let inner = scope.inner_scope();
+    let values: Vec<_> = (0..300)
+        .map(|i| js::JSString::from_str(&inner, &format!("value {i}")).unwrap())
+        .collect();
+    compact(&inner);
+    for (i, value) in values.iter().enumerate() {
+        assert_eq!(value.to_utf8(&inner).unwrap(), format!("value {i}"));
     }
 }

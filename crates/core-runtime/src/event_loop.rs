@@ -54,7 +54,7 @@ pub mod timer;
 
 use platform::clock::Instant;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -235,6 +235,76 @@ struct TaskEntry {
     deadline: Option<Instant>,
 }
 
+impl TaskEntry {
+    /// The entry's position in [`TaskQueue::ready`]: non-timer tasks first in allocation
+    /// order, then timers by deadline, ties broken by allocation order.
+    fn ready_key(&self) -> (Option<Instant>, u64) {
+        (self.deadline, self.id.0)
+    }
+}
+
+/// The live tasks, indexed so that lookups by id, the next timer, and the ready tasks in
+/// dispatch order are found without scanning.
+#[derive(Default)]
+struct TaskQueue {
+    /// Every live task by id.
+    entries: HashMap<TaskId, TaskEntry>,
+    /// The ready tasks, by [`TaskEntry::ready_key`].
+    ready: BTreeSet<(Option<Instant>, u64)>,
+    /// The timers that are not ready yet, by deadline then id.
+    timers: BTreeSet<(Instant, u64)>,
+}
+
+impl TaskQueue {
+    fn insert(&mut self, entry: TaskEntry) {
+        if entry.ready {
+            self.ready.insert(entry.ready_key());
+        } else if let Some(deadline) = entry.deadline {
+            self.timers.insert((deadline, entry.id.0));
+        }
+        self.entries.insert(entry.id, entry);
+    }
+
+    fn remove(&mut self, id: TaskId) -> Option<TaskEntry> {
+        let entry = self.entries.remove(&id)?;
+        if entry.ready {
+            self.ready.remove(&entry.ready_key());
+        } else if let Some(deadline) = entry.deadline {
+            self.timers.remove(&(deadline, id.0));
+        }
+        Some(entry)
+    }
+
+    /// Mark `id` ready. Returns whether a task not yet ready was found.
+    fn mark_ready(&mut self, id: TaskId) -> bool {
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return false;
+        };
+        if entry.ready {
+            return false;
+        }
+        entry.ready = true;
+        if let Some(deadline) = entry.deadline {
+            self.timers.remove(&(deadline, id.0));
+        }
+        self.ready.insert(entry.ready_key());
+        true
+    }
+
+    /// Mark every timer whose deadline is at or before `now` ready, returning how many.
+    fn expire_timers(&mut self, now: Instant) -> usize {
+        let mut count = 0;
+        while let Some(&(deadline, id)) = self.timers.first() {
+            if deadline > now {
+                break;
+            }
+            self.mark_ready(TaskId(id));
+            count += 1;
+        }
+        count
+    }
+}
+
 // ---------------------------------------------------------------------------
 // EventLoop
 // ---------------------------------------------------------------------------
@@ -267,15 +337,14 @@ pub struct EventLoop {
     loop_id: u64,
     /// Monotonically increasing counter for generating unique [`TaskId`]s.
     next_id: Cell<u64>,
-    /// All live tasks. Order is not significant — tasks are looked up by
-    /// [`TaskId`].
-    tasks: RefCell<Vec<TaskEntry>>,
+    /// All live tasks.
+    tasks: RefCell<TaskQueue>,
     /// HTML's per-loop "map of setTimeout and setInterval IDs": the timer ids
     /// JS sees, mapped to the internal task they control.
     js_timers: RefCell<HashMap<u64, TaskId>>,
     /// Scratch buffer for [`step`](Self::step)'s per-batch dispatch list,
     /// reused across steps so the hot path stays allocation-free.
-    batch_buf: RefCell<Vec<(Option<Instant>, TaskId)>>,
+    batch_buf: RefCell<Vec<TaskId>>,
     /// Set by [`request_stop`](Self::request_stop) to end this loop after its current step,
     /// overriding all other signals of event loop activity, such as pending async tasks and
     /// timers, or active interest.
@@ -298,7 +367,7 @@ impl EventLoop {
         Self {
             loop_id: NEXT_LOOP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             next_id: Cell::new(0),
-            tasks: RefCell::new(Vec::new()),
+            tasks: RefCell::new(TaskQueue::default()),
             js_timers: RefCell::new(HashMap::new()),
             batch_buf: RefCell::new(Vec::new()),
             stop_requested: Cell::new(false),
@@ -315,7 +384,7 @@ impl EventLoop {
     /// Returns the [`TaskId`] assigned to this task.
     pub fn queue(&self, task: Box<dyn Task>) -> TaskId {
         let id = self.next_task_id();
-        self.tasks.borrow_mut().push(TaskEntry {
+        self.tasks.borrow_mut().insert(TaskEntry {
             id,
             task,
             ready: false,
@@ -330,7 +399,7 @@ impl EventLoop {
     /// external event (e.g. resolved promises, `queueMicrotask` work).
     pub fn queue_ready(&self, task: Box<dyn Task>) -> TaskId {
         let id = self.next_task_id();
-        self.tasks.borrow_mut().push(TaskEntry {
+        self.tasks.borrow_mut().insert(TaskEntry {
             id,
             task,
             ready: true,
@@ -347,7 +416,7 @@ impl EventLoop {
     /// similar, use a deadline of `Instant::now()`.
     pub fn queue_timer(&self, task: Box<dyn Task>, deadline: Instant) -> TaskId {
         let id = self.next_task_id();
-        self.tasks.borrow_mut().push(TaskEntry {
+        self.tasks.borrow_mut().insert(TaskEntry {
             id,
             task,
             ready: false,
@@ -364,13 +433,7 @@ impl EventLoop {
     /// in the queue (already run, or currently being executed by the driver)
     /// is left alone.
     pub fn cancel_if_queued(&self, id: TaskId) -> bool {
-        let mut tasks = self.tasks.borrow_mut();
-        if let Some(pos) = tasks.iter().position(|e| e.id == id) {
-            tasks.swap_remove(pos);
-            true
-        } else {
-            false
-        }
+        self.tasks.borrow_mut().remove(id).is_some()
     }
 
     /// Queue a `setTimeout`/`setInterval` task under a fresh JS timer id.
@@ -401,7 +464,7 @@ impl EventLoop {
         if self.js_timers.borrow().get(&timer_id) != Some(&id) {
             return;
         }
-        self.tasks.borrow_mut().push(TaskEntry {
+        self.tasks.borrow_mut().insert(TaskEntry {
             id,
             task,
             ready: false,
@@ -450,9 +513,7 @@ impl EventLoop {
     /// Has no effect if the task ID is not found (the task may have
     /// already been cancelled or run).
     pub fn signal_ready(&self, id: TaskId) {
-        let mut tasks = self.tasks.borrow_mut();
-        if let Some(entry) = tasks.iter_mut().find(|e| e.id == id) {
-            entry.ready = true;
+        if self.tasks.borrow_mut().mark_ready(id) {
             self.notify.notify(1);
         }
     }
@@ -465,12 +526,8 @@ impl EventLoop {
     /// tasks in allocation order, then expired timers by deadline.
     pub fn pop_ready(&self) -> Option<(TaskId, Box<dyn Task>)> {
         let mut tasks = self.tasks.borrow_mut();
-        let (pos, _) = tasks
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.ready)
-            .min_by_key(|(_, e)| (e.deadline, e.id.0))?;
-        let entry = tasks.swap_remove(pos);
+        let &(_, id) = tasks.ready.first()?;
+        let entry = tasks.remove(TaskId(id)).expect("ready tasks are live");
         Some((entry.id, entry.task))
     }
 
@@ -480,17 +537,7 @@ impl EventLoop {
     /// Returns the number of timers that became ready.
     // TODO: consider merging with `time_to_next_timer` and returning the tasks directly.
     pub fn advance_timers(&self) -> usize {
-        let now = Instant::now();
-        let mut count = 0;
-        for entry in self.tasks.borrow_mut().iter_mut() {
-            if let Some(deadline) = entry.deadline {
-                if !entry.ready && deadline <= now {
-                    entry.ready = true;
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.tasks.borrow_mut().expire_timers(Instant::now())
     }
 
     /// Returns the duration until the next timer fires, or `None` if
@@ -500,38 +547,28 @@ impl EventLoop {
     /// is already expired and [`advance_timers`](Self::advance_timers)
     /// should be called.
     pub fn time_to_next_timer(&self) -> Option<Duration> {
-        let now = Instant::now();
-        self.tasks
-            .borrow()
-            .iter()
-            .filter_map(|e| {
-                if !e.ready {
-                    e.deadline.map(|d| d.saturating_duration_since(now))
-                } else {
-                    None
-                }
-            })
-            .min()
+        let &(deadline, _) = self.tasks.borrow().timers.first()?;
+        Some(deadline.saturating_duration_since(Instant::now()))
     }
 
     /// Returns `true` if there are any tasks (ready or not) in the queue.
     pub fn has_pending(&self) -> bool {
-        !self.tasks.borrow().is_empty()
+        !self.tasks.borrow().entries.is_empty()
     }
 
     /// Returns `true` if at least one task is in the ready state.
     pub fn has_ready(&self) -> bool {
-        self.tasks.borrow().iter().any(|e| e.ready)
+        !self.tasks.borrow().ready.is_empty()
     }
 
     /// Returns the number of tasks currently queued (ready or not).
     pub fn len(&self) -> usize {
-        self.tasks.borrow().len()
+        self.tasks.borrow().entries.len()
     }
 
     /// Returns `true` if the event loop has no tasks.
     pub fn is_empty(&self) -> bool {
-        self.tasks.borrow().is_empty()
+        self.tasks.borrow().entries.is_empty()
     }
 
     // -----------------------------------------------------------------------
@@ -833,28 +870,18 @@ impl EventLoop {
         // polled and the platform reactor turns.
         //
         // Ready non-timer tasks go first in allocation order, then expired timers by deadline,
-        // ties broken the same way. The batch buffer is reused to keep the path allocation-free.
+        // ties broken the same way, which is the order of the ready set. The batch buffer is
+        // reused to keep the path allocation-free.
         let mut batch = self.batch_buf.take();
-        batch.extend(
-            self.tasks
-                .borrow()
-                .iter()
-                .filter(|entry| entry.ready)
-                .map(|entry| (entry.deadline, entry.id)),
-        );
-        batch.sort_unstable_by_key(|&(deadline, id)| (deadline, id.0));
+        batch.extend(self.tasks.borrow().ready.iter().map(|&(_, id)| TaskId(id)));
         let mut ran_any = false;
-        for &(_, id) in &batch {
+        for &id in &batch {
             // Take the task out before running it, ending the borrow: the
             // task's JS can re-enter this loop (setTimeout, clearTimeout)
             // through `with_active_event_loop`. Re-locate by id — an earlier
             // task in the batch may have cancelled this one.
-            let entry = {
-                let mut tasks = self.tasks.borrow_mut();
-                let Some(pos) = tasks.iter().position(|entry| entry.id == id && entry.ready) else {
-                    continue;
-                };
-                tasks.swap_remove(pos)
+            let Some(entry) = self.tasks.borrow_mut().remove(id) else {
+                continue;
             };
             if entry.task.run(scope, id).is_err() {
                 eprintln!("[event_loop] Task error (id={:?})", id);
@@ -895,7 +922,7 @@ impl EventLoop {
     /// allocation points, and no `tasks` borrow is held across a call into JS, so the borrow here
     /// cannot conflict.
     pub unsafe fn trace(&self, trc: *mut JSTracer) {
-        for entry in self.tasks.borrow().iter() {
+        for entry in self.tasks.borrow().entries.values() {
             entry.task.trace(trc);
         }
     }

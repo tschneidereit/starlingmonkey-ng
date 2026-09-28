@@ -12,7 +12,7 @@ use js::error::{throw_type_error, ExnThrown};
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
-use js::{Function, Object};
+use js::{Function, JSString, Object};
 
 use crate::algorithms;
 use crate::algorithms::sort_and_combine_a_header_list;
@@ -192,7 +192,11 @@ impl Headers {
 
     /// <https://fetch.spec.whatwg.org/#dom-headers-get>
     #[method]
-    pub fn get(&self, scope: &Scope<'_>, name: ByteString) -> Result<Option<String>, ExnThrown> {
+    pub fn get<'r>(
+        &self,
+        scope: &'r Scope<'_>,
+        name: ByteString,
+    ) -> Result<Option<JSString<'r>>, ExnThrown> {
         let name = name.as_str();
         // Step 1: If _name_ is not a `header name`, then `throw` a `TypeError`.
         if !algorithms::is_header_name(name) {
@@ -200,7 +204,9 @@ impl Headers {
         }
         // Step 2: Return the result of `getting` _name_ from `this`’s `header list`.
         let data = self.data();
-        Ok(algorithms::get_header_name(&data.header_list, name).map(std::borrow::Cow::into_owned))
+        algorithms::get_header_for_name(&data.header_list, name)
+            .map(|value| JSString::from_str(scope, &value))
+            .transpose()
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-headers-getsetcookie>

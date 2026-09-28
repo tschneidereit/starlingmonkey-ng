@@ -25,10 +25,9 @@ fn format_args(scope: &Scope<'_>, args: &CallArgs) -> String {
         // Fast path for strings; slow path calls JS ToString.
         let js_str = if val.is_string() {
             NonNull::new(val.to_string())
-                .map(|p| js::JSString::from_handle(scope.root_string(p)))
+                .map(|p| js::JSString::from_non_null(scope, p))
         } else {
-            let handle = scope.root_value(val);
-            js::JSString::from_value(scope, handle).ok()
+            js::JSString::from_value(scope, val).ok()
         };
         match js_str {
             Some(s) => match s.to_utf8(scope) {

@@ -364,6 +364,27 @@ impl<'s> Stack<'s, Object> {
         ExnThrown::check(ok)
     }
 
+    /// Define a property by key with a JS value and attribute flags.
+    #[inline]
+    pub fn define_value_by_id<'v>(
+        &self,
+        scope: &'v Scope<'_>,
+        id: HandleId,
+        value: impl ToJSVal<'v>,
+        attrs: c_uint,
+    ) -> Result<(), ExnThrown> {
+        let ok = unsafe {
+            wrappers2::JS_DefinePropertyById2(
+                scope.cx_mut(),
+                self.handle(),
+                id,
+                value.to_jsval_throwing(scope)?,
+                attrs,
+            )
+        };
+        ExnThrown::check(ok)
+    }
+
     /// Define an element by index with attribute flags.
     ///
     /// Installs an own data property without consulting the prototype chain or invoking setters.
@@ -686,6 +707,7 @@ impl<'s, 'v> FromJSVal<'s, 'v> for Stack<'s, Object> {
 /// # Safety
 ///
 /// - `obj` must be a valid, non-null JS object pointer.
+#[inline]
 pub unsafe fn get_object_class(obj: *mut JSObject) -> *const JSClass {
     mozjs::rust::get_object_class(obj)
 }
@@ -712,6 +734,31 @@ pub unsafe fn get_reserved_slot(obj: *mut JSObject, slot: u32) -> Value {
     let mut val = UndefinedValue();
     mozjs::glue::JS_GetReservedSlot(obj, slot, &mut val);
     val
+}
+
+/// Get the value stored in a reserved slot of a native (non-proxy) JS object.
+///
+/// Use this instead of [`get_reserved_slot`] for objects known to be native: it is inlined.
+///
+/// # Safety
+///
+/// - `obj` must be a valid, non-null pointer to a native JS object.
+/// - `slot` must be less than the number of reserved slots for the object's class, and less than
+///   16.
+#[inline]
+pub unsafe fn get_native_reserved_slot(obj: *mut JSObject, slot: u32) -> Value {
+    use mozjs::jsapi::JS::shadow;
+    debug_assert!(slot < reserved_slot_count(obj));
+    debug_assert!((slot as usize) < shadow::Object_MAX_FIXED_SLOTS);
+    // Native shape kinds have the low kind bit set.
+    debug_assert!(
+        (*(*(obj as *const shadow::Object)).shape).immutableFlags >> shadow::Shape_KIND_SHIFT & 1
+            == 1
+    );
+    // The first 16 reserved slots of a native object are fixed slots, which directly follow the
+    // object header.
+    let fixed_slots = (obj as *const u8).add(size_of::<shadow::NativeObject>()) as *const Value;
+    *fixed_slots.add(slot as usize)
 }
 
 /// Set a value in a reserved slot of a JS object.

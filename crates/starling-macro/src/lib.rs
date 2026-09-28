@@ -407,26 +407,38 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
         quote! {}
     };
 
-    // Generate the `install_unforgeable` ClassDef method. It chains to the
-    // parent interface (for inherited unforgeable accessors) and delegates own
-    // accessors to the `__UnforgeableRegistrar` provided by `#[jsmethods]`.
+    // Generate the `define_unforgeable` and `has_unforgeable` ClassDef methods.
+    // They chain to the parent interface (for inherited unforgeable accessors)
+    // and delegate own accessors to the `__UnforgeableRegistrar` provided by
+    // `#[jsmethods]`.
     let install_unforgeable_method = {
-        let parent_call = if let Some(ref inner_parent_name) = inner_parent {
-            quote! {
-                <#inner_parent_name as ::js::class::ClassDef>::install_unforgeable(scope, obj)?;
-            }
+        let (parent_define, parent_has) = if let Some(ref inner_parent_name) = inner_parent {
+            (
+                quote! {
+                    <#inner_parent_name as ::js::class::ClassDef>::define_unforgeable(scope, obj)?;
+                },
+                quote! {
+                    <#inner_parent_name as ::js::class::ClassDef>::has_unforgeable() ||
+                },
+            )
         } else {
-            quote! {}
+            (quote! {}, quote! {})
         };
         quote! {
-            fn install_unforgeable(
+            fn define_unforgeable(
                 scope: &::js::gc::scope::Scope<'_>,
                 obj: ::js::Object<'_>,
             ) -> ::std::result::Result<(), ::js::error::ExnThrown> {
-                #parent_call
+                #parent_define
                 use ::js::class::__UnforgeableRegistrar;
                 let reg = ::js::class::__UnforgeableReg::<Self>::new();
                 (&reg).install(scope, obj)
+            }
+
+            fn has_unforgeable() -> bool {
+                use ::js::class::__UnforgeableRegistrar;
+                let reg = ::js::class::__UnforgeableReg::<Self>::new();
+                #parent_has (&reg).has()
             }
         }
     };
@@ -679,8 +691,9 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             /// In debug builds, panics if the data is already mutably borrowed
             /// (a reentrant access to the same object). See
             /// `js::class::Stack::data`.
+            #[inline]
             pub fn data(&self) -> ::js::class::Ref<'_, #inner_name> {
-                self.0.data().unwrap()
+                self.0.data()
             }
 
             /// Mutably borrow the private Rust data (guard dereferencing to
@@ -689,8 +702,9 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
             /// In debug builds, panics if the data is already borrowed (a
             /// reentrant access to the same object). See
             /// `js::class::Stack::data_mut`.
+            #[inline]
             pub fn data_mut(&self) -> ::js::class::RefMut<'_, #inner_name> {
-                self.0.data_mut().unwrap()
+                self.0.data_mut()
             }
         }
 
@@ -1710,7 +1724,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                             let __typed = ::js::class::create_instance_with::<#inner_name>(scope, |_| {
                                 #inner_name::#fn_name(#inner_arg, #cx_arg #(#param_names),*)
                             })?;
-                            <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __typed.as_object())?;
                             Ok(__typed)
                         }
                     }
@@ -1722,7 +1735,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
 
     // Generate the UnforgeableRegistrar impl when the interface has
     // `#[getter(unforgeable)]` accessors (e.g. Event.isTrusted). These are
-    // installed per-instance by `ClassDef::install_unforgeable`.
+    // defined on the class's template object by `ClassDef::define_unforgeable`.
     let unforgeable_impl = if unforgeable_getters.is_empty() {
         quote! {}
     } else {
@@ -1745,6 +1758,9 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
             impl ::js::class::__UnforgeableRegistrar<#inner_name>
                 for ::js::class::__UnforgeableReg<#inner_name>
             {
+                fn has(&self) -> bool {
+                    true
+                }
                 fn install(
                     &self,
                     scope: &::js::gc::scope::Scope<'_>,
@@ -2908,9 +2924,6 @@ fn gen_setup_factory(
                 })?;
                 #setup_call
                 #post_init_call
-                // Install [LegacyUnforgeable] accessors, as the JS
-                // constructor path does.
-                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __typed.as_object())?;
                 #[cfg(debug_assertions)]
                 if let Some(__data) = ::js::class::get_private::<#inner_name>(__typed.0.as_raw()) {
                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
@@ -2925,8 +2938,7 @@ fn gen_setup_factory(
 
 /// A Rust-side instantiation function on the stack newtype for an old-style
 /// constructor (no receiver, returns `Self` or `Result<Self, E>`): build the
-/// data, allocate the JS object around it, and install `[LegacyUnforgeable]`
-/// accessors as the JS constructor path would. A fallible constructor's error
+/// data and allocate the JS object around it. A fallible constructor's error
 /// is thrown as a JS exception via `ThrowException`, as in the JS constructor
 /// path.
 fn gen_instance_factory(
@@ -2957,8 +2969,6 @@ fn gen_instance_factory(
         {
             unsafe {
                 let __typed = #create;
-                // Install [LegacyUnforgeable] accessors.
-                <#inner_name as ::js::class::ClassDef>::install_unforgeable(scope, __typed.as_object())?;
                 #[cfg(debug_assertions)]
                 if let Some(__data) = ::js::class::get_private::<#inner_name>(__typed.0.as_raw()) {
                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
@@ -3098,14 +3108,14 @@ fn emit_native_fn(
         },
         ReturnStyle::Void => quote! {
             #call;
-            let __set_ok = ::js::class::set_return(&scope, &__args, &::js::value::undefined());
-            ::js::exception::check_fn_return(&scope, __set_ok, &#name_str)
+            __args.rval().set(::js::value::undefined());
+            ::js::exception::check_fn_return(&scope, true, &#name_str)
         },
         ReturnStyle::ResultVoid => quote! {
             match #call {
                 Ok(()) => {
-                    let __set_ok = ::js::class::set_return(&scope, &__args, &::js::value::undefined());
-                    ::js::exception::check_fn_return(&scope, __set_ok, &#name_str)
+                    __args.rval().set(::js::value::undefined());
+                    ::js::exception::check_fn_return(&scope, true, &#name_str)
                 }
                 Err(__e) => {
                     ::js::error::ThrowException::throw(__e, &scope);
@@ -3188,12 +3198,8 @@ fn emit_native_fn(
                     Ok(o) => o,
                     Err(_) => return ::js::exception::check_fn_return(&scope, false, &#name_str),
                 };
-                // Install [LegacyUnforgeable] accessors and assert full
-                // initialization, so an instance minted by a JS method call matches
-                // one built by the constructor or the Rust-side factory.
-                if <#type_name as ::js::class::ClassDef>::install_unforgeable(&scope, __typed.as_object()).is_err() {
-                    return ::js::exception::check_fn_return(&scope, false, &#name_str);
-                }
+                // Assert full initialization, so an instance created by a JS method call
+                // matches one built by the constructor or the Rust-side factory.
                 #[cfg(debug_assertions)]
                 if let Some(__data) = unsafe { ::js::class::get_private::<#type_name>(__typed.as_raw()) } {
                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
@@ -5189,7 +5195,12 @@ fn gen_dict_member_extraction(member: &DictMember) -> proc_macro2::TokenStream {
 
     quote! {
         #binding = if let Some(ref __obj) = __obj {
-            let __prop = __obj.get_property(scope, #js_name_cstr_lit)
+            let __id = ::js::class::get_or_init_property_id(
+                scope,
+                #js_name_cstr_lit,
+            )
+            .map_err(|_| ::js::conversion::ConversionError::ExnPending)?;
+            let __prop = __obj.get_property_by_id(scope, __id)
                 .map_err(|_| ::js::conversion::ConversionError::ExnPending)?;
             if __prop.get().is_undefined() {
                 #absent

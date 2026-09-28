@@ -89,6 +89,13 @@ pub fn now() -> f64 {
     elapsed_ms(&time_origin())
 }
 
+/// [`now`] from [`platform::clock::coarse_monotonic_ns`], for timestamps that don't need the
+/// precise clock, such as `Event.timeStamp`.
+pub fn coarse_now() -> f64 {
+    let origin = time_origin();
+    platform::clock::coarse_monotonic_ns().saturating_sub(origin.monotonic_ns) as f64 / 1_000_000.
+}
+
 #[webidl_methods]
 impl Performance {
     /// <https://www.w3.org/TR/hr-time-3/#now-method>

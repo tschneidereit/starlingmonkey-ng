@@ -27,13 +27,48 @@ fn host_monotonic_ns() -> u64 {
     wasip3::clocks::monotonic_clock::now()
 }
 
+/// WASI has no cheaper clock, so the coarse reading is the precise one.
+#[cfg(target_arch = "wasm32")]
+fn host_coarse_monotonic_ns() -> u64 {
+    host_monotonic_ns()
+}
+
+/// The precise monotonic clock, and a coarse one on the same timeline that is cheaper to read.
+/// Linux updates `CLOCK_MONOTONIC_COARSE` every scheduler tick. macOS updates
+/// `CLOCK_UPTIME_RAW_APPROX` on context switches.
+#[cfg(target_os = "linux")]
+const CLOCKS: (libc::clockid_t, libc::clockid_t) =
+    (libc::CLOCK_MONOTONIC, libc::CLOCK_MONOTONIC_COARSE);
+#[cfg(target_os = "macos")]
+const CLOCKS: (libc::clockid_t, libc::clockid_t) =
+    (libc::CLOCK_UPTIME_RAW, libc::CLOCK_UPTIME_RAW_APPROX);
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(target_os = "linux"),
+    not(target_os = "macos")
+))]
+const CLOCKS: (libc::clockid_t, libc::clockid_t) = (libc::CLOCK_MONOTONIC, libc::CLOCK_MONOTONIC);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_clock(clock: libc::clockid_t) -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid `timespec` to write to, and `clock` is a supported clock id.
+    let result = unsafe { libc::clock_gettime(clock, &mut ts) };
+    debug_assert_eq!(result, 0, "clock_gettime failed");
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn host_monotonic_ns() -> u64 {
-    /// The origin of the readings below. Native processes are not snapshotted, so any fixed point
-    /// in the process will do, and the first reading is the earliest one available.
-    static ORIGIN: std::sync::LazyLock<std::time::Instant> =
-        std::sync::LazyLock::new(std::time::Instant::now);
-    ORIGIN.elapsed().as_nanos() as u64
+    read_clock(CLOCKS.0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn host_coarse_monotonic_ns() -> u64 {
+    read_clock(CLOCKS.1)
 }
 
 /// The current monotonic clock reading, in nanoseconds, continuous across a snapshot.
@@ -41,6 +76,12 @@ fn host_monotonic_ns() -> u64 {
 /// The origin is unspecified: only differences between readings are meaningful.
 pub fn monotonic_ns() -> u64 {
     OFFSET_NS.load(Ordering::Relaxed) + host_monotonic_ns()
+}
+
+/// A [`monotonic_ns`] reading from a clock that is cheaper to read but less precise, both
+/// depending on the platform. It can lag a [`monotonic_ns`] reading taken just before it.
+pub fn coarse_monotonic_ns() -> u64 {
+    OFFSET_NS.load(Ordering::Relaxed) + host_coarse_monotonic_ns()
 }
 
 /// Record where the clock stood as a snapshot was made.

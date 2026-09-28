@@ -18,7 +18,7 @@
 //! resolved trigger ([`Promise::shared_resolved_undefined`]).
 
 use crate::class::{get_or_init_shared_function, get_prototype_for};
-use crate::conversion::FromJSVal;
+use crate::conversion::{FromJSVal, ToJSVal};
 use crate::error::ExnThrown;
 use crate::function::EmptyArgs;
 use crate::gc::handle::Heap;
@@ -422,14 +422,15 @@ fn afs_value_fulfilled_not_done(
 /// the value and suppress the own property; the define path is immune.
 pub fn create_iter_result<'r>(
     scope: &'r Scope<'_>,
-    value: HandleValue<'_>,
+    value: impl ToJSVal<'r>,
     done: bool,
 ) -> Result<Object<'r>, ExnThrown> {
     let attrs = crate::class_spec::JSPROP_ENUMERATE as std::ffi::c_uint;
     let obj = Object::new_plain(scope)?;
-    obj.define_property(scope, c"value", value, attrs)?;
-    let done_val = scope.root_value(value::from_bool(done));
-    obj.define_property(scope, c"done", done_val, attrs)?;
+    let value_id = crate::class::get_or_init_property_id(scope, c"value")?;
+    obj.define_value_by_id(scope, value_id, value, attrs)?;
+    let done_id = crate::class::get_or_init_property_id(scope, c"done")?;
+    obj.define_value_by_id(scope, done_id, done, attrs)?;
     Ok(obj)
 }
 

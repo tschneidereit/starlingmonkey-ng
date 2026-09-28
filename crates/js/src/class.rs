@@ -7,14 +7,13 @@
 //! It also provides the [`ClassDef`] trait and supporting infrastructure
 //! for defining JavaScript classes backed by Rust structs.
 
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::any::TypeId;
 #[cfg(debug_assertions)]
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
-use std::hash::BuildHasherDefault;
 use std::marker::PhantomData;
 use std::os::raw::c_char;
 use std::ptr::{self, NonNull};
@@ -249,31 +248,34 @@ impl<'s, T: JSType + ClassDef> Stack<'s, T> {
     /// Borrow the private Rust data, returning a guard that dereferences to
     /// `&T`.
     ///
-    /// Returns `None` if the object doesn't have private data of type `T`.
+    /// A `Stack<T>` is only created for an instance of `T` or of a class
+    /// derived from `T`, so the data is always present.
     ///
     /// # Panics
     ///
     /// In debug builds, panics if the data is already mutably borrowed. That
     /// happens when a JS reentry borrowed this object's data while a
     /// [`data_mut`](Self::data_mut) guard was live.
-    pub fn data(&self) -> Option<Ref<'_, T>> {
-        unsafe { borrow::<T>(self.handle.get()) }
+    #[inline]
+    pub fn data(&self) -> Ref<'_, T> {
+        unsafe { borrow::<T>(self.handle.get()) }.expect(INSTANCE_HAS_DATA)
     }
 
     /// Mutably borrow the private Rust data, returning a guard that
     /// dereferences to `&mut T`.
-    ///
-    /// Returns `None` if the object doesn't have private data of type `T`.
     ///
     /// # Panics
     ///
     /// In debug builds, panics if the data is already borrowed (shared or
     /// mutable). That happens when a JS reentry borrowed this object's data
     /// while a borrow was live. See [`data`](Self::data).
-    pub fn data_mut(&self) -> Option<RefMut<'_, T>> {
-        unsafe { borrow_mut::<T>(self.handle.get()) }
+    #[inline]
+    pub fn data_mut(&self) -> RefMut<'_, T> {
+        unsafe { borrow_mut::<T>(self.handle.get()) }.expect(INSTANCE_HAS_DATA)
     }
 }
+
+const INSTANCE_HAS_DATA: &str = "a `Stack<T>` holds an instance of `T` with private data";
 
 // Blanket impl: every ClassDef is automatically a JSType.
 impl<T: ClassDef> JSType for T {
@@ -558,29 +560,24 @@ fn acquire_mut(flag: &Cell<BorrowFlag>) {
 ///
 /// # Safety
 ///
-/// `obj` must be a valid JS object created with at least
-/// [`MIN_CLASS_RESERVED_SLOTS`] reserved slots.
+/// `obj` must be a valid JS object.
+#[inline]
 unsafe fn borrow<'a, T: ClassDef>(obj: *mut JSObject) -> Option<Ref<'a, T>> {
+    let ptr = unsafe { private_data_ptr::<T>(obj, step_to_parent)? };
     // Check (and panic on conflict) before materializing the `&T`, so the
     // reference is never created while a mutable borrow is live.
     #[cfg(debug_assertions)]
     let flag = {
-        let flag = unsafe { get_borrow_flag(obj)? };
+        let flag =
+            unsafe { get_borrow_flag(obj) }.expect("objects with private data have a borrow flag");
         acquire_shared(flag);
         flag
     };
-    match unsafe { get_private_or_ancestor::<T>(obj) } {
-        Some(value) => Some(Ref {
-            value,
-            #[cfg(debug_assertions)]
-            flag,
-        }),
-        None => {
-            #[cfg(debug_assertions)]
-            flag.set(flag.get() - 1);
-            None
-        }
-    }
+    Some(Ref {
+        value: unsafe { &*(ptr as *const T) },
+        #[cfg(debug_assertions)]
+        flag,
+    })
 }
 
 /// Take a mutable borrow of `obj`'s private data of type `T`.
@@ -591,25 +588,21 @@ unsafe fn borrow<'a, T: ClassDef>(obj: *mut JSObject) -> Option<Ref<'a, T>> {
 /// # Safety
 ///
 /// Same as [`borrow`].
+#[inline]
 unsafe fn borrow_mut<'a, T: ClassDef>(obj: *mut JSObject) -> Option<RefMut<'a, T>> {
+    let ptr = unsafe { private_data_ptr::<T>(obj, step_to_parent_mut)? };
     #[cfg(debug_assertions)]
     let flag = {
-        let flag = unsafe { get_borrow_flag(obj)? };
+        let flag =
+            unsafe { get_borrow_flag(obj) }.expect("objects with private data have a borrow flag");
         acquire_mut(flag);
         flag
     };
-    match unsafe { get_private_or_ancestor_mut::<T>(obj) } {
-        Some(value) => Some(RefMut {
-            value,
-            #[cfg(debug_assertions)]
-            flag,
-        }),
-        None => {
-            #[cfg(debug_assertions)]
-            flag.set(UNUSED);
-            None
-        }
-    }
+    Some(RefMut {
+        value: unsafe { &mut *(ptr as *mut T) },
+        #[cfg(debug_assertions)]
+        flag,
+    })
 }
 
 /// A shared guard over private data, released when dropped.
@@ -758,7 +751,7 @@ pub fn class_tag<T: ClassDef>() -> usize {
 /// - The returned reference is only valid as long as the JS object is alive and
 ///   no mutable reference is taken simultaneously.
 pub unsafe fn get_private<'a, T: 'static>(obj: *mut JSObject) -> Option<&'a T> {
-    let val = unsafe { crate::object::get_reserved_slot(obj, PRIVATE_DATA_SLOT) };
+    let val = unsafe { crate::object::get_native_reserved_slot(obj, PRIVATE_DATA_SLOT) };
     if val.is_undefined() {
         return None;
     }
@@ -776,7 +769,7 @@ pub unsafe fn get_private<'a, T: 'static>(obj: *mut JSObject) -> Option<&'a T> {
 /// - `obj` must be a valid JS object with private data of type `T` stored via [`set_private`].
 /// - No other references to the data may exist simultaneously.
 pub unsafe fn get_private_mut<'a, T: 'static>(obj: *mut JSObject) -> Option<&'a mut T> {
-    let val = unsafe { crate::object::get_reserved_slot(obj, PRIVATE_DATA_SLOT) };
+    let val = unsafe { crate::object::get_native_reserved_slot(obj, PRIVATE_DATA_SLOT) };
     if val.is_undefined() {
         return None;
     }
@@ -796,7 +789,7 @@ pub unsafe fn get_private_mut<'a, T: 'static>(obj: *mut JSObject) -> Option<&'a 
 /// - `obj` must be a valid JS object with private data of type `T` stored via [`set_private`].
 /// - Must only be called once (typically from the GC finalize callback).
 pub unsafe fn drop_private<T: 'static>(obj: *mut JSObject) {
-    let val = unsafe { crate::object::get_reserved_slot(obj, PRIVATE_DATA_SLOT) };
+    let val = unsafe { crate::object::get_native_reserved_slot(obj, PRIVATE_DATA_SLOT) };
     if !val.is_undefined() {
         let ptr = val.to_private() as *mut T;
         if !ptr.is_null() {
@@ -809,7 +802,7 @@ pub unsafe fn drop_private<T: 'static>(obj: *mut JSObject) {
     // Drop the borrow flag installed by `set_private`.
     #[cfg(debug_assertions)]
     unsafe {
-        let flag_val = crate::object::get_reserved_slot(obj, BORROW_FLAG_SLOT);
+        let flag_val = crate::object::get_native_reserved_slot(obj, BORROW_FLAG_SLOT);
         if !flag_val.is_undefined() {
             let flag_ptr = flag_val.to_private() as *mut Cell<BorrowFlag>;
             if !flag_ptr.is_null() {
@@ -836,7 +829,7 @@ const CLASS_REGISTRY_SLOT: u32 = MIN_CLASS_RESERVED_SLOTS + 1;
 /// Stored as private data in [`CLASS_REGISTRY_SLOT`] of the global object.
 #[crate::allow_unrooted_interior]
 struct ClassRegistry {
-    map: HashMap<TypeId, Box<MozHeap<*mut JSObject>>>,
+    map: FxHashMap<TypeId, Box<MozHeap<*mut JSObject>>>,
     /// Per-global shared objects keyed by an arbitrary `usize` (by convention a
     /// native function pointer unique to the call site), so the same object is
     /// reused for every caller on a given global. Used for functions whose spec
@@ -844,13 +837,17 @@ struct ClassRegistry {
     /// the streams queuing-strategy `size` functions) and for internal
     /// plumbing objects reused across calls (e.g. a resolved promise serving
     /// as a microtask trigger). Traced like prototypes.
-    shared_objects: HashMap<usize, Box<MozHeap<*mut JSObject>>>,
+    shared_objects: FxHashMap<usize, Box<MozHeap<*mut JSObject>>>,
     /// Per-global monotonic `u64` counters keyed by an arbitrary `usize`. Used
     /// where a spec requires ids unique across a whole global rather than per
     /// call site — e.g. HTML's setTimeout/setInterval ids, which must not
     /// collide across the concurrent event loops that share one global. Plain
     /// integers, so no GC tracing.
-    counters: HashMap<usize, u64>,
+    counters: FxHashMap<usize, u64>,
+    /// Per-global interned property names keyed by an arbitrary `usize` (by
+    /// convention the address of a `static` unique to the call site), so a hot
+    /// property name is interned once per global. Traced like prototypes.
+    property_atoms: FxHashMap<usize, Box<MozHeap<*mut crate::native::JSString>>>,
     /// Type-erased GC glue for the global's private data,
     /// installed by [`set_global_private`].
     ///
@@ -868,9 +865,10 @@ struct GlobalPrivateGlue {
 impl ClassRegistry {
     fn new() -> Self {
         Self {
-            map: HashMap::new(),
-            shared_objects: HashMap::new(),
-            counters: HashMap::new(),
+            map: FxHashMap::default(),
+            shared_objects: FxHashMap::default(),
+            counters: FxHashMap::default(),
+            property_atoms: FxHashMap::default(),
             global_private: None,
         }
     }
@@ -917,6 +915,9 @@ impl ClassRegistry {
         for heap in self.shared_objects.values() {
             heap.trace(trc);
         }
+        for heap in self.property_atoms.values() {
+            heap.trace(trc);
+        }
     }
 }
 
@@ -924,7 +925,7 @@ impl ClassRegistry {
 ///
 /// Returns `None` if the slot is unset (e.g. on a non-StarlingMonkey global).
 unsafe fn get_class_registry(global: *mut JSObject) -> Option<&'static ClassRegistry> {
-    let val = crate::object::get_reserved_slot(global, CLASS_REGISTRY_SLOT);
+    let val = crate::object::get_native_reserved_slot(global, CLASS_REGISTRY_SLOT);
     if val.is_undefined() {
         return None;
     }
@@ -937,7 +938,7 @@ unsafe fn get_class_registry(global: *mut JSObject) -> Option<&'static ClassRegi
 
 /// Read the `ClassRegistry` pointer from a global, creating one if absent.
 unsafe fn get_or_init_class_registry(global: *mut JSObject) -> &'static mut ClassRegistry {
-    let val = crate::object::get_reserved_slot(global, CLASS_REGISTRY_SLOT);
+    let val = crate::object::get_native_reserved_slot(global, CLASS_REGISTRY_SLOT);
     if !val.is_undefined() {
         let ptr = val.to_private() as *mut ClassRegistry;
         if !ptr.is_null() {
@@ -962,16 +963,16 @@ pub(crate) struct ClassTls {
 }
 
 /// A map over keys this crate generates itself, so it needs no random seeding.
-/// `BuildHasherDefault` is const-constructible, which keeps [`crate::tls`]'s key
+/// `FxBuildHasher` is const-constructible, which keeps [`crate::tls`]'s key
 /// `const`-initialized.
-type TagMap<V, K = usize> = HashMap<K, V, BuildHasherDefault<DefaultHasher>>;
+type TagMap<V, K = usize> = HashMap<K, V, FxBuildHasher>;
 
 impl ClassTls {
     pub(crate) const fn new() -> Self {
         Self {
             live_registries: RefCell::new(Vec::new()),
-            inheritance: RefCell::new(HashMap::with_hasher(BuildHasherDefault::new())),
-            spec_tables: RefCell::new(HashMap::with_hasher(BuildHasherDefault::new())),
+            inheritance: RefCell::new(HashMap::with_hasher(FxBuildHasher)),
+            spec_tables: RefCell::new(HashMap::with_hasher(FxBuildHasher)),
         }
     }
 }
@@ -1047,7 +1048,7 @@ static STARLING_GLOBAL_OPS: JSClassOps = JSClassOps {
 /// Destructor for Starling's global class — drops the global's
 /// class's private data (if any) and the class registry.
 unsafe extern "C" fn finalize_starling_global(gc: *mut GCContext, obj: *mut JSObject) {
-    let val = crate::object::get_reserved_slot(obj, CLASS_REGISTRY_SLOT);
+    let val = crate::object::get_native_reserved_slot(obj, CLASS_REGISTRY_SLOT);
     if !val.is_undefined() {
         let ptr = val.to_private() as *mut ClassRegistry;
         if !ptr.is_null() {
@@ -1145,8 +1146,8 @@ pub fn get_prototype_object_for<'s, T: 'static>(scope: &'s Scope<'_>) -> Option<
 /// Information about a class's direct parent for inheritance support.
 struct InheritanceInfo {
     parent_tag: usize,
-    /// Precomputed set of all ancestor type tags (parent, grandparent, ...).
-    ancestors: HashSet<usize>,
+    /// All ancestor type tags (parent, grandparent, ...).
+    ancestors: Vec<usize>,
     accessor: unsafe fn(*const c_void) -> *const c_void,
     accessor_mut: unsafe fn(*mut c_void) -> *mut c_void,
 }
@@ -1176,9 +1177,8 @@ fn register_parent_info_raw(
     inheritance_registry(|reg| {
         let mut map = reg.borrow_mut();
 
-        // Build the ancestor set: parent + parent's ancestors (if any).
-        let mut ancestors = HashSet::new();
-        ancestors.insert(parent_tag);
+        // Build the ancestor list: parent + parent's ancestors (if any).
+        let mut ancestors = vec![parent_tag];
         if let Some(parent_info) = map.get(&parent_tag) {
             ancestors.extend(&parent_info.ancestors);
         }
@@ -1241,8 +1241,14 @@ fn register_global_parent<P: ClassDef>() {
 }
 
 /// Get the raw private data pointer from slot 0 without type interpretation.
-unsafe fn get_raw_private(obj: *mut JSObject) -> Option<*const c_void> {
-    let val = unsafe { crate::object::get_reserved_slot(obj, PRIVATE_DATA_SLOT) };
+///
+/// # Safety
+///
+/// `obj` must be a valid object of a class defined by a [`ClassDef`] or of the
+/// [`STARLING_GLOBAL_CLASS`].
+#[inline]
+unsafe fn get_raw_private(obj: *mut JSObject) -> Option<*mut c_void> {
+    let val = unsafe { crate::object::get_native_reserved_slot(obj, PRIVATE_DATA_SLOT) };
     if val.is_undefined() {
         return None;
     }
@@ -1250,7 +1256,7 @@ unsafe fn get_raw_private(obj: *mut JSObject) -> Option<*const c_void> {
     if ptr.is_null() {
         return None;
     }
-    Some(ptr)
+    Some(ptr as *mut c_void)
 }
 
 /// Get the per-object borrow flag from slot 1.
@@ -1259,11 +1265,10 @@ unsafe fn get_raw_private(obj: *mut JSObject) -> Option<*const c_void> {
 ///
 /// # Safety
 ///
-/// `obj` must be a valid JS object created with at least
-/// [`MIN_CLASS_RESERVED_SLOTS`] reserved slots.
+/// `obj` must be a valid object of a class defined by a [`ClassDef`].
 #[cfg(debug_assertions)]
 unsafe fn get_borrow_flag<'a>(obj: *mut JSObject) -> Option<&'a Cell<BorrowFlag>> {
-    let val = unsafe { crate::object::get_reserved_slot(obj, BORROW_FLAG_SLOT) };
+    let val = unsafe { crate::object::get_native_reserved_slot(obj, BORROW_FLAG_SLOT) };
     if val.is_undefined() {
         return None;
     }
@@ -1274,86 +1279,88 @@ unsafe fn get_borrow_flag<'a>(obj: *mut JSObject) -> Option<&'a Cell<BorrowFlag>
     Some(&*ptr)
 }
 
+/// A pointer to `obj`'s private data of type `T`: `obj`'s own data if `obj` is of
+/// `T`'s class, or the `T` embedded in the data of a class derived from `T`.
+///
+/// Returns `None` if `obj` is neither, or has no private data (e.g. a prototype
+/// object). `step` maps a pointer to a class's data to a pointer to its
+/// parent's data.
+///
+/// # Safety
+///
+/// `obj` must be a valid JS object.
+#[inline]
+unsafe fn private_data_ptr<T: ClassDef>(
+    obj: *mut JSObject,
+    step: fn(&InheritanceInfo, *mut c_void) -> *mut c_void,
+) -> Option<*mut c_void> {
+    let concrete_tag = get_class_tag(obj);
+    let target_tag = class_tag::<T>();
+    if concrete_tag == target_tag {
+        return get_raw_private(obj);
+    }
+    ancestor_data_ptr(obj, concrete_tag, target_tag, step)
+}
+
+/// The non-generic part of [`private_data_ptr`] for an object whose class
+/// is not the target class.
+unsafe fn ancestor_data_ptr(
+    obj: *mut JSObject,
+    concrete_tag: usize,
+    target_tag: usize,
+    step: fn(&InheritanceInfo, *mut c_void) -> *mut c_void,
+) -> Option<*mut c_void> {
+    inheritance_registry(|reg| {
+        let map = reg.borrow();
+        // Only classes defined by a `ClassDef` and the Starling global class are
+        // registered, so this also guarantees the slot layout `get_raw_private` reads.
+        let mut info = map.get(&concrete_tag)?;
+        let mut ptr = get_raw_private(obj)?;
+        loop {
+            ptr = step(info, ptr);
+            if info.parent_tag == target_tag {
+                return Some(ptr);
+            }
+            info = map.get(&info.parent_tag)?;
+        }
+    })
+}
+
+fn step_to_parent(info: &InheritanceInfo, ptr: *mut c_void) -> *mut c_void {
+    // SAFETY: `ptr` points to the private data of `info`'s class.
+    unsafe { (info.accessor)(ptr) as *mut c_void }
+}
+
+fn step_to_parent_mut(info: &InheritanceInfo, ptr: *mut c_void) -> *mut c_void {
+    // SAFETY: as above.
+    unsafe { (info.accessor_mut)(ptr) }
+}
+
 /// Inheritance-aware immutable private data access.
 ///
 /// If the object's concrete type matches T, returns a direct reference.
 /// If the concrete type derives from T (via HasParent chain), walks the
 /// parent accessor chain to find the T reference within the concrete data.
+/// Returns `None` for any other object, and for objects without private data.
 ///
 /// # Safety
 ///
-/// - `obj` must be a valid JS object with private data stored via [`set_private`].
+/// - `obj` must be a valid JS object.
 /// - The returned reference is only valid as long as the JS object is alive.
 pub unsafe fn get_private_or_ancestor<'a, T: ClassDef>(obj: *mut JSObject) -> Option<&'a T> {
-    // Guard: if the object doesn't have enough reserved slots, it can't be
-    // one of our class instances (which always have at least PRIVATE_DATA_SLOT).
-    if crate::object::reserved_slot_count(obj) < MIN_CLASS_RESERVED_SLOTS {
-        return None;
-    }
-
-    let concrete_tag = get_class_tag(obj);
-    let target_tag = class_tag::<T>();
-
-    if concrete_tag == target_tag {
-        // Direct match
-        return get_private::<T>(obj);
-    }
-
-    // Walk the parent chain
-    let data_ptr = get_raw_private(obj)?;
-    inheritance_registry(|reg| {
-        let map = reg.borrow();
-        let mut current_tag = concrete_tag;
-        let mut current_ptr = data_ptr;
-
-        loop {
-            let info = map.get(&current_tag)?;
-            current_ptr = (info.accessor)(current_ptr);
-            current_tag = info.parent_tag;
-            if current_tag == target_tag {
-                return Some(&*(current_ptr as *const T));
-            }
-        }
-    })
+    private_data_ptr::<T>(obj, step_to_parent).map(|ptr| &*(ptr as *const T))
 }
 
 /// Inheritance-aware mutable private data access.
 ///
 /// # Safety
 ///
-/// - `obj` must be a valid JS object with private data stored via [`set_private`].
+/// - `obj` must be a valid JS object.
 /// - No other references to the data may exist simultaneously.
 pub unsafe fn get_private_or_ancestor_mut<'a, T: ClassDef>(
     obj: *mut JSObject,
 ) -> Option<&'a mut T> {
-    // Guard: if the object doesn't have enough reserved slots, it can't be
-    // one of our class instances (which always have at least PRIVATE_DATA_SLOT).
-    if crate::object::reserved_slot_count(obj) < MIN_CLASS_RESERVED_SLOTS {
-        return None;
-    }
-
-    let concrete_tag = get_class_tag(obj);
-    let target_tag = class_tag::<T>();
-
-    if concrete_tag == target_tag {
-        return get_private_mut::<T>(obj);
-    }
-
-    let data_ptr = get_raw_private(obj)? as *mut c_void;
-    inheritance_registry(|reg| {
-        let map = reg.borrow();
-        let mut current_tag = concrete_tag;
-        let mut current_ptr = data_ptr;
-
-        loop {
-            let info = map.get(&current_tag)?;
-            current_ptr = (info.accessor_mut)(current_ptr);
-            current_tag = info.parent_tag;
-            if current_tag == target_tag {
-                return Some(&mut *(current_ptr as *mut T));
-            }
-        }
-    })
+    private_data_ptr::<T>(obj, step_to_parent_mut).map(|ptr| &mut *(ptr as *mut T))
 }
 
 // ============================================================================
@@ -1555,12 +1562,33 @@ pub trait ClassDef: Sized + Trace + 'static {
     ///
     /// WebIDL §3.7.4 requires unforgeable members to live on each instance
     /// rather than the prototype, with a getter shared across instances. The
-    /// proc macro generates an override for interfaces that declare
-    /// `#[getter(unforgeable)]`; it installs its own attributes and then chains
-    /// to the parent's via `extends`. Runs inside `generic_constructor` after
-    /// `post_init`. The default is a no-op.
-    fn install_unforgeable(_scope: &Scope<'_>, _obj: Object<'_>) -> Result<(), ExnThrown> {
+    /// accessors are copied from a per-global template object created by
+    /// [`ClassDef::define_unforgeable`] on first use. `obj` must be an object of
+    /// this class without any own properties, so `generic_constructor` and
+    /// [`try_create_instance_with`] call this right after allocating it. Does
+    /// nothing for classes without unforgeable accessors.
+    fn install_unforgeable(scope: &Scope<'_>, obj: Object<'_>) -> Result<(), ExnThrown> {
+        if Self::has_unforgeable() {
+            install_unforgeable_from_template::<Self>(scope, obj)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Define this interface's `[LegacyUnforgeable]` accessors, including
+    /// inherited ones, on `obj`.
+    ///
+    /// The proc macro generates an override that chains to the parent's via
+    /// `extends` and then defines the interface's own `#[getter(unforgeable)]`
+    /// accessors. The default is a no-op.
+    fn define_unforgeable(_scope: &Scope<'_>, _obj: Object<'_>) -> Result<(), ExnThrown> {
         Ok(())
+    }
+
+    /// Whether this interface or one of its ancestors declares
+    /// `[LegacyUnforgeable]` accessors.
+    fn has_unforgeable() -> bool {
+        false
     }
 
     /// Debug assertion that all bare `Heap<T>` fields have been initialized.
@@ -1890,6 +1918,11 @@ unsafe extern "C" fn generic_constructor<T: ClassDef>(
         None => return false,
     };
 
+    // Install `[LegacyUnforgeable]` own accessors (e.g. Event.isTrusted).
+    if T::install_unforgeable(&scope, obj).is_err() {
+        return false;
+    }
+
     // Call the Rust constructor
     match T::constructor(&scope, &args) {
         Ok(instance) => {
@@ -1899,11 +1932,6 @@ unsafe extern "C" fn generic_constructor<T: ClassDef>(
             // final heap location, so GC write barriers are registered at
             // stable addresses.
             if T::post_init(&scope, obj, &args).is_err() {
-                return false;
-            }
-
-            // Install `[LegacyUnforgeable]` own accessors (e.g. Event.isTrusted).
-            if T::install_unforgeable(&scope, obj).is_err() {
                 return false;
             }
 
@@ -2126,20 +2154,7 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
         ));
     }
     let val = *args.get(index);
-    if !val.is_object() {
-        let msg = CString::new(format!(
-            "argument {} is not an instance of {}",
-            index,
-            T::Inner::NAME,
-        ))
-        .unwrap_or_else(|_| c"argument is not an object".into());
-        return Err(crate::error::throw_type_error(scope, &msg));
-    }
-    let obj = val.to_object();
-    let concrete_tag = crate::object::get_object_class(obj) as usize;
-    let target_tag = class_tag::<T::Inner>();
-    // Reject builtins' prototype objects, which match the class tag but carry no private data.
-    if !is_derived_from_type(concrete_tag, target_tag) || get_raw_private(obj).is_none() {
+    if !val.is_object() || !<T::Inner as JSType>::is_instance(val.to_object()) {
         let msg = CString::new(format!(
             "argument {} is not an instance of {}",
             index,
@@ -2148,6 +2163,7 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
         .unwrap_or_else(|_| c"argument is not the expected class".into());
         return Err(crate::error::throw_type_error(scope, &msg));
     }
+    let obj = val.to_object();
     let nn = NonNull::new(obj).unwrap();
     Ok(unsafe { T::from_handle_unchecked(scope.root_object(nn)) })
 }
@@ -2167,6 +2183,7 @@ pub unsafe fn get_stack_arg<'s, T: StackType<'s>>(
 /// # Safety
 ///
 /// - `args` must be from a valid `JSNative` call.
+#[inline]
 unsafe fn resolve_webidl_this(
     scope: &Scope<'_>,
     args: &CallArgs,
@@ -2231,6 +2248,7 @@ pub unsafe fn get_this_data_mut<'a, T: ClassDef>(
 ///
 /// - The CallArgs must be from a valid JSNative call.
 #[doc(hidden)]
+#[inline]
 pub unsafe fn get_this<'s, T: StackType<'s>>(
     scope: &'s Scope<'s>,
     args: &CallArgs,
@@ -2249,7 +2267,7 @@ where
     }
     // The prototype object shares the same JSClass as instances but has no
     // private data (set_private is only called during construction). Reject
-    // it here so callers can safely use data()/data_mut() via unwrap_unchecked.
+    // it here so callers can use data()/data_mut(), which panic on missing private data.
     if get_private::<T::Inner>(obj).is_none() {
         return Err(crate::error::throw_type_error(
             scope,
@@ -2272,9 +2290,10 @@ pub unsafe fn set_return<'s, T: ToJSVal<'s>>(
     args: &CallArgs,
     value: &T,
 ) -> bool {
-    match value.to_jsval(scope) {
+    // The converted value is stored into the rooted `rval` slot before anything else can run.
+    match value.to_jsval_raw(scope) {
         Ok(val) => {
-            args.rval().set(val.get());
+            args.rval().set(val);
             true
         }
         Err(e) => {
@@ -2348,10 +2367,14 @@ autoref_reg!(
 /// interface declares `#[getter(unforgeable)]`.
 #[doc(hidden)]
 pub trait __UnforgeableRegistrar<T: ClassDef> {
+    fn has(&self) -> bool;
     fn install(&self, scope: &Scope<'_>, obj: Object<'_>) -> Result<(), ExnThrown>;
 }
 
 impl<T: ClassDef> __UnforgeableRegistrar<T> for &__UnforgeableReg<T> {
+    fn has(&self) -> bool {
+        false
+    }
     fn install(&self, _scope: &Scope<'_>, _obj: Object<'_>) -> Result<(), ExnThrown> {
         Ok(())
     }
@@ -2472,12 +2495,23 @@ impl<T: ClassDef> __PostInitRegistrar<T> for &__PostInitReg<T> {
     }
 }
 
+/// The prototype registered for `T` on the current global. Throws a `TypeError` if `T` is not
+/// registered.
+fn registered_prototype<'s, T: ClassDef>(scope: &'s Scope<'_>) -> Result<Object<'s>, ExnThrown> {
+    get_prototype_object_for::<T>(scope).ok_or_else(|| {
+        let message = CString::new(format!("{} is not registered on this global", T::NAME))
+            .expect("class names contain no NUL");
+        crate::error::throw_type_error(scope, &message)
+    })
+}
+
 /// Create a JS object backed by a Rust value constructed by `init`.
 ///
 /// The closure receives the newly allocated (but empty) JS object and
 /// returns the Rust data to store in it. Because the JS object is
 /// allocated *before* `init` runs, any `Heap<U>` fields created inside
 /// the closure are safe from GC hazards: the object is already rooted.
+/// The object's `[LegacyUnforgeable]` accessors are installed before `init` runs.
 pub fn create_instance_with<'s, T: ClassDef>(
     scope: &'s Scope<'_>,
     init: impl FnOnce(Object<'s>) -> T,
@@ -2492,15 +2526,10 @@ pub fn try_create_instance_with<'s, T: ClassDef>(
     scope: &'s Scope<'_>,
     init: impl FnOnce(Object<'s>) -> Result<T, ExnThrown>,
 ) -> Result<T::Rooted<'s>, ExnThrown> {
-    let global = scope.global();
-    let proto = match get_prototype::<T>(global) {
-        // SAFETY: builtins' prototypes are always valid objects.
-        Some(p) => unsafe { Object::from_raw(scope, p) }.unwrap(),
-        None => return Err(ExnThrown), // TODO: Actually throw an error here.
-    };
-
+    let proto = registered_prototype::<T>(scope)?;
     let class = T::class();
     let obj = Object::new_with_proto(scope, class, proto)?;
+    T::install_unforgeable(scope, obj)?;
     let data = init(obj)?;
     unsafe {
         set_private(obj.as_raw(), data);
@@ -2543,6 +2572,37 @@ pub fn get_or_init_shared_object<'s>(
     let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
     registry.set_shared_object(key, obj.as_raw());
     Ok(obj)
+}
+
+/// Return, and create on the first call in a given global, an interned property key for `name`.
+///
+/// `name` must not be an array index, whose property key is an integer rather than a string.
+pub fn get_or_init_property_id<'s>(
+    scope: &'s Scope<'_>,
+    name: &'static CStr,
+) -> Result<crate::native::HandleId<'s>, ExnThrown> {
+    let key = ptr::from_ref(name).addr();
+    // SAFETY: the registry belongs to the current global, which is alive.
+    let cached = unsafe {
+        get_class_registry(scope.global().as_raw())
+            .and_then(|r| r.property_atoms.get(&key).map(|h| h.get()))
+    };
+    let atom = match cached {
+        Some(atom) => atom,
+        None => {
+            let name =
+                crate::string::Str::from_str(scope, name.to_str().expect("names are UTF-8"))?;
+            let id = crate::id::string_to_id(scope, name.handle())?;
+            assert!(id.is_string(), "property name `{name:?}` is an array index");
+            // A string property key's bits are the interned string's address.
+            let atom = id.asBits_ as *mut crate::native::JSString;
+            // SAFETY: as above.
+            let registry = unsafe { get_or_init_class_registry(scope.global().as_raw()) };
+            registry.property_atoms.insert(key, MozHeap::boxed(atom));
+            atom
+        }
+    };
+    Ok(scope.root_id(mozjs_sys::jsid::StringId(atom)))
 }
 
 /// Get a per-global shared function, keyed by `key` (typically the native
@@ -2602,7 +2662,7 @@ pub fn next_global_counter(scope: &Scope<'_>, key: usize) -> u64 {
 /// non-configurable property on `obj`, using a getter function shared across
 /// all instances (cached per global, keyed by the native pointer).
 ///
-/// Used by the proc-macro-generated `ClassDef::install_unforgeable`.
+/// Used by the proc-macro-generated `ClassDef::define_unforgeable`.
 pub fn define_unforgeable_accessor(
     scope: &Scope<'_>,
     obj: Object<'_>,
@@ -2610,39 +2670,63 @@ pub fn define_unforgeable_accessor(
     getter: crate::native::JSNative,
 ) -> Result<(), ExnThrown> {
     let key = getter.map(|f| f as usize).unwrap_or(0);
-    let name_str = name.to_str().map_err(|_| ExnThrown)?;
+    let name_str = name.to_str().expect("accessor names are ASCII");
 
     // Reuse the cached getter if present; otherwise create it once and store it.
     let getter_fn = get_or_init_shared_function(scope, key, |scope| {
         // WebIDL names accessor getter functions "get <attribute>".
         let getter_name =
-            std::ffi::CString::new(format!("get {name_str}")).map_err(|_| ExnThrown)?;
+            CString::new(format!("get {name_str}")).expect("accessor names contain no NUL");
         crate::Function::new(scope, getter, 0, 0, &getter_name)
     })?;
 
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let desc = crate::native::PropertyDescriptor {
-        _bitfield_align_1: [0; 0],
-        _bitfield_1: crate::native::PropertyDescriptor::new_bitfield_1(
-            true,  // hasConfigurable
-            false, // configurable (unforgeable)
-            true,  // hasEnumerable
-            true,  // enumerable
-            false, // hasWritable
-            false, // writable
-            false, // hasValue
-            true,  // hasGetter
-            false, // hasSetter
-            false, // resolving
-        ),
-        getter_: getter_fn.as_raw(),
-        setter_: ptr::null_mut(),
-        value_: mozjs::jsval::UndefinedValue(),
-    });
+    // An enumerable, non-configurable accessor with no setter.
+    let attrs = (crate::class_spec::JSPROP_ENUMERATE | crate::class_spec::JSPROP_PERMANENT)
+        as std::ffi::c_uint;
+    let ok = unsafe {
+        wrappers2::JS_DefineProperty2(
+            scope.cx_mut(),
+            obj.handle(),
+            name.as_ptr(),
+            getter_fn.handle(),
+            crate::native::HandleObject::null(),
+            attrs,
+        )
+    };
+    ExnThrown::check(ok)
+}
 
-    let js_str = crate::string::Str::from_str(scope, name_str)?;
-    let id = crate::id::string_to_id(scope, js_str.handle())?;
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let id_rooted = id);
-    obj.define_property_by_id(scope, id_rooted.handle(), desc.handle())
+/// Copy `T`'s `[LegacyUnforgeable]` accessors onto `obj` from a template object cached per
+/// global under `T`'s class tag.
+///
+/// The template is an object of `T`'s class and prototype without private data, with the
+/// accessors defined by [`ClassDef::define_unforgeable`]. Copying its properties reuses its shape,
+/// which is much cheaper than defining each accessor on every instance. `obj` must be an object of
+/// `T`'s class without any own properties.
+fn install_unforgeable_from_template<T: ClassDef>(
+    scope: &Scope<'_>,
+    obj: Object<'_>,
+) -> Result<(), ExnThrown> {
+    debug_assert!(std::ptr::eq(
+        unsafe { crate::object::get_object_class(obj.as_raw()) },
+        T::class()
+    ));
+    let template = get_or_init_shared_object(scope, class_tag::<T>(), |scope| {
+        let proto = registered_prototype::<T>(scope)?;
+        let template = Object::new_with_proto(scope, T::class(), proto)?;
+        T::define_unforgeable(scope, template)?;
+        Ok(template)
+    })?;
+    // SAFETY: both objects are native objects of `T`'s class in the current compartment, and
+    // `obj` has no own properties.
+    let ok = unsafe {
+        wrappers2::JS_InitializePropertiesFromCompatibleNativeObject(
+            scope.cx_mut(),
+            obj.handle(),
+            template.handle(),
+        )
+    };
+    ExnThrown::check(ok)
 }
 
 // ---------------------------------------------------------------------------

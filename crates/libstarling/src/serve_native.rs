@@ -29,6 +29,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use hyper::body::{Body, Frame, Incoming};
 use js::gc::scope::{EnteredRealm, RootScope};
 use platform::http::OutgoingBody;
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -1211,25 +1212,27 @@ async fn send_response_body(
             // as long as the body needed it. If the loop finishes first, nothing can produce
             // another chunk, and waiting on the drain would hang the connection. That happens
             // once a guest reaches a state in which no more async work is pending, but the body
-            // `ReadableStream` hasn't been fully served.
+            // `ReadableStream` hasn't been fully served. The drain then goes on with the channel's
+            // existing contents, potentially including a chunk it is still handing to hyper.
             OutgoingBody::Stream(mut receiver) => {
-                let forwarded = futures_lite::future::or(
-                    async {
-                        Some(forward_stream(&mut receiver, &mut chunks, &mut remaining).await)
-                    },
-                    async {
+                let loop_done = Cell::new(false);
+                let mut forwarding = std::pin::pin!(forward_stream(
+                    &mut receiver,
+                    &mut chunks,
+                    &mut remaining,
+                    &loop_done
+                ));
+                let forwarded =
+                    futures_lite::future::or(async { Some((&mut forwarding).await) }, async {
                         unsafe { run_to_completion(raw_cx, event_loop, tokio::time::sleep).await };
                         None
-                    },
-                )
-                .await;
+                    })
+                    .await;
                 match forwarded {
                     Some(result) => result,
-                    // The loop finished first. Anything already in the channel is all there will
-                    // ever be, so take what is ready. If that includes the end of the stream, the
-                    // body completed just before the loop did, and the response is complete.
                     None => {
-                        finish_orphaned_stream(&mut receiver, &mut chunks, &mut remaining).await
+                        loop_done.set(true);
+                        forwarding.await
                     }
                 }
             }
@@ -1284,7 +1287,7 @@ async fn forward_body(
             }
         },
         OutgoingBody::Stream(mut receiver) => {
-            forward_stream(&mut receiver, chunks, remaining).await
+            forward_stream(&mut receiver, chunks, remaining, &Cell::new(false)).await
         }
         // hyper does not report write progress: a chunk it accepted may still be in its write
         // buffer. It does stop accepting chunks while that buffer is above its watermark, so
@@ -1304,50 +1307,53 @@ async fn forward_body(
 }
 
 /// Forward the chunks a handler's JS produces, as its pump enqueues them, until the stream ends.
+/// Once `loop_done` is set, the stream ends with an error when the channel has nothing ready.
 async fn forward_stream(
     receiver: &mut platform::http::OutgoingBodyReceiver,
     chunks: &mut futures_channel::mpsc::Sender<Result<bytes::Bytes, BodyError>>,
     remaining: &mut platform::http::Remaining,
+    loop_done: &Cell<bool>,
 ) -> Result<(), String> {
-    while let Some(chunk) = receiver.next().await {
-        match chunk {
-            Ok(chunk) => {
-                if !send_chunk(chunks, bytes::Bytes::from(chunk), remaining).await? {
-                    return Ok(());
-                }
+    let error = loop {
+        // Once the event loop is done, an empty channel that is still open can never receive
+        // another chunk.
+        let next = futures_lite::future::poll_fn(|cx| match receiver.poll_next_unpin(cx) {
+            Poll::Ready(next) => Poll::Ready(Some(next)),
+            Poll::Pending if loop_done.get() => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        })
+        .await;
+        let mut chunk = match next {
+            Some(Some(Ok(chunk))) => chunk,
+            Some(Some(Err(e))) => break e,
+            Some(None) => return Ok(()),
+            None => {
+                return Err(
+                    "the event loop finished while the response body was still open, so \
+                     the body can never complete"
+                        .to_string(),
+                )
             }
-            Err(e) => return Err(format!("response body errored mid-stream: {e}")),
+        };
+        let error = platform::http::coalesce_queued_chunks(receiver, &mut chunk);
+        if !send_chunk(chunks, bytes::Bytes::from(chunk), remaining).await? {
+            return Ok(());
         }
-    }
-    Ok(())
+        if let Some(e) = error {
+            break e;
+        }
+    };
+    Err(fail_after_sent_chunks(chunks, &error).await)
 }
 
-/// Take what a stream body left behind once its event loop finished: everything already enqueued,
-/// and the end of the stream if the body turned out to be complete.
-async fn finish_orphaned_stream(
-    receiver: &mut platform::http::OutgoingBodyReceiver,
+/// Wait until hyper has taken the last chunk sent to `chunks`, so it is written out before the
+/// body fails with `error`, and return the failure's message.
+async fn fail_after_sent_chunks(
     chunks: &mut futures_channel::mpsc::Sender<Result<bytes::Bytes, BodyError>>,
-    remaining: &mut platform::http::Remaining,
-) -> Result<(), String> {
-    // `poll_once` takes only what is ready: a pending read means the channel is still open with
-    // nothing in it, so the body was abandoned.
-    while let Some(next) = futures_lite::future::poll_once(receiver.next()).await {
-        match next {
-            // The channel closed: the body was complete after all.
-            None => return Ok(()),
-            Some(Ok(chunk)) => {
-                if !send_chunk(chunks, bytes::Bytes::from(chunk), remaining).await? {
-                    return Ok(());
-                }
-            }
-            Some(Err(e)) => return Err(format!("response body errored mid-stream: {e}")),
-        }
-    }
-    Err(
-        "the event loop finished while the response body was still open, so the body can never \
-         complete"
-            .to_string(),
-    )
+    error: &platform::http::Error,
+) -> String {
+    let _ = futures_lite::future::poll_fn(|cx| chunks.poll_ready(cx)).await;
+    format!("response body errored mid-stream: {error}")
 }
 
 /// Hand one chunk to hyper, waiting for room, trimmed so the total sent does not exceed the

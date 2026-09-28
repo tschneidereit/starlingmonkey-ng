@@ -169,46 +169,63 @@ pub unsafe fn from_string_raw(s: *mut JSString) -> JSVal {
 
 /// Rooted backing buffer for a [`HandleValueArray`].
 ///
-/// `Function::call*` and `Array::with_contents` take `&[HandleValue]` and
-/// copy the values in here. The copies are traced for as long as the rooted
-/// guard lives.
+/// `Function::call*` and `Array::with_contents` take `&[impl ToJSVal]` and
+/// convert the values in here. The buffer is rooted before the first
+/// conversion, so a conversion that allocates cannot invalidate the values
+/// converted before it. The values are traced for as long as the rooted guard
+/// lives.
 ///
 /// ```ignore
-/// let mut args_root = ValueArrayRooter::new(args);
-/// let args = args_root.root(scope);
+/// let mut args_root = ValueArrayRooter::new(args.len());
+/// let args = args_root.root(scope, args)?;
 /// some_jsapi_call(scope.cx_mut(), &args.handles());
 /// ```
-pub(crate) struct ValueArrayRooter(mozjs::gc::CustomAutoRooter<Vec<JSVal>>);
+pub(crate) struct ValueArrayRooter(mozjs::gc::CustomAutoRooter<ValueBuffer>);
 
-impl<'s> ValueArrayRooter {
-    pub(crate) fn new(
-        scope: &'s crate::gc::scope::Scope<'_>,
-        values: &[impl ToJSVal<'s>],
-    ) -> Result<Self, ExnThrown> {
-        let mut raw_values: Vec<Value> = Vec::with_capacity(values.len());
-        for v in values {
-            raw_values.push(v.to_jsval_raw_throwing(scope)?);
+/// The values a [`ValueArrayRooter`] holds. Up to [`INLINE_VALUES`] live inline, on the stack.
+pub(crate) struct ValueBuffer(smallvec::SmallVec<[JSVal; INLINE_VALUES]>);
+
+/// How many values a [`ValueBuffer`] holds without allocating.
+const INLINE_VALUES: usize = 8;
+
+// SAFETY: every element is a `JSVal`, and `trace` is only invoked with an engine provided tracer.
+unsafe impl mozjs::gc::CustomTrace for ValueBuffer {
+    fn trace(&self, trc: *mut mozjs::jsapi::JSTracer) {
+        for value in &self.0 {
+            value.trace(trc);
         }
-        Ok(Self(mozjs::gc::CustomAutoRooter::new(raw_values)))
+    }
+}
+
+impl ValueArrayRooter {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self(mozjs::gc::CustomAutoRooter::new(ValueBuffer(
+            smallvec::SmallVec::with_capacity(capacity),
+        )))
     }
 
-    pub(crate) fn root<'a>(
+    pub(crate) fn root<'a, 's>(
         &'a mut self,
-        scope: &crate::gc::scope::Scope<'_>,
-    ) -> RootedValueArray<'a> {
+        scope: &'s crate::gc::scope::Scope<'_>,
+        values: &[impl ToJSVal<'s>],
+    ) -> Result<RootedValueArray<'a>, ExnThrown> {
         // SAFETY: adding the rooter to the root stack performs no GC.
-        RootedValueArray(self.0.root(unsafe { scope.raw_cx_no_gc() }))
+        let mut rooted = RootedValueArray(self.0.root(unsafe { scope.raw_cx_no_gc() }));
+        for v in values {
+            rooted.0 .0.push(v.to_jsval_raw_throwing(scope)?);
+        }
+        Ok(rooted)
     }
 }
 
 /// A rooted view over a [`ValueArrayRooter`]'s values; see there.
-pub(crate) struct RootedValueArray<'a>(mozjs::gc::CustomAutoRooterGuard<'a, Vec<JSVal>>);
+pub(crate) struct RootedValueArray<'a>(mozjs::gc::CustomAutoRooterGuard<'a, ValueBuffer>);
 
 impl RootedValueArray<'_> {
     pub(crate) fn handles(&self) -> mozjs::jsapi::HandleValueArray {
         mozjs::jsapi::HandleValueArray {
-            length_: self.0.len(),
-            elements_: self.0.as_ptr(),
+            length_: self.0 .0.len(),
+            elements_: self.0 .0.as_ptr(),
         }
     }
 }

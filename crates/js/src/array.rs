@@ -11,6 +11,7 @@
 use std::os::raw::c_uint;
 
 use crate::builtins::JSType;
+use crate::conversion::ToJSVal;
 use crate::gc::handle::Stack;
 use crate::gc::scope::Scope;
 use crate::value::ValueArrayRooter;
@@ -49,10 +50,10 @@ impl<'s> Stack<'s, Array> {
     /// Create a new array pre-populated with the given values.
     pub fn with_contents(
         scope: &'s Scope<'s>,
-        contents: &[HandleValue],
+        contents: &[impl ToJSVal<'s>],
     ) -> Result<Self, ExnThrown> {
-        let mut contents_root = ValueArrayRooter::new(scope, contents)?;
-        let contents = contents_root.root(scope);
+        let mut contents_root = ValueArrayRooter::new(contents.len());
+        let contents = contents_root.root(scope, contents)?;
         let obj = unsafe { wrappers2::NewArrayObject(scope.cx_mut(), &contents.handles()) };
         unsafe { Self::from_mozjs_rval(scope, obj) }
     }

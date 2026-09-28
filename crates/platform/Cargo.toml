@@ -17,6 +17,7 @@ futures-lite.workspace = true
 url.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libc = "0.2"
 reqwest.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

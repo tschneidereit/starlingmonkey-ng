@@ -5,26 +5,25 @@
 use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods, webidl_union};
 use js::error::{ExnThrown, RangeError};
 use js::gc::scope::Scope;
-use js::{ArrayBuffer, ArrayBufferView};
+use js::{ArrayBuffer, ArrayBufferView, JSString};
 
 /// <https://encoding.spec.whatwg.org/#textdecoder>
 #[webidl_interface]
 pub struct TextDecoder {
-    /// The encoding label, lowercased (e.g. "utf-8", "windows-1252").
-    encoding_name: String,
-    /// The encoding_rs encoding object (always `Some` after construction).
+    /// <https://encoding.spec.whatwg.org/#textdecoder-encoding>
+    /// (always `Some` after construction).
     #[no_trace]
     encoding: Option<&'static encoding_rs::Encoding>,
-    /// <https://encoding.spec.whatwg.org/#textdecoder-error-mode>
+    /// <https://encoding.spec.whatwg.org/#textdecoder-decoder>, which also holds the I/O queue
+    /// and BOM seen state. `None` until the first `decode()` call.
+    #[no_trace]
+    decoder: Option<encoding_rs::Decoder>,
+    /// <https://encoding.spec.whatwg.org/#textdecoder-error-mode>: whether it is "fatal".
     fatal: bool,
     /// <https://encoding.spec.whatwg.org/#textdecoder-ignore-bom>
     ignore_bom: bool,
     /// <https://encoding.spec.whatwg.org/#textdecoder-do-not-flush-flag>
     do_not_flush: bool,
-    /// The streaming decoder state, stored as an Option so we can replace it
-    /// when resetting.
-    #[no_trace]
-    decoder: Option<encoding_rs::Decoder>,
 }
 
 #[webidl_methods]
@@ -39,7 +38,8 @@ impl TextDecoder<'_> {
         let label = label.as_deref().unwrap_or("utf-8");
         let options = options.unwrap_or_default();
 
-        // Steps 1-2: Look up the encoding, rejecting failure and "replacement".
+        // Step 1: Let _encoding_ be the result of `getting an encoding` from _label_.
+        // Step 2: If _encoding_ is failure or `replacement`, then `throw` a ``RangeError``.
         let encoding = encoding_rs::Encoding::for_label_no_replacement(label.as_bytes())
             .ok_or_else(|| {
                 RangeError(format!(
@@ -48,12 +48,13 @@ impl TextDecoder<'_> {
             })?;
 
         let mut data = self.data_mut();
-        data.encoding_name = encoding.name().to_ascii_lowercase();
+        // Step 3: Set `this`'s `encoding` to _encoding_.
         data.encoding = Some(encoding);
+        // Step 4: If _options_["``fatal``"] is true, then set `this`'s `error mode` to
+        //         "`fatal`".
         data.fatal = options.fatal;
+        // Step 5: Set `this`'s `ignore BOM` to _options_["``ignoreBOM``"].
         data.ignore_bom = options.ignore_bom;
-        data.do_not_flush = false;
-        data.decoder = Some(new_decoder(encoding, options.ignore_bom));
 
         Ok(())
     }
@@ -61,50 +62,51 @@ impl TextDecoder<'_> {
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-encoding>
     #[getter]
     fn encoding(&self) -> String {
-        // Step 1: Return this's encoding's name, ASCII lowercased.
-        self.data().encoding_name.clone()
+        // Step 1: Return `this`'s `encoding`'s `name`, `ASCII lowercased`.
+        let encoding = self.data().encoding.expect("set by the constructor");
+        encoding.name().to_ascii_lowercase()
     }
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-fatal>
     #[getter(name = "fatal")]
     fn get_fatal(&self) -> bool {
-        // Step 1: Return true if this's error mode is "fatal"; otherwise false.
+        // Step 1: Return true if `this`'s `error mode` is "`fatal`"; otherwise false.
         self.data().fatal
     }
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-ignorebom>
     #[getter(name = "ignoreBOM")]
     fn ignore_bom(&self) -> bool {
-        // Step 1: Return this's ignore BOM.
+        // Step 1: Return `this`'s `ignore BOM`.
         self.data().ignore_bom
     }
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-decode>
     #[method]
-    fn decode(
+    fn decode<'r>(
         &self,
-        scope: &Scope<'_>,
+        scope: &'r Scope<'_>,
         input: Option<ArrayBufferViewOrArrayBuffer<'_>>,
         options: Option<TextDecodeOptions>,
-    ) -> Result<String, ExnThrown> {
-        let stream = options.is_some_and(|o| o.stream);
-        let last = !stream;
-
+    ) -> Result<JSString<'r>, ExnThrown> {
         let mut data = self.data_mut();
-        let encoding = data
-            .encoding
-            .expect("encoding must be set after construction");
-        let fatal = data.fatal;
-        let ignore_bom = data.ignore_bom;
-
-        // Step 1: If do-not-flush is false, replace the decoder so the new
-        // decode starts fresh; otherwise carry over state from the prior call.
-        if !data.do_not_flush {
-            data.decoder = Some(new_decoder(encoding, ignore_bom));
+        let encoding = data.encoding.expect("set by the constructor");
+        // Step 1: If `this`'s `do not flush` is false, then set `this`'s `decoder` to a new
+        //         instance of `this`'s `encoding`'s `decoder`, `this`'s `I/O queue` to the `I/O
+        //         queue` of bytes « `end-of-queue` », and `this`'s `BOM seen` to false.
+        //         (The `encoding_rs` decoder holds the I/O queue and BOM seen state.)
+        let fresh = !data.do_not_flush;
+        if fresh {
+            data.decoder = Some(new_decoder(encoding, data.ignore_bom));
         }
-        data.do_not_flush = stream;
-        let decoder = data.decoder.as_mut().expect("decoder must be initialized");
+        // Step 2: Set `this`'s `do not flush` to _options_["``stream``"].
+        data.do_not_flush = options.is_some_and(|o| o.stream);
+        let last = !data.do_not_flush;
+        let fatal = data.fatal;
+        let decoder = data.decoder.as_mut().expect("set by step 1");
 
+        // Step 3: If _input_ is given, then `push` a `copy of` _input_ to `this`'s `I/O queue`.
+        //         (We decode directly from _input_'s bytes. Nothing retains them after this call.)
         // SAFETY: `input` is rooted via the Uint8Array handle and the slice
         // is only borrowed for the duration of the decode call below, which
         // is pure CPU work in `encoding_rs` and cannot trigger GC or detach
@@ -115,17 +117,51 @@ impl TextDecoder<'_> {
             None => &[],
         };
 
-        if fatal {
-            let max_len = decoder
-                .max_utf8_buffer_length_without_replacement(bytes.len())
-                .unwrap_or(bytes.len().saturating_mul(4));
-            let mut output = String::with_capacity(max_len);
+        // windows-1252 decodes every byte outside 0x80..=0x9F to the code point of the same
+        // value, and its decoder keeps no state between calls, so such input is its own
+        // Latin-1 output.
+        if encoding == encoding_rs::WINDOWS_1252 && !bytes.iter().any(|b| (0x80..=0x9F).contains(b))
+        {
+            return JSString::from_latin1(scope, bytes);
+        }
+        // A fresh decoder that decodes its whole input at once turns ASCII into the same
+        // characters in every ASCII-compatible encoding.
+        if fresh
+            && last
+            && encoding.is_ascii_compatible()
+            && encoding_rs::Encoding::ascii_valid_up_to(bytes) == bytes.len()
+        {
+            return JSString::from_latin1(scope, bytes);
+        }
 
-            let (result, _read) =
-                decoder.decode_to_string_without_replacement(bytes, &mut output, last);
+        // Step 4: Let _output_ be the `I/O queue` of scalar values « `end-of-queue` ».
+        // Step 5: While true:
+        // Step 5.1: Let _item_ be the result of `reading` from `this`'s `I/O queue`.
+        // Step 5.2: If _item_ is `end-of-queue` and `this`'s `do not flush` is true, then return
+        //           the result of running `serialize I/O queue` with `this` and _output_.
+        // Step 5.3: Otherwise:
+        // Step 5.3.1: Let _result_ be the result of `processing an item` with _item_, `this`'s
+        //             `decoder`, `this`'s `I/O queue`, _output_, and `this`'s `error mode`.
+        // Step 5.3.2: If _result_ is `finished`, then return the result of running `serialize
+        //             I/O queue` with `this` and _output_.
+        // Step 5.3.3: Otherwise, if _result_ is `error`, `throw` a ``TypeError``.
+        //
+        // (One `encoding_rs` call processes every item. `last` is true when `end-of-queue` is
+        // processed rather than returned at step 5.2. The decoder's BOM removal performs
+        // `serialize I/O queue`'s BOM handling. We decode to UTF-16, which SpiderMonkey copies
+        // as is, or narrows to Latin-1 if every code unit fits.)
+        let max_len = decoder
+            .max_utf16_buffer_length(bytes.len())
+            .unwrap_or(bytes.len().saturating_add(1));
+        let mut output = vec![0u16; max_len];
+        if fatal {
+            let (result, _read, written) =
+                decoder.decode_to_utf16_without_replacement(bytes, &mut output, last);
 
             match result {
-                encoding_rs::DecoderResult::InputEmpty => Ok(output),
+                encoding_rs::DecoderResult::InputEmpty => {
+                    JSString::from_utf16(scope, &output[..written])
+                }
                 encoding_rs::DecoderResult::Malformed(_, _) => Err(js::error::throw_type_error(
                     scope,
                     c"The encoded data was not valid.",
@@ -136,14 +172,10 @@ impl TextDecoder<'_> {
             }
         } else {
             // Malformed sequences become U+FFFD.
-            let max_len = decoder
-                .max_utf8_buffer_length(bytes.len())
-                .unwrap_or(bytes.len().saturating_mul(4).saturating_add(3));
-            let mut output = String::with_capacity(max_len);
+            let (_result, _read, written, _had_errors) =
+                decoder.decode_to_utf16(bytes, &mut output, last);
 
-            let (_result, _read, _had_errors) = decoder.decode_to_string(bytes, &mut output, last);
-
-            Ok(output)
+            JSString::from_utf16(scope, &output[..written])
         }
     }
 }

@@ -65,7 +65,7 @@ impl Event {
         Self {
             event_type,
             target: None,
-            time_stamp: performance::now(),
+            time_stamp: performance::coarse_now(),
             flags,
         }
     }

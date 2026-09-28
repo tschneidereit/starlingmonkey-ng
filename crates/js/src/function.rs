@@ -188,8 +188,8 @@ impl<'s> Stack<'s, Function> {
         fval: HandleValue,
         args: &[impl ToJSVal<'a>],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(scope, args)?;
-        let args = args_root.root(scope);
+        let mut args_root = ValueArrayRooter::new(args.len());
+        let args = args_root.root(scope, args)?;
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
             wrappers2::JS_CallFunctionValue(
@@ -211,8 +211,8 @@ impl<'s> Stack<'s, Function> {
         name: &CStr,
         args: &[impl ToJSVal<'a>],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(scope, args)?;
-        let args = args_root.root(scope);
+        let mut args_root = ValueArrayRooter::new(args.len());
+        let args = args_root.root(scope, args)?;
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
             wrappers2::JS_CallFunctionName(
@@ -234,8 +234,8 @@ impl<'s> Stack<'s, Function> {
         fun: impl ToJSVal<'a>,
         args: &[impl ToJSVal<'a>],
     ) -> Result<HandleValue<'a>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(scope, args)?;
-        let args = args_root.root(scope);
+        let mut args_root = ValueArrayRooter::new(args.len());
+        let args = args_root.root(scope, args)?;
         let mut rval = scope.root_value_mut(UndefinedValue());
         let ok = unsafe {
             wrappers2::Call(
@@ -256,8 +256,8 @@ impl<'s> Stack<'s, Function> {
         fun: impl ToJSVal<'s>,
         args: &[impl ToJSVal<'s>],
     ) -> Result<Object<'s>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(scope, args)?;
-        let args = args_root.root(scope);
+        let mut args_root = ValueArrayRooter::new(args.len());
+        let args = args_root.root(scope, args)?;
         let mut result = scope.root_object_mut(std::ptr::null_mut());
         let ok = unsafe {
             wrappers2::Construct1(
@@ -278,8 +278,8 @@ impl<'s> Stack<'s, Function> {
         new_target: HandleObject,
         args: &[impl ToJSVal<'s>],
     ) -> Result<Object<'s>, ExnThrown> {
-        let mut args_root = ValueArrayRooter::new(scope, args)?;
-        let args = args_root.root(scope);
+        let mut args_root = ValueArrayRooter::new(args.len());
+        let args = args_root.root(scope, args)?;
         let mut result = scope.root_object_mut(std::ptr::null_mut());
         let ok = unsafe {
             wrappers2::Construct(

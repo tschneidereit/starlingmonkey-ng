@@ -2480,6 +2480,55 @@ fn a_response_stream_that_errors_mid_flight_leaves_the_body_unterminated() {
     handle.stop();
 }
 
+/// Chunks queued faster than the transport writes them are written together, in batches of up to
+/// 64 KiB: 100 distinct 1 KiB chunks enqueued at once arrive intact and in order.
+#[test]
+fn serve_streams_many_queued_chunks_in_order() {
+    let handler = r#"addEventListener('fetch', (event) => {
+        event.respondWith(new Response(new ReadableStream({
+            start(c) {
+                for (let i = 0; i < 100; i++) {
+                    c.enqueue(new TextEncoder().encode(String(i).padStart(3, '0').repeat(341) + '|'));
+                }
+                c.close();
+            },
+        })));
+    })"#;
+    let handle = start_serve(handler, 18471);
+    let body = request(18471, "GET", "/", "");
+    let expected: String = (0..100)
+        .map(|i| format!("{:03}", i).repeat(341) + "|")
+        .collect();
+    assert_eq!(dechunk(&body), expected);
+    handle.stop();
+}
+
+/// Chunks queued ahead of an invalid chunk are written before the body errors, and the body then
+/// ends unterminated.
+#[test]
+fn queued_chunks_before_an_invalid_chunk_are_written_before_the_error() {
+    let handler = r#"addEventListener('fetch', (event) => {
+        const encoder = new TextEncoder();
+        event.respondWith(new Response(new ReadableStream({
+            start(c) {
+                c.enqueue(encoder.encode('first-'));
+                c.enqueue(encoder.encode('second-'));
+                c.enqueue('a string, not a Uint8Array');
+                c.close();
+            },
+        })));
+    })"#;
+    let handle = start_serve(handler, 18472);
+    let response = raw_request(
+        18472,
+        b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    let (_, body) = response.split_once("\r\n\r\n").expect("a complete head");
+    assert!(body.contains("first-second-"), "got: {response}");
+    assert!(!body.ends_with("0\r\n\r\n"), "got: {response}");
+    handle.stop();
+}
+
 /// The same, for a stream that enqueues something that is not a `Uint8Array`: the body errors
 /// before any byte is written, so the head is already committed and the connection ends
 /// unterminated. WPT

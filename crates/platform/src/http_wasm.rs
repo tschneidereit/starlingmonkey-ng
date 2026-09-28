@@ -208,7 +208,8 @@ async fn write_stream_body(
         })
         .await;
         match chunk {
-            Some(Some(Ok(chunk))) => {
+            Some(Some(Ok(mut chunk))) => {
+                let error = crate::http::coalesce_queued_chunks(receiver, &mut chunk);
                 // Content past the declared length would leave the host framing a message it has
                 // no room for, so the body ends here instead.
                 let Some(chunk) = remaining.take(chunk) else {
@@ -216,6 +217,9 @@ async fn write_stream_body(
                 };
                 if !body_tx.write_all(chunk).await.is_empty() {
                     return BodySendOutcome::Failed(HOST_STOPPED_READING.to_string());
+                }
+                if let Some(e) = error {
+                    return BodySendOutcome::Failed(e.to_string());
                 }
             }
             Some(Some(Err(e))) => return BodySendOutcome::Failed(e.to_string()),

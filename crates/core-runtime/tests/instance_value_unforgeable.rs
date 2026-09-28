@@ -38,9 +38,31 @@ impl Widget {
     }
 }
 
+/// A subclass with an unforgeable accessor of its own, which also inherits `kind`.
+#[jsclass(extends = Widget)]
+struct Gadget {
+    parent: WidgetImpl,
+}
+
+#[jsmethods]
+impl Gadget {
+    #[constructor]
+    fn construct() -> Self {
+        Self {
+            parent: WidgetImpl::construct(),
+        }
+    }
+
+    #[getter(unforgeable)]
+    fn level(&self) -> i32 {
+        3
+    }
+}
+
 fn setup() {
     core_runtime::runtime::register_global_initializer(|scope, global| {
         Widget::add_to_global(scope, global);
+        Gadget::add_to_global(scope, global);
     });
 }
 
@@ -65,5 +87,57 @@ fn unforgeable_accessor_is_not_on_prototype() {
             "Object.getOwnPropertyDescriptor(Widget.prototype, 'kind') === undefined"
         ),
         "true"
+    );
+}
+
+#[test]
+fn instances_share_one_getter_function() {
+    assert_eq!(
+        eval_with_setup(
+            setup,
+            "const get = o => Object.getOwnPropertyDescriptor(o, 'kind').get; \
+             const a = new Widget(); \
+             get(a) === get(new Widget()) && get(a) === get(a.dup()) && get(a).name"
+        ),
+        "get kind"
+    );
+}
+
+#[test]
+fn unforgeable_accessor_is_enumerable_and_non_configurable() {
+    assert_eq!(
+        eval_with_setup(
+            setup,
+            "const d = Object.getOwnPropertyDescriptor(new Widget(), 'kind'); \
+             [d.enumerable, d.configurable, d.set].join()"
+        ),
+        "true,false,"
+    );
+}
+
+#[test]
+fn js_subclass_instances_get_the_unforgeable_accessor() {
+    assert_eq!(
+        eval_with_setup(
+            setup,
+            "class Sub extends Widget { extra() { return 1; } } \
+             const s = new Sub(); \
+             [Object.getOwnPropertyNames(s).join(), s.kind, s.extra(), \
+              Object.getPrototypeOf(s) === Sub.prototype].join()"
+        ),
+        "kind,42,1,true"
+    );
+}
+
+#[test]
+fn rust_subclass_instances_get_inherited_and_own_unforgeable_accessors() {
+    assert_eq!(
+        eval_with_setup(
+            setup,
+            "const g = new Gadget(); \
+             [Object.getOwnPropertyNames(g).sort().join(), g.kind, g.level, \
+              Object.getOwnPropertyNames(new Widget()).join()].join('|')"
+        ),
+        "kind,level|42|3|kind"
     );
 }
