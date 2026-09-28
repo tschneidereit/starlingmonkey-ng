@@ -96,7 +96,7 @@ fn test_jserror_display() {
 
 #[test]
 fn test_js_api_with_runtime() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     // --- String operations ---
@@ -626,7 +626,7 @@ fn test_queue_microtask() {
         static FIRST_ARG_WAS_UNDEFINED: Cell<bool> = const { Cell::new(false) };
     }
 
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     let record = js::Function::new_callback(

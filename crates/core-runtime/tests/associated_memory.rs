@@ -128,7 +128,7 @@ fn associated_memory_survives_relocation() {
     core_runtime::runtime::register_global_initializer(|scope, global| {
         Accounted::add_to_global(scope, global);
     });
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     eval(
@@ -163,7 +163,7 @@ fn destructors_chain_to_the_parent_class() {
     core_runtime::runtime::register_global_initializer(|scope, global| {
         Grandchild::add_to_global(scope, global);
     });
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     eval(

@@ -39,7 +39,7 @@ unsafe fn reset_zeal(scope: &js::gc::scope::Scope<'_>) {
 
 #[test]
 fn test_scope_gc_zeal() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     unsafe {

@@ -663,6 +663,28 @@ pub async unsafe fn run_until_evaluated<S, F>(
     }
 }
 
+/// Settle `completed` async-promise futures with `event_loop` active, so a reaction (a timer, or
+/// releasing the loop's interest, e.g. a FetchEvent's `respondWith` resolving from a `fetch`) runs
+/// against this loop rather than no loop or another request's.
+///
+/// # Safety
+///
+/// As for [`run_until`].
+unsafe fn settle_completed_futures(
+    raw_cx: *mut js::native::RawJSContext,
+    event_loop: &EventLoop,
+    completed: Vec<js::promise::CompletedFuture>,
+) {
+    if completed.is_empty() {
+        return;
+    }
+    with_event_loop(event_loop, |_| {
+        // SAFETY: guaranteed by this function's caller.
+        let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
+        js::promise::settle_completed_futures(&scope, completed);
+    });
+}
+
 /// Runs the event loop in an async loop, calling `should_stop` each turn, and returns when it
 /// returns true.
 ///
@@ -724,12 +746,8 @@ pub async unsafe fn run_until<S, F>(
                     std::task::Poll::Ready(js::promise::poll_pending_futures(owner, cx))
                 })
                 .await;
-                if !completed.is_empty() {
-                    with_event_loop(event_loop, |_| unsafe {
-                        let scope = js::gc::scope::RootScope::from_current_realm(raw_cx);
-                        js::promise::settle_completed_futures(&scope, completed);
-                    });
-                }
+                // SAFETY: guaranteed by this function's caller.
+                unsafe { settle_completed_futures(raw_cx, event_loop, completed) };
                 continue;
             }
             StepOutcome::Done | StepOutcome::Idle => {
@@ -771,15 +789,8 @@ pub async unsafe fn run_until<S, F>(
                 )
                 .await;
 
-                // Settle any completed futures with this loop active, so a reaction (a timer, or
-                // releasing the loop's interest, e.g. a FetchEvent's respondWith resolving from a
-                // `fetch`) runs against this loop rather than no loop or another request's.
-                if !completed.is_empty() {
-                    with_event_loop(event_loop, |_| unsafe {
-                        let scope = js::gc::scope::RootScope::from_current_realm(raw_cx);
-                        js::promise::settle_completed_futures(&scope, completed);
-                    });
-                }
+                // SAFETY: guaranteed by this function's caller.
+                unsafe { settle_completed_futures(raw_cx, event_loop, completed) };
             }
         }
     }

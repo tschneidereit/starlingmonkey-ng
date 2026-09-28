@@ -139,10 +139,7 @@ fn spawn_body_writer(
                 None => write.await,
                 Some(limit) => {
                     let expired = async {
-                        wasip3::clocks::monotonic_clock::wait_for(
-                            limit.as_nanos().min(u64::MAX as u128) as u64,
-                        )
-                        .await;
+                        crate::clock::sleep(limit).await;
                         BodySendOutcome::TimedOut
                     };
                     futures_lite::future::or(write, expired).await
@@ -345,8 +342,16 @@ pub async fn send(request: Request) -> Result<Response, Error> {
             ));
         }
     }
-    let fields =
-        Fields::from_list(&header_entries).map_err(|e| Error(format!("invalid headers: {e:?}")))?;
+    // Appended one at a time rather than with the all-or-nothing `Fields::from_list`, so a header
+    // the host refuses fails the request with an error naming it.
+    let fields = Fields::new();
+    for (name, value) in &header_entries {
+        fields.append(name, value).map_err(|e| {
+            Error(format!(
+                "the host refused the request header `{name}`: {e:?}"
+            ))
+        })?;
+    }
 
     let (body, trailers_tx) = body_contents(request.body);
     let (wasi_request, transmitted) = WasiRequest::new(fields, body.contents, body.trailers, None);

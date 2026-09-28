@@ -62,6 +62,13 @@ pub fn resume_from_snapshot() -> u64 {
     nanoseconds
 }
 
+/// Wait for `duration` on the host's monotonic clock.
+#[cfg(target_arch = "wasm32")]
+pub async fn sleep(duration: std::time::Duration) {
+    let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
+    wasip3::clocks::monotonic_clock::wait_for(nanos).await;
+}
+
 /// A monotonic clock reading, for deadlines that outlive a Wizer snapshot.
 ///
 /// `std::time::Instant` reads the host clock directly, so a deadline taken before a snapshot sits

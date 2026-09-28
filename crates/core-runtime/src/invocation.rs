@@ -45,11 +45,6 @@ impl InvocationState {
         &self.event_loop
     }
 
-    /// Returns a mutable reference to this invocation's event loop.
-    pub fn event_loop_mut(&mut self) -> &mut EventLoop {
-        &mut self.event_loop
-    }
-
     /// Trace all GC-managed objects in this invocation's event loop.
     ///
     /// # Safety
@@ -205,8 +200,8 @@ impl OwnedInvocation {
     }
 
     /// The invocation state (e.g. to drive its event loop).
-    pub fn state_mut(&mut self) -> &mut InvocationState {
-        &mut self.state
+    pub fn state(&self) -> &InvocationState {
+        &self.state
     }
 }
 

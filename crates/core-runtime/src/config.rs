@@ -37,6 +37,13 @@ pub struct RuntimeConfig {
     #[arg(short = 'd', long = "debug")]
     pub debugging: bool,
 
+    /// Record the JavaScript stack each promise and async call was created on, and show it as
+    /// async parent frames in `Error.stack`.
+    ///
+    /// Off by default, since it captures a stack for every promise. Always on for globals that have a debugger attached.
+    #[arg(long = "async-stacks")]
+    pub async_stacks: bool,
+
     /// Use classic (non-module) script mode.
     #[arg(long = "legacy-script")]
     pub legacy_script: bool,
@@ -525,6 +532,7 @@ mod tests {
         assert!(config.module_mode());
         assert!(!config.verbose);
         assert!(!config.debugging);
+        assert!(!config.async_stacks);
         assert!(!config.wpt_mode);
     }
 

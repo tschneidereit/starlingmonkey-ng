@@ -371,7 +371,7 @@ mod handle_value_tests {
         use js::gc::SetGCZeal;
 
         setup();
-        let rt = Runtime::init(&RuntimeConfig::default());
+        let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
         let scope = rt.default_global();
 
         // Mode 14 (Compact): every GC compacts, moving heap objects.
@@ -577,7 +577,7 @@ mod free_fn_tests {
 
     fn eval_module(body: &str) -> String {
         setup();
-        let rt = Runtime::init(&RuntimeConfig::default());
+        let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
         let scope = rt.default_global();
         let source = format!("import * as m from \"restModule\";\nglobalThis._result = {body};");
         // SAFETY: `scope` outlives the evaluation, and the module registry was
@@ -666,11 +666,9 @@ mod free_fn_tests {
 // ============================================================================
 
 mod promise_return_tests {
-    use core_runtime::config::RuntimeConfig;
-    use core_runtime::event_loop::run_microtasks;
-    use core_runtime::runtime::{clear_global_initializers, register_global_initializer, Runtime};
+    use core_runtime::runtime::{clear_global_initializers, register_global_initializer};
+    use core_runtime::test_util::eval_out_with_setup;
     use core_runtime::{jsclass, jsmethods};
-    use js::conversion::FromJSVal;
     use js::error::ExnThrown;
     use js::gc::scope::Scope;
     use js::Promise;
@@ -710,19 +708,15 @@ mod promise_return_tests {
 
     /// Evaluate `code`, drain microtasks, and return `String(globalThis.__out)`.
     fn run(code: &str) -> String {
-        clear_global_initializers();
-        register_global_initializer(|scope, global| {
-            Waiter::add_to_global(scope, global);
-        });
-        let rt = Runtime::init(&RuntimeConfig::default());
-        let scope = rt.default_global();
-        if js::compile::evaluate_with_filename(&scope, code, "test.js", 1).is_err() {
-            panic!("evaluation threw: {:?}", ExnThrown::capture(&scope));
-        }
-        run_microtasks(&scope);
-        let out = js::compile::evaluate_with_filename(&scope, "globalThis.__out", "out.js", 1)
-            .expect("reading __out threw");
-        String::from_jsval(&scope, out, ()).unwrap()
+        eval_out_with_setup(
+            || {
+                clear_global_initializers();
+                register_global_initializer(|scope, global| {
+                    Waiter::add_to_global(scope, global);
+                });
+            },
+            code,
+        )
     }
 
     #[test]

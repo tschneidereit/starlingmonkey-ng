@@ -58,7 +58,7 @@ const _: fn() = || _assert_trace::<Cache<NotTraced>>();
 
 #[test]
 fn traceable_enum_traces_variant_fields() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     let obj = Object::new(&scope, None).unwrap();

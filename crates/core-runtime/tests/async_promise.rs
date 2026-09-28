@@ -62,7 +62,7 @@ fn block_on_event_loop(scope: &Scope<'_>, el: &mut EventLoop) {
 fn async_promise_resolves_and_rejects_via_event_loop() {
     clear_global_initializers();
     register_global_initializer(AsyncTest::add_to_global);
-    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
+    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let mut el = EventLoop::new();
 
@@ -108,7 +108,7 @@ fn zero_delay_interval_does_not_starve_async_futures() {
     // promise never settles, and this test livelocks.
     clear_global_initializers();
     register_global_initializer(AsyncTest::add_to_global);
-    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
+    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let mut el = EventLoop::new();
 
@@ -148,7 +148,7 @@ fn long_handler_timer_chain_does_not_starve_async_futures() {
     // a starved future into an assertion failure instead of a livelock.
     clear_global_initializers();
     register_global_initializer(AsyncTest::add_to_global);
-    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
+    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let mut el = EventLoop::new();
 
@@ -182,4 +182,33 @@ fn long_handler_timer_chain_does_not_starve_async_futures() {
 
     let v = js::compile::evaluate_with_filename(&scope, "globalThis.__out", "<check>", 1).unwrap();
     assert_eq!(String::from_jsval(&scope, v, ()).unwrap(), "done:7");
+}
+
+/// A future spawned with no event loop active belongs to no single loop: cancelling one loop's
+/// futures leaves it in place, and another loop still drives it to completion.
+#[test]
+fn cancelling_one_loop_keeps_unowned_futures_for_the_others() {
+    clear_global_initializers();
+    register_global_initializer(AsyncTest::add_to_global);
+    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init");
+    let scope = rt.default_global();
+    let cancelled = EventLoop::new();
+    let mut driving = EventLoop::new();
+
+    js::compile::evaluate_with_filename(
+        &scope,
+        r#"
+        globalThis.__out = "pending";
+        new AsyncTest().delayed(7).then(v => { globalThis.__out = String(v); });
+        "#,
+        "<test>",
+        1,
+    )
+    .expect("evaluation failed");
+
+    cancelled.cancel_pending_futures();
+    block_on_event_loop(&scope, &mut driving);
+
+    let v = js::compile::evaluate_with_filename(&scope, "globalThis.__out", "<check>", 1).unwrap();
+    assert_eq!(String::from_jsval(&scope, v, ()).unwrap(), "7");
 }

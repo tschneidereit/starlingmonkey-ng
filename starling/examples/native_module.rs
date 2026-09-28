@@ -43,7 +43,7 @@ mod math_utils {
 }
 
 fn main() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     // Register native module using the generated convenience function

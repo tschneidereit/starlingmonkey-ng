@@ -17,7 +17,7 @@ use web_globals::events::algorithms::ScriptStackState;
 fn test_runtime() -> std::rc::Rc<Runtime> {
     clear_global_initializers();
     libstarling::register_builtins();
-    Runtime::init(&core_runtime::config::RuntimeConfig::default())
+    Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init")
 }
 
 fn eval(scope: &Scope<'_>, src: &str) -> Result<String, String> {

@@ -141,7 +141,7 @@ fn eval_then_drain(code: &str, probe: &str) -> String {
     clear_global_initializers();
     register_global_initializer(Payload::add_to_global);
     register_global_initializer(PromiseArgs::add_to_global);
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     if js::compile::evaluate_with_filename(&scope, code, "test.js", 1).is_err() {

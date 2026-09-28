@@ -15,25 +15,18 @@
 // This file contains nothing platform-specific, so skip it on wasm32.
 #![cfg(not(target_arch = "wasm32"))]
 
-use core_runtime::config::RuntimeConfig;
-use core_runtime::event_loop::run_microtasks;
-use core_runtime::runtime::{clear_global_initializers, register_global_initializer, Runtime};
-use js::conversion::FromJSVal;
-use js::error::ExnThrown;
+use core_runtime::runtime::{clear_global_initializers, register_global_initializer};
+use core_runtime::test_util::eval_out_with_setup;
 
 /// Evaluate `code`, drain microtasks, and return `String(globalThis.__out)`.
 fn run(code: &str) -> String {
-    clear_global_initializers();
-    register_global_initializer(|scope, global| web_streams::add_to_global(scope, global));
-    let rt = Runtime::init(&RuntimeConfig::default());
-    let scope = rt.default_global();
-    if js::compile::evaluate_with_filename(&scope, code, "test.js", 1).is_err() {
-        panic!("evaluation threw: {:?}", ExnThrown::capture(&scope));
-    }
-    run_microtasks(&scope);
-    let out = js::compile::evaluate_with_filename(&scope, "globalThis.__out", "out.js", 1)
-        .expect("reading __out threw");
-    String::from_jsval(&scope, out, ()).unwrap()
+    eval_out_with_setup(
+        || {
+            clear_global_initializers();
+            register_global_initializer(|scope, global| web_streams::add_to_global(scope, global));
+        },
+        code,
+    )
 }
 
 /// Bound functions are accepted as WebIDL callback-type members: a bound `pull`

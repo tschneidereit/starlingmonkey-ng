@@ -9,7 +9,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use core_runtime::event_loop::{run_to_completion, with_event_loop, EventLoop};
-use core_runtime::report_pending_exception;
 use core_runtime::runtime::{clear_global_initializers, Runtime};
 use fetch_event::fetch_event::FetchEvent;
 use js::conversion::FromJSVal;
@@ -22,12 +21,10 @@ use web_globals::events::algorithms::ScriptStackState;
 fn eval<'s>(scope: &'s Scope, src: &str) -> HandleValue<'s> {
     match js::compile::evaluate_with_filename(scope, src, "<dispatch-test>", 1) {
         Ok(v) => v,
-        Err(_) => {
-            unsafe {
-                report_pending_exception(scope);
-            }
-            panic!("eval error for input: {}", src)
-        }
+        Err(_) => panic!(
+            "eval error for input: {src}: {}",
+            js::error::ExnThrown::capture(scope)
+        ),
     }
 }
 
@@ -41,7 +38,7 @@ fn eval<'s>(scope: &'s Scope, src: &str) -> HandleValue<'s> {
 fn test_runtime() -> std::rc::Rc<Runtime> {
     clear_global_initializers();
     libstarling::register_builtins();
-    Runtime::init(&core_runtime::config::RuntimeConfig::default())
+    Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init")
 }
 
 /// Register the builtins on `scope`'s global, plus the `mark` helper these tests respond with.

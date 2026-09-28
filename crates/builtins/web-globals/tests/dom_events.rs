@@ -305,7 +305,7 @@ fn listener_identity_survives_compacting_gc() {
     use js::gc::{self, GCOptions, GCReason};
 
     setup();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     // Register one listener. State lives on `globalThis` so it survives across
@@ -438,7 +438,7 @@ fn global_listener_survives_compacting_gc() {
     use js::gc::{self, GCOptions, GCReason};
 
     setup();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     // The closure's only strong reference is the global's listener list.

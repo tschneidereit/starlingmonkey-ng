@@ -157,7 +157,7 @@ fn init_and_eval(
     ),
     String,
 > {
-    let runtime = Runtime::init(&config);
+    let runtime = Runtime::init(&config)?;
 
     let (source, filename) = content_script(&config)?;
 
@@ -239,41 +239,6 @@ pub fn setup_for_serve(
     String,
 > {
     init_and_eval(config)
-}
-
-/// Extract and print the pending JS exception, if any.
-///
-/// # Safety
-///
-/// Called from within an active realm context.
-pub unsafe fn report_pending_exception(scope: &js::gc::scope::Scope<'_>) {
-    use js::exception;
-
-    if !exception::is_pending(scope) {
-        eprintln!("Error: script execution failed (no exception details available)");
-        return;
-    }
-
-    let exc_val = match exception::get_pending(scope) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("Error: script execution failed (could not retrieve exception)");
-            return;
-        }
-    };
-    exception::clear(scope);
-
-    // Try to convert the exception to a string.
-    // TODO: use mozjs's better abstractions for this.
-    match js::JSString::from_value(scope, exc_val) {
-        Ok(js_str) => match js_str.to_utf8(scope) {
-            Ok(msg) => eprintln!("Error: {}", msg),
-            Err(_) => eprintln!("Error: script execution failed"),
-        },
-        Err(_) => {
-            eprintln!("Error: script execution failed");
-        }
-    }
 }
 
 #[cfg(test)]

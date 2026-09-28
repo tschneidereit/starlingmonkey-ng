@@ -240,7 +240,7 @@ fn header_list(headers: &http::HeaderMap) -> Vec<(String, String)> {
 ///   the transport layer, and sending a `500` response for a `network error`.
 pub(crate) async fn dispatch_fetch<'s, S, F>(
     scope: &'s js::gc::scope::Scope<'_>,
-    invocation: &mut InvocationState,
+    invocation: &InvocationState,
     method: String,
     url: String,
     headers: http::HeaderMap,

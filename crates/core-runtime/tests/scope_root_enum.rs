@@ -29,7 +29,7 @@ enum Reply {
 
 #[test]
 fn scope_root_enum_unit_variant_roots() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     let rooted = Reply::Empty.root(&scope);

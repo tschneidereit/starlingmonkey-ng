@@ -245,7 +245,7 @@ fn start_same_origin_redirect_auth_server() -> String {
 fn run_and_get_out(code: &str) -> String {
     clear_global_initializers();
     libstarling::register_builtins();
-    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
+    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let rawcx = unsafe { scope.cx_mut().raw_cx() };
     let el = EventLoop::new();
@@ -785,7 +785,7 @@ fn a_reused_abort_signal_does_not_accumulate_fetch_abort_algorithms() {
     let url = start_repeating_server(3, "body");
     clear_global_initializers();
     libstarling::register_builtins();
-    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
+    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let rawcx = unsafe { scope.cx_mut().raw_cx() };
     let el = EventLoop::new();

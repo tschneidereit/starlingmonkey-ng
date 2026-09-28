@@ -33,6 +33,11 @@ js::instance_local! {
     static RUNTIME: RefCell<Option<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts)>> =
         const { RefCell::new(None) };
 
+    /// Why [`runtime`] failed to start the runtime. Every later request fails with the same error
+    /// instead of repeating the whole bootstrap, since a bootstrap per request is far heavier
+    /// than serving from a running instance.
+    static STARTUP_FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
+
     /// The content script's startup event loop, holding its top-level async work. [`runtime`]
     /// creates it undriven, since it must stay synchronous so concurrent first requests can't
     /// race into two runtimes. The first request drives it to completion via [`ensure_started`]
@@ -79,10 +84,22 @@ fn install_runtime(pair: (Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeo
 /// Get the runtime and its context, creating them on first use: run the content script
 /// (registering `fetch` handlers) and enter the global realm persistently. Synchronous (no
 /// `await`), so concurrent first requests can't race into two runtimes.
+///
+/// A failed startup is final: this returns its error on every later call without retrying.
 fn runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts), String> {
     if let Some(pair) = RUNTIME.with(|cell| cell.borrow().clone()) {
         return Ok(pair);
     }
+    if let Some(failure) = STARTUP_FAILURE.with(|cell| cell.borrow().clone()) {
+        return Err(failure);
+    }
+    start_runtime().inspect_err(|failure| {
+        STARTUP_FAILURE.with(|cell| *cell.borrow_mut() = Some(failure.clone()));
+    })
+}
+
+/// Create the runtime for [`runtime`].
+fn start_runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts), String> {
     // `wasmtime serve` passes the guest no arguments, so the HTTP entry point is configured
     // through `STARLINGMONKEY_CONFIG` instead (an empty one yields the defaults: `./index.js`).
     let config = RuntimeConfig::from_env().map_err(|e| e.to_string())?;
@@ -124,14 +141,14 @@ pub fn mark_resumed_from_snapshot() {
 /// state.
 pub async fn pre_initialize() -> Result<(), String> {
     let (_runtime, raw_cx, _) = runtime()?;
-    let Startup::Pending(mut invocation, evaluation) =
+    let Startup::Pending(invocation, evaluation) =
         STARTUP.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), Startup::Driving))
     else {
         // Nothing to evaluate: `runtime` was already stood up, so this is a second call.
         mark_resumed_from_snapshot();
         return Ok(());
     };
-    drive_startup(raw_cx, invocation.state_mut().event_loop(), &evaluation).await;
+    drive_startup(raw_cx, invocation.state().event_loop(), &evaluation).await;
 
     // SAFETY: `runtime` entered the default global's realm for the process lifetime.
     let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
@@ -142,7 +159,7 @@ pub async fn pre_initialize() -> Result<(), String> {
     // If any external async tasks are active, that means component model resources are held, making
     // a snapshot impossible.
     if invocation
-        .state_mut()
+        .state()
         .event_loop()
         .has_active_external_async_tasks()
     {
@@ -247,7 +264,7 @@ async fn ensure_started(raw_cx: *mut js::native::RawJSContext) {
                     pending: Some((invocation, evaluation)),
                 };
                 let (invocation, evaluation) = driving.pending.as_mut().expect("just set");
-                drive_startup(raw_cx, invocation.state_mut().event_loop(), evaluation).await;
+                drive_startup(raw_cx, invocation.state().event_loop(), evaluation).await;
                 report_missing_fetch_listener(raw_cx, evaluation);
                 let (invocation, _) = driving.pending.take().expect("just driven");
                 STARTUP.with(|cell| *cell.borrow_mut() = Startup::Done);
@@ -281,7 +298,7 @@ async fn drive_startup(
     // SAFETY: `raw_cx` is valid for the duration of this await, since the runtime outlives the
     // request.
     unsafe {
-        run_until_evaluated(raw_cx, event_loop, crate::wasm_sleep, evaluation).await;
+        run_until_evaluated(raw_cx, event_loop, platform::clock::sleep, evaluation).await;
     }
 }
 
@@ -310,10 +327,7 @@ fn report_missing_fetch_listener(
 /// in flight. The task lives as long as the script requires, from one poll for a script that
 /// left nothing behind to the instance's lifetime for one whose `fetch` never responds.
 // TODO: Should reconsider this, it might make more sense to abort async work that's not added to waitUntil.
-fn keep_startup_loop_running(
-    raw_cx: *mut js::native::RawJSContext,
-    mut invocation: OwnedInvocation,
-) {
+fn keep_startup_loop_running(raw_cx: *mut js::native::RawJSContext, invocation: OwnedInvocation) {
     wasip3::wit_bindgen::spawn_local(async move {
         // SAFETY: `runtime` entered the default global's realm for the process lifetime, and
         // `raw_cx` outlives this task, since the runtime is held in a process-lifetime
@@ -321,8 +335,8 @@ fn keep_startup_loop_running(
         unsafe {
             core_runtime::event_loop::run_to_completion(
                 raw_cx,
-                invocation.state_mut().event_loop(),
-                crate::wasm_sleep,
+                invocation.state().event_loop(),
+                platform::clock::sleep,
             )
             .await;
         }
@@ -377,7 +391,7 @@ async fn dispatch_request(
     let body = has_body.then_some(body);
     let head_request = method.eq_ignore_ascii_case("HEAD");
 
-    let mut invocation = OwnedInvocation::new(runtime.clone(), InvocationState::new());
+    let invocation = OwnedInvocation::new(runtime.clone(), InvocationState::new());
 
     // The realm this request runs in is the process-wide global, which stays entered for the
     // process lifetime (`runtime` leaks the entering scope). There is no per-request global: one
@@ -387,13 +401,13 @@ async fn dispatch_request(
     let request_realm = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
     let mut parts = crate::serve_common::dispatch_fetch(
         &request_realm,
-        invocation.state_mut(),
+        invocation.state(),
         method,
         url,
         headers,
         body,
         content_length,
-        crate::wasm_sleep,
+        platform::clock::sleep,
         &clock,
     )
     .await;
@@ -438,8 +452,8 @@ async fn dispatch_request(
         unsafe {
             let outcome = drive_body_send(
                 raw_cx,
-                invocation.state_mut().event_loop(),
-                crate::wasm_sleep,
+                invocation.state().event_loop(),
+                platform::clock::sleep,
                 &clock,
                 body_done,
                 || abandon_body.abandon(),
@@ -467,7 +481,7 @@ async fn dispatch_request(
                 let scope = js::gc::scope::RootScope::from_current_realm(raw_cx);
                 crate::serve_common::signal_body_outcome(
                     &scope,
-                    invocation.state_mut().event_loop(),
+                    invocation.state().event_loop(),
                     abort_controller.as_ref(),
                     outcome,
                 );
@@ -478,8 +492,8 @@ async fn dispatch_request(
             // `waitUntil` window must not depend on which.
             crate::serve_common::drain_lifetime_work(
                 raw_cx,
-                invocation.state_mut().event_loop(),
-                crate::wasm_sleep,
+                invocation.state().event_loop(),
+                platform::clock::sleep,
                 &clock,
             )
             .await;

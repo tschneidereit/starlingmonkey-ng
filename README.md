@@ -104,6 +104,7 @@ Options:
       --legacy-script                Run as a classic script instead of an ES module
   -v, --verbose                      Enable verbose logging
   -d, --debug                        Enable script debugging via socket
+      --async-stacks                 Show async parent frames in Error.stack (always on under a debugger)
       --wpt-mode                     Enable WPT (Web Platform Tests) mode
       --init-location <URL>          Override the location URL for initialization
       --strip-path-prefix <PREFIX>   Strip this prefix from script paths
@@ -139,6 +140,10 @@ is `undefined` at the top level.
 
 **Legacy script mode** (`--legacy-script`) — sloppy mode, no
 `import`/`export`, `this` is the global object.
+
+**Exit status** — `0` when the script and all the work it scheduled complete, `1`
+when the script throws or an initializer, the event loop or the runtime fails (the
+error is printed to stderr), and `2` for invalid command-line arguments.
 
 ---
 

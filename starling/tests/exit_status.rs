@@ -6,11 +6,8 @@
 
 use std::process::Command;
 
-/// An error before the event loop runs — here an unreadable `-i` initializer
-/// script — must exit with code 1. The Runtime is still alive when
-/// `process::exit` fires the atexit handler, so a shutdown that insisted on
-/// dropping the engine would trip mozjs's outstanding-handle assert and turn
-/// the exit into a SIGABRT.
+/// An error before the event loop runs, here an unreadable `-i` initializer
+/// script, exits with code 1 rather than aborting.
 #[test]
 fn initializer_error_exits_with_code_one() {
     let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
@@ -93,4 +90,53 @@ fn initializer_event_loop_semantics() {
         "a synchronously cleared timer must not fail init (stderr: {})",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// A content script that throws reports the error on stderr and exits with 1.
+#[test]
+fn throwing_script_exits_with_code_one() {
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
+        .args(["-e", "throw new Error('boom')"])
+        .output()
+        .expect("failed to run starling");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("boom"), "stderr: {stderr}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("boom"),
+        "the error must not go to stdout"
+    );
+}
+
+/// `--help` exits with 0 and an unknown flag with clap's usage-error status 2.
+#[test]
+fn argument_errors_use_clap_exit_statuses() {
+    let help = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
+        .arg("--help")
+        .output()
+        .expect("failed to run starling");
+    assert_eq!(help.status.code(), Some(0));
+    let bad = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
+        .arg("--no-such-flag")
+        .output()
+        .expect("failed to run starling");
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+/// A syntax error in an imported file module is reported with its own message
+/// and location, not replaced by a generic load failure.
+#[test]
+fn imported_module_syntax_error_keeps_its_location() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main.mjs");
+    std::fs::write(&main, "import './bad.mjs';").unwrap();
+    std::fs::write(dir.path().join("bad.mjs"), "export const x = ;").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
+        .arg(&main)
+        .output()
+        .expect("failed to run starling");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("expected expression"), "stderr: {stderr}");
+    assert!(stderr.contains("bad.mjs:1:"), "stderr: {stderr}");
 }

@@ -2,18 +2,13 @@
 
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
-    env,
     ffi::c_void,
-    process,
     ptr::NonNull,
     rc::Rc,
     sync::{Mutex, OnceLock},
 };
 
-use crate::{
-    config::RuntimeConfig, event_loop, invocation::InvocationRegistry, module,
-    report_pending_exception,
-};
+use crate::{config::RuntimeConfig, event_loop, invocation::InvocationRegistry, module};
 use js::{
     engine::{JSEngine, JSEngineHandle, MozJSRuntime, RealmOptions},
     gc::{
@@ -146,20 +141,6 @@ static ENGINE: OnceLock<Mutex<EngineState>> = OnceLock::new();
 
 unsafe extern "C" {
     fn atexit(func: unsafe extern "C" fn()) -> std::os::raw::c_int;
-    fn _exit(status: std::os::raw::c_int) -> !;
-}
-
-/// Exit the process with `code` without running C `atexit` handlers or C++
-/// static destructors.
-///
-/// Used on error paths that fire while a [`Runtime`] is still alive, avoiding
-/// failing asserts inside of SpiderMonkey.
-fn exit_without_cleanup(code: std::os::raw::c_int) -> ! {
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    // SAFETY: `_exit` is always safe to call; it terminates the process.
-    unsafe { _exit(code) }
 }
 
 /// `atexit` callback: takes the `JSEngine` out of the global and drops it,
@@ -242,22 +223,6 @@ impl std::fmt::Debug for Runtime {
 }
 
 impl Runtime {
-    pub fn init_from_env() -> Rc<Self> {
-        let config = RuntimeConfig::from_env().unwrap_or_else(|e| {
-            eprintln!("Error loading runtime config: {}", e);
-            process::exit(1);
-        });
-        Self::init(&config)
-    }
-
-    pub fn init_from_args() -> Rc<Self> {
-        let config = RuntimeConfig::from_args(env::args()).unwrap_or_else(|e| {
-            eprintln!("Error loading runtime config: {}", e);
-            process::exit(1);
-        });
-        Self::init(&config)
-    }
-
     /// Get a mutable reference to the inner MozJS runtime.
     ///
     /// # Safety
@@ -275,11 +240,15 @@ impl Runtime {
     /// The runtime owns the SpiderMonkey context and all global objects created
     /// in that context. The caller is responsible for keeping the `Rc<Runtime>`
     /// alive for as long as the runtime is needed.
-    pub fn init(config: &RuntimeConfig) -> Rc<Self> {
+    ///
+    /// Returns `Err` with a description if the configured initializer script can't
+    /// be read, throws, or leaves asynchronous work behind.
+    pub fn init(config: &RuntimeConfig) -> Result<Rc<Self>, String> {
         crate::config::set_enforce_fetch_restrictions(config.enforce_fetch_restrictions());
         let mut mozjs_rt =
             unsafe { MozJSRuntime::create_with_internal_job_queues(engine_handle(), None) };
         js::gc::init(mozjs_rt.cx());
+        js::context::set_async_stack_capture(mozjs_rt.cx(), !config.async_stacks);
 
         let rt = Rc::new(Self {
             mozjs_rt: UnsafeCell::new(mozjs_rt),
@@ -310,7 +279,8 @@ impl Runtime {
 
         // Register GC tracer for the module registry so cached module
         // objects are properly traced.
-        module::init_module_gc_tracer(rt.mozjs_rt_mut().cx(), self_ptr as *const Self);
+        // SAFETY: as for the runtime tracer above, `Drop` removes it.
+        unsafe { module::init_module_gc_tracer(rt.mozjs_rt_mut().cx(), self_ptr as *const Self) };
 
         // Ensure `FinalizationRegistry` callbacks get run.
         crate::finalization::install(rt.mozjs_rt_mut().cx());
@@ -319,9 +289,9 @@ impl Runtime {
 
         // Create the default global and register builtins.
         drop(rt.new_global());
-        rt.run_initializer_script(config);
+        rt.run_initializer_script(config)?;
 
-        rt
+        Ok(rt)
     }
 
     /// Create a new global object (and realm), install all registered global initializers on it,
@@ -373,16 +343,14 @@ impl Runtime {
         RootScope::new_with_realm(self.mozjs_rt_mut().cx(), global)
     }
 
-    fn run_initializer_script(&self, config: &RuntimeConfig) {
+    fn run_initializer_script(&self, config: &RuntimeConfig) -> Result<(), String> {
         // Run initializer script if provided (always as legacy script).
         let Some(ref init_path) = config.initializer_script_path else {
-            return;
+            return Ok(());
         };
         let scope = self.default_global();
-        let init_source = std::fs::read_to_string(init_path).unwrap_or_else(|e| {
-            eprintln!("Error reading initializer script '{}': {}", init_path, e);
-            exit_without_cleanup(1);
-        });
+        let init_source = std::fs::read_to_string(init_path)
+            .map_err(|e| format!("Error reading initializer script '{init_path}': {e}"))?;
         let filename = init_path.as_str();
 
         // The initializer runs with its own event loop active, so scheduling APIs such as
@@ -401,22 +369,23 @@ impl Runtime {
             failed
         });
         if failed {
-            eprintln!("Error evaluating initializer script '{init_path}':");
-            unsafe { report_pending_exception(&scope) };
-            exit_without_cleanup(1);
+            return Err(format!(
+                "Error evaluating initializer script '{init_path}': {}",
+                js::error::ExnThrown::capture(&scope)
+            ));
         }
 
         // Nothing drives this loop after initialization: leftover async work
         // (a live timer, an in-flight promise-backed operation) would be
         // silently dropped, so make it a hard error instead.
         if invocation.event_loop().is_alive() {
-            eprintln!(
+            return Err(format!(
                 "Error: initializer script '{init_path}' left asynchronous work \
                  (timers or pending operations) behind. Initializer scripts must \
                  complete synchronously"
-            );
-            exit_without_cleanup(1);
+            ));
         }
+        Ok(())
     }
 
     /// Returns the `JSRuntime` object.
@@ -490,6 +459,9 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        // Futures left by loops that were never canceled, and those spawned with no loop active,
+        // have to go while the context is alive.
+        js::promise::cancel_all_pending_futures();
         // Clear module state while tracers are still registered.
         // Heap::drop fires GC write barriers which can trigger GC under
         // GC zeal — the module tracer must still be registered.
@@ -503,14 +475,16 @@ impl Drop for Runtime {
         // The class registry is owned by the global object and cleaned
         // up by its finalize hook — no explicit clearing needed.
         let self_ptr = self as *const Self as *mut c_void;
+        // SAFETY: `init` registered both tracers with this callback and this address, which is
+        // the `Rc` allocation `self` lives in.
         unsafe {
             js::gc::remove_extra_gc_roots_tracer(
                 self.mozjs_rt().cx_no_gc(),
                 Some(trace_runtime_cb),
                 self_ptr,
             );
+            module::remove_module_gc_tracer(self.mozjs_rt().cx_no_gc(), self_ptr as *const Self);
         }
-        module::remove_module_gc_tracer(self.mozjs_rt().cx_no_gc(), self_ptr as *const Self);
         // Only if this is still the current runtime: a second one created on
         // this thread has already replaced the pointer with its own.
         if std::ptr::eq(CURRENT.get(), self) {

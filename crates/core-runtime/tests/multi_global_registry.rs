@@ -41,7 +41,7 @@ fn displaced_global_registry_survives_compacting_gc() {
     core_runtime::runtime::register_global_initializer(|scope, global| {
         Probe::add_to_global(scope, global);
     });
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
 
     // Realm A: the initial default global.
     let scope_a = rt.default_global();

@@ -30,7 +30,7 @@ fn evaluate(scope: &js::gc::scope::Scope<'_>, code: &str) {
 fn collections_while_building(constructor: &str) -> u32 {
     clear_global_initializers();
     libstarling::register_builtins();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     evaluate(&scope, "globalThis.body = 'x'.repeat(1 << 20);");
     let before = gc_count(&scope);
@@ -62,7 +62,7 @@ fn consumed_and_cloned_bodies_keep_the_accounting_balanced() {
     // so this test's value is in running under that feature.
     clear_global_initializers();
     libstarling::register_builtins();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     evaluate(
         &scope,

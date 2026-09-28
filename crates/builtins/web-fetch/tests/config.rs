@@ -17,24 +17,16 @@
 
 use core_runtime::config::RuntimeConfig;
 use core_runtime::runtime::{clear_global_initializers, Runtime};
-use js::conversion::FromJSVal;
+use core_runtime::test_util::eval_and_read_out;
 
 /// Evaluate `code` in a runtime initialized from `config`, returning
 /// `String(globalThis.__out)`.
 fn run(config: &RuntimeConfig, code: &str) -> String {
     clear_global_initializers();
     libstarling::register_builtins();
-    let rt = Runtime::init(config);
+    let rt = Runtime::init(config).expect("runtime init");
     let scope = rt.default_global();
-    if js::compile::evaluate_with_filename(&scope, code, "test.js", 1).is_err() {
-        panic!(
-            "evaluation threw: {:?}",
-            js::error::ExnThrown::capture(&scope)
-        );
-    }
-    let out = js::compile::evaluate_with_filename(&scope, "String(globalThis.__out)", "out.js", 1)
-        .expect("reading __out threw");
-    String::from_jsval(&scope, out, ()).unwrap()
+    eval_and_read_out(&scope, code)
 }
 
 const PERMISSIVE_PROBE: &str = r#"
@@ -91,16 +83,12 @@ fn explicit_flag_overrides_either_default() {
 fn setter_overrides_after_init() {
     clear_global_initializers();
     libstarling::register_builtins();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     core_runtime::config::set_enforce_fetch_restrictions(true);
     assert!(core_runtime::config::enforce_fetch_restrictions());
-    let out = js::compile::evaluate_with_filename(&scope, ENFORCED_PROBE, "test.js", 1);
-    assert!(out.is_ok());
-    let out = js::compile::evaluate_with_filename(&scope, "String(globalThis.__out)", "out.js", 1)
-        .expect("reading __out threw");
     assert_eq!(
-        String::from_jsval(&scope, out, ()).unwrap(),
+        eval_and_read_out(&scope, ENFORCED_PROBE),
         "host=null,connectThrew=true"
     );
     // Restore for other tests on this thread.

@@ -16,13 +16,15 @@ use libstarling::config::RuntimeConfig;
 fn main() {
     let config = match RuntimeConfig::from_args(std::env::args()) {
         Ok(config) => config,
-        Err(e) => {
-            let _ = e.print();
-            exit(0);
-        }
+        // `--help` and `--version` print to stdout and exit with 0. A usage error prints to
+        // stderr and exits with 2.
+        Err(e) => e.exit(),
     };
 
-    let _ = libstarling::run(config).map_err(|e| println!("{e}"));
+    if let Err(e) = libstarling::run(config) {
+        eprintln!("{e}");
+        exit(1);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

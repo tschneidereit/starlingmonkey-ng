@@ -110,7 +110,7 @@ pub fn serve_with_shutdown(
     // its side effects) one extra time, in a global that goes on to serve nothing, so that mode
     // only sets up the runtime itself.
     let (runtime, startup) = if config.serve_isolated {
-        (Runtime::init(&config), None)
+        (Runtime::init(&config)?, None)
     } else {
         let (runtime, invocation, evaluation) = core_runtime::setup_for_serve(config.clone())?;
         (runtime, Some((invocation, evaluation)))
@@ -177,7 +177,7 @@ async fn run_server(
         unsafe {
             run_until_evaluated(
                 raw_cx,
-                invocation.state_mut().event_loop(),
+                invocation.state().event_loop(),
                 tokio::time::sleep,
                 evaluation,
             )
@@ -195,7 +195,7 @@ async fn run_server(
     // for each request, there is no single realm a background loop could be stepped in.
     let background_loop = background
         .as_mut()
-        .map(|(invocation, _)| invocation.state_mut().event_loop());
+        .map(|(invocation, _)| invocation.state().event_loop());
 
     // We clone rather than move the caller's handle. `server_realm` points into this runtime, and
     // a local holding the last reference would free the runtime on the way out ahead of
@@ -351,19 +351,19 @@ impl RequestLoop {
         ))
     }
 
-    fn state_mut(&mut self) -> &mut InvocationState {
-        self.0.state_mut()
+    fn state(&self) -> &InvocationState {
+        self.0.state()
     }
 
-    fn event_loop(&mut self) -> &EventLoop {
-        self.0.state_mut().event_loop()
+    fn event_loop(&self) -> &EventLoop {
+        self.0.state().event_loop()
     }
 }
 
 impl Drop for RequestLoop {
     fn drop(&mut self) {
         // `cancel_pending_futures` is idempotent, so it's safe to always run this.
-        self.0.state_mut().event_loop().cancel_pending_futures();
+        self.0.state().event_loop().cancel_pending_futures();
     }
 }
 
@@ -513,12 +513,12 @@ async fn serve_request<'a>(
     // request's own work, so its end-to-end deadline starts here.
     let clock = context.timeouts.start_clock();
 
-    let mut invocation = RequestLoop::new(&context.runtime);
+    let invocation = RequestLoop::new(&context.runtime);
     let realm = context.enter_request_realm();
 
     if let Some(script) = context.per_request_script() {
         if let Err(status) =
-            evaluate_into_request_global(context, &mut invocation, script, &clock).await
+            evaluate_into_request_global(context, &invocation, script, &clock).await
         {
             return Ok(status_response(status));
         }
@@ -541,7 +541,7 @@ async fn serve_request<'a>(
         let scope = unsafe { context.runtime.scope() };
         let dispatch = crate::serve_common::dispatch_fetch(
             &scope,
-            invocation.state_mut(),
+            invocation.state(),
             head.method.to_string(),
             request_url(&head),
             std::mem::take(&mut head.headers),
@@ -603,7 +603,7 @@ async fn serve_request<'a>(
 /// place before the event is dispatched. `Err` is the status to respond with instead.
 async fn evaluate_into_request_global(
     context: &ServeContext,
-    invocation: &mut RequestLoop,
+    invocation: &RequestLoop,
     script: &ContentScript,
     clock: &RequestClock,
 ) -> Result<(), u16> {
@@ -662,7 +662,7 @@ async fn evaluate_into_request_global(
 async fn finish_request(
     _realm: Option<RootScope<'_, EnteredRealm>>,
     context: &ServeContext,
-    mut invocation: RequestLoop,
+    invocation: RequestLoop,
     abort_controller: Option<js::gc::handle::RootedHeap<AbortControllerImpl>>,
     producer: Option<BodyProducer>,
     mut incoming_pump: BodyPump,

@@ -70,7 +70,7 @@ impl Task for CounterTask {
 
 #[test]
 fn test_event_loop() {
-    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default());
+    let rt = Runtime::init(&core_runtime::config::RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     // Install timer globals for timer tests.
@@ -548,11 +548,13 @@ fn test_event_loop() {
             with_event_loop(&el, |_| {
                 let ok = js::compile::evaluate_with_filename(
                     &scope,
+                    // `late` is registered last so that its deadline follows the
+                    // others' however long each `setTimeout` call itself takes.
                     "globalThis._fireOrder = []; \
-                     setTimeout(function() { globalThis._fireOrder.push('late'); }, 40); \
                      setTimeout(function() { globalThis._fireOrder.push('early'); }, 10); \
                      globalThis._goner = setTimeout(function() { globalThis._fireOrder.push('goner'); }, 10); \
                      setTimeout(function() { globalThis._fireOrder.push('early2'); }, 10); \
+                     setTimeout(function() { globalThis._fireOrder.push('late'); }, 40); \
                      clearTimeout(globalThis._goner);",
                     "<test-deadline-order>",
                     1,

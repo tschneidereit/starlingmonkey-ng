@@ -42,6 +42,19 @@ pub unsafe fn options_mut<'a>(scope: &'a Scope<'_>) -> &'a mut ContextOptions {
     unsafe { &mut *wrappers2::ContextOptionsRef(scope.cx()) }
 }
 
+/// Enable recording the JavaScript stack each promise and async call was created on. SpiderMonkey
+/// shows the recorded stacks as async parent frames in `Error.stack` and in debuggers.
+///
+/// With `debuggee_only`, stacks are recorded only in realms a `Debugger` observes. Otherwise they
+/// are recorded in every realm.
+pub fn set_async_stack_capture(cx: &mut mozjs::context::JSContext, debuggee_only: bool) {
+    // SAFETY: ContextOptionsRef returns a non-null pointer to options that
+    // live as long as the JSContext, and `cx` is borrowed exclusively.
+    let options = unsafe { &mut *wrappers2::ContextOptionsRef(cx) };
+    options.set_asyncStack_(true);
+    options.set_asyncStackCaptureDebuggeeOnly_(debuggee_only);
+}
+
 /// Get the private data pointer associated with the context.
 pub fn get_private(scope: &Scope<'_>) -> *mut std::os::raw::c_void {
     unsafe { wrappers2::JS_GetContextPrivate(scope.cx()) }

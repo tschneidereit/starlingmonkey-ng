@@ -22,7 +22,8 @@ mod tests {
         fn eval(code: &str) -> bool {
             libstarling::register_builtins();
             let rt =
-                libstarling::runtime::Runtime::init(&libstarling::config::RuntimeConfig::default());
+                libstarling::runtime::Runtime::init(&libstarling::config::RuntimeConfig::default())
+                    .expect("runtime init");
             let scope = rt.default_global();
             let rval = js::compile::evaluate_with_filename(&scope, code, "test.js", 1)
                 .expect("eval failed");

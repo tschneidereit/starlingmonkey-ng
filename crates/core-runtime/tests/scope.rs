@@ -14,7 +14,7 @@ use js::value;
 
 #[test]
 fn test_scope_rooting() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     // --- Basic rooting ---

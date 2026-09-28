@@ -26,7 +26,7 @@ use js::Object;
 
 #[test]
 fn heap_value_survives_move_and_compacting_gc() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
 
     // Allocate a nursery object and give it an identifying property.

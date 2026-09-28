@@ -84,7 +84,7 @@ fn eval(code: &str) -> String {
 /// does.
 fn eval_module(body: &str) -> String {
     setup();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let source = format!("import * as m from \"constModule\";\nglobalThis._result = {body};");
     // SAFETY: `scope` outlives the evaluation, and the module registry was
@@ -211,7 +211,7 @@ fn setup_derived_names() {
 /// Import from `specifier` and read `ANSWER` back as a string.
 fn eval_import(specifier: &str) -> String {
     setup_derived_names();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let source = format!("import {{ ANSWER }} from \"{specifier}\";\nglobalThis._result = ANSWER;");
     // SAFETY: `scope` outlives the evaluation, and the module registry was

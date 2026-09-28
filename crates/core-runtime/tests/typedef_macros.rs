@@ -1005,7 +1005,7 @@ mod implicit_factory_tests {
         core_runtime::runtime::register_global_initializer(|scope, global| {
             Checked::add_to_global(scope, global);
         });
-        let rt = Runtime::init(&RuntimeConfig::default());
+        let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
         let scope = rt.default_global();
 
         let ok = Checked::checked(&scope, 7).expect("factory should succeed");

@@ -192,7 +192,7 @@ fn explicit_constructor_still_works() {
 #[test]
 fn rust_side_new_works() {
     setup();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let obj = RustOnly::new(&scope).unwrap();
     assert_eq!(obj.data().n, 7);
@@ -204,7 +204,7 @@ fn rust_side_new_works() {
 #[test]
 fn rust_side_renamed_ctor_works() {
     setup();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let obj = RenamedCtor::from_parts(&scope, 3).unwrap();
     assert_eq!(obj.data().n, 3);
@@ -214,7 +214,7 @@ fn rust_side_renamed_ctor_works() {
 #[test]
 fn rust_side_multiple_factories() {
     setup();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     assert_eq!(ManyFactories::new(&scope).unwrap().data().n, 0);
     assert_eq!(ManyFactories::from_n(&scope, 6).unwrap().data().n, 6);
@@ -232,7 +232,7 @@ fn rust_side_factory_alongside_js_constructor() {
     assert_eq!(js, "5:undefined");
 
     setup();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     assert_eq!(CtorPlusFactory::new(&scope, 5).unwrap().data().n, 5);
     assert_eq!(CtorPlusFactory::doubled(&scope, 5).unwrap().data().n, 10);
@@ -242,7 +242,7 @@ fn rust_side_factory_alongside_js_constructor() {
 #[test]
 fn rust_side_setup_new_works() {
     setup();
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let obj = RustOnlySetup::new(&scope, 11).unwrap();
     assert_eq!(obj.data().n, 11);

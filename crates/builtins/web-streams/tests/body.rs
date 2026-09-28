@@ -13,9 +13,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use core_runtime::config::RuntimeConfig;
-use core_runtime::event_loop::run_microtasks;
 use core_runtime::runtime::{clear_global_initializers, register_global_initializer, Runtime};
-use js::conversion::FromJSVal;
+use core_runtime::test_util::eval_and_read_out;
 use web_streams::readable::ReadableStream;
 
 /// Create a stream from `bytes`, expose it as `globalThis.__stream`, then evaluate
@@ -23,23 +22,14 @@ use web_streams::readable::ReadableStream;
 fn run_with_stream(bytes: &[u8], code: &str) -> String {
     clear_global_initializers();
     register_global_initializer(web_streams::add_to_global);
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let global = scope.global();
     let stream = ReadableStream::from_bytes(&scope, bytes).expect("create stream from bytes");
     global
         .set_property(&scope, c"__stream", scope.root_value(stream.as_value()))
         .expect("expose __stream");
-    if js::compile::evaluate_with_filename(&scope, code, "test.js", 1).is_err() {
-        panic!(
-            "evaluation threw: {:?}",
-            js::error::ExnThrown::capture(&scope)
-        );
-    }
-    run_microtasks(&scope);
-    let out = js::compile::evaluate_with_filename(&scope, "globalThis.__out", "out.js", 1)
-        .expect("reading __out threw");
-    String::from_jsval(&scope, out, ()).unwrap()
+    eval_and_read_out(&scope, code)
 }
 
 /// A non-empty Rust-created stream drains to exactly its original bytes, then

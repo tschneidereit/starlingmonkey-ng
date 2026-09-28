@@ -30,7 +30,7 @@
 //! }
 //!
 //! // Register and use:
-//! let rt = Runtime::init(&config);
+//! let rt = Runtime::init(&config).expect("runtime init");
 //! let scope = rt.default_global();
 //! unsafe {
 //!     register_module::<my_math::js_module>(&scope);
@@ -173,7 +173,10 @@ unsafe fn trace_module_registry(state: &ModuleState, trc: *mut JSTracer) {
 ///
 /// `data` must be the `Runtime` address [`init_module_gc_tracer`] was given.
 unsafe extern "C" fn trace_module_registry_cb(trc: *mut JSTracer, data: *mut c_void) {
+    // SAFETY: the caller passes the `Runtime` address the tracer was registered with, which
+    // `init_module_gc_tracer`'s caller keeps valid while the tracer is registered.
     let rt = unsafe { &*(data as *const crate::Runtime) };
+    // SAFETY: SpiderMonkey calls a roots tracer with a valid tracer.
     unsafe { trace_module_registry(&rt.modules, trc) };
 }
 
@@ -182,14 +185,25 @@ unsafe extern "C" fn trace_module_registry_cb(trc: *mut JSTracer, data: *mut c_v
 /// Called automatically by `Runtime::init` — only needed when using a
 /// raw mozjs `Runtime` directly.
 /// `rt` is handed back to the tracer, which reads the registry out of it.
-pub fn init_module_gc_tracer(cx: &mut js::native::JSContext, rt: *const crate::Runtime) {
+///
+/// # Safety
+///
+/// `rt` must stay valid until [`remove_module_gc_tracer`] removes the tracer.
+pub unsafe fn init_module_gc_tracer(cx: &mut js::native::JSContext, rt: *const crate::Runtime) {
+    // SAFETY: the callback is a valid function, and the caller keeps `rt` valid for as long as
+    // the tracer is registered.
     unsafe {
         js::gc::add_extra_gc_roots_tracer(cx, Some(trace_module_registry_cb), rt as *mut c_void)
     };
 }
 
-/// Remove the module registry GC root tracer. `rt` must match the registration.
-pub fn remove_module_gc_tracer(cx: &js::native::JSContext, rt: *const crate::Runtime) {
+/// Remove the module registry GC root tracer.
+///
+/// # Safety
+///
+/// `rt` must be the address passed to [`init_module_gc_tracer`].
+pub unsafe fn remove_module_gc_tracer(cx: &js::native::JSContext, rt: *const crate::Runtime) {
+    // SAFETY: the callback is the registered one, and the caller passes the registered `rt`.
     unsafe {
         js::gc::remove_extra_gc_roots_tracer(cx, Some(trace_module_registry_cb), rt as *mut c_void)
     };
@@ -268,16 +282,12 @@ unsafe extern "C" fn module_load_hook(
     let scope = unsafe { RootScope::from_current_realm(cx) };
 
     // Extract the specifier string from the ModuleRequest object
-    let specifier_str =
-        unsafe { js::module_raw::GetModuleRequestSpecifier(cx as _, module_request) };
-    if specifier_str.is_null() {
+    // SAFETY: SpiderMonkey passes the hook a rooted `module_request` handle.
+    let request = unsafe { GCHandle::from_raw(module_request) };
+    let Some(specifier_str) = js::module::get_module_request_specifier(&scope, request) else {
         return false;
-    }
-
-    let specifier = match jsstring_to_string(&scope, specifier_str) {
-        Some(s) => s,
-        None => return false,
     };
+    let specifier = jsstr_to_string(&scope, specifier_str);
 
     // 1. Check the module registry for an exact match.
     let cached = registry(|reg| {
@@ -293,16 +303,19 @@ unsafe extern "C" fn module_load_hook(
             let base_dir = referrer_base_dir(&scope, referrer);
             match resolve_file_module(&scope, &specifier, base_dir) {
                 Ok(obj) => obj,
-                Err(msg) => {
+                Err(ModuleLoadError::Failed(msg)) => {
                     let c_msg =
                         CString::new(msg).unwrap_or_else(|_| c"Module resolution failed".into());
                     js::error::report_error_ascii(&scope, &c_msg);
                     return false;
                 }
+                // The compile error, with its location, is already pending.
+                Err(ModuleLoadError::CompileThrew) => return false,
             }
         }
     };
 
+    // SAFETY: this is the load hook, passing its own arguments, and this is its only call.
     unsafe {
         js::module::finish_loading_imported_module(
             &scope,
@@ -324,6 +337,7 @@ fn referrer_base_dir(
     referrer: js::native::RawHandle<*mut js::native::JSScript>,
 ) -> Option<PathBuf> {
     if !referrer.get().is_null() {
+        // SAFETY: `referrer` is the load hook's rooted `referrer` argument.
         let private =
             js::module::get_script_private(scope, unsafe { GCHandle::from_raw(referrer) });
         if private.is_string() {
@@ -347,7 +361,7 @@ fn resolve_file_module<'r>(
     scope: &'r Scope,
     specifier: &str,
     base_dir: Option<PathBuf>,
-) -> Result<Object<'r>, String> {
+) -> Result<Object<'r>, ModuleLoadError> {
     let base_dir = base_dir
         .ok_or_else(|| format!("Module '{}' not found (no base path configured)", specifier))?;
 
@@ -394,12 +408,14 @@ fn resolve_file_module<'r>(
     let mut src = transform_str_to_source_text(&source);
     // SAFETY: `options` and `src` are valid for the duration of this call.
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
-        .map_err(|_| format!("Failed to compile module '{}'", canonical_path.display()))?;
+        .map_err(|_| ModuleLoadError::CompileThrew)?;
 
     // Store the canonical path in the module private: the load hook reads it
     // to resolve this module's own relative imports against its directory.
     let path_str = js::JSString::from_str(scope, &canonical_key)
         .map_err(|_| "Failed to allocate module path string".to_string())?;
+    // SAFETY: `module` is the rooted module object `compile_module` returned, and `path_str` is
+    // rooted.
     unsafe { SetModulePrivate(module.as_raw(), &path_str.as_value()) };
 
     registry(|reg| {
@@ -412,6 +428,20 @@ fn resolve_file_module<'r>(
     });
 
     Ok(module)
+}
+
+/// Why [`resolve_file_module`] could not produce a module.
+enum ModuleLoadError {
+    /// Resolving or reading the module failed. The message describes why.
+    Failed(String),
+    /// Compiling the module threw, and its exception is pending.
+    CompileThrew,
+}
+
+impl From<String> for ModuleLoadError {
+    fn from(message: String) -> Self {
+        ModuleLoadError::Failed(message)
+    }
 }
 
 /// Resolve `.` and `..` components lexically, without touching the filesystem, so
@@ -521,6 +551,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
     let options = js::compile::options(scope, filename, 1);
 
     let mut src = transform_str_to_source_text(&source);
+    // SAFETY: `options` and `src` are live locals.
     let module = match unsafe { js::module::compile_module(scope, options.ptr, &mut src) } {
         Ok(m) => m,
         Err(_) => return false,
@@ -534,8 +565,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
         reg.borrow_mut().insert(
             T::NAME.to_string(),
             ModuleEntry {
-                // SAFETY: module was just compiled and is non-null.
-                module_obj: unsafe { Heap::from_raw(module.as_raw()) },
+                module_obj: Heap::from(module),
             },
         );
     });
@@ -544,7 +574,7 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
     // remove the registry entry again so a later import of the module fails
     // to resolve instead of finding a half-initialized module whose value
     // exports are undefined.
-    let populated = unsafe { link_evaluate_and_populate::<T>(scope, module, &declarations) };
+    let populated = link_evaluate_and_populate::<T>(scope, module, &declarations);
     if !populated {
         registry(|reg| {
             reg.borrow_mut().remove(T::NAME);
@@ -555,16 +585,12 @@ pub unsafe fn register_module<T: NativeModule>(scope: &Scope<'_>) -> bool {
 
 /// Steps 4.-6. of [`register_module`]: link and evaluate the compiled module,
 /// then populate its environment with the native exports.
-///
-/// # Safety
-///
-/// Same contract as [`register_module`].
-unsafe fn link_evaluate_and_populate<T: NativeModule>(
+fn link_evaluate_and_populate<T: NativeModule>(
     scope: &Scope<'_>,
     module: Object<'_>,
     declarations: &[ModuleExport],
 ) -> bool {
-    let env = match unsafe { link_evaluate_and_get_env(scope, module) } {
+    let env = match link_evaluate_and_get_env(scope, module) {
         Some(env) => env,
         None => return false,
     };
@@ -582,14 +608,14 @@ unsafe fn link_evaluate_and_populate<T: NativeModule>(
                 Ok(f) => f,
                 Err(_) => return false,
             };
-            let func_val = scope.root_value(func.as_value());
-            if env.set_property(scope, &c_name, func_val).is_err() {
+            if env.set_property(scope, &c_name, func).is_err() {
                 return false;
             }
         }
     }
 
     // Let the module implementation set value exports
+    // SAFETY: `env` is the module's environment object.
     unsafe { T::evaluate(scope, env.handle()) }
 }
 
@@ -598,14 +624,9 @@ unsafe fn link_evaluate_and_populate<T: NativeModule>(
 /// `export var ...` initializations), and return its environment object, ready
 /// for the caller to populate.
 ///
-/// # Safety
-///
 /// `module` must be a freshly compiled, registered module object on `scope`'s
 /// realm.
-unsafe fn link_evaluate_and_get_env<'s>(
-    scope: &'s Scope<'_>,
-    module: Object<'_>,
-) -> Option<Object<'s>> {
+fn link_evaluate_and_get_env<'s>(scope: &'s Scope<'_>, module: Object<'_>) -> Option<Object<'s>> {
     // 4. Load the dependency graph, then link
     if js::module::load_requested_modules(scope, module).is_err() {
         return None;
@@ -620,12 +641,8 @@ unsafe fn link_evaluate_and_get_env<'s>(
     }
 
     // 6. Get the module environment
-    unsafe {
-        Object::from_raw(
-            scope,
-            js::module_raw::GetModuleEnvironment(scope.cx_mut(), module.handle()),
-        )
-    }
+    js::module::get_environment(scope, module.handle())
+        .and_then(|env| Object::from_handle(scope.root_object(env)))
 }
 
 /// Register a module under an arbitrary specifier, exporting the given named
@@ -670,6 +687,7 @@ pub unsafe fn register_synthetic_module(
     let mut src = transform_str_to_source_text(&source);
     // Synthetic modules carry no path in their module private: the generated
     // `export var` source has no imports of its own to resolve.
+    // SAFETY: `options` and `src` are live locals.
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }?;
 
     // 3. Store in the registry under the owned specifier before linking, so the
@@ -678,15 +696,14 @@ pub unsafe fn register_synthetic_module(
         reg.borrow_mut().insert(
             name.to_string(),
             ModuleEntry {
-                // SAFETY: module was just compiled and is non-null.
-                module_obj: unsafe { Heap::from_raw(module.as_raw()) },
+                module_obj: Heap::from(module),
             },
         );
     });
 
     // 4.-6. Link, evaluate, and populate the environment with the export values.
     // On any failure, remove the registry entry again.
-    let result = unsafe { link_evaluate_and_populate_values(scope, module, exports) };
+    let result = link_evaluate_and_populate_values(scope, module, exports);
     if result.is_err() {
         registry(|reg| {
             reg.borrow_mut().remove(name);
@@ -697,16 +714,12 @@ pub unsafe fn register_synthetic_module(
 
 /// Steps 4.-6. of [`register_synthetic_module`]: link and evaluate the compiled
 /// module, then assign each export binding its provided value.
-///
-/// # Safety
-///
-/// Same contract as [`register_synthetic_module`].
-unsafe fn link_evaluate_and_populate_values(
+fn link_evaluate_and_populate_values(
     scope: &Scope<'_>,
     module: Object<'_>,
     exports: &[(&str, HandleValue)],
 ) -> Result<(), ExnThrown> {
-    let env = unsafe { link_evaluate_and_get_env(scope, module) }.ok_or(ExnThrown)?;
+    let env = link_evaluate_and_get_env(scope, module).ok_or(ExnThrown)?;
 
     for (export_name, value) in exports {
         let c_name = CString::new(*export_name).map_err(|_| ExnThrown)?;
@@ -740,6 +753,7 @@ pub unsafe fn register_source_module(
     let filename = CString::new(name).map_err(|_| ExnThrown)?;
     let options = js::compile::options(scope, filename, 1);
     let mut src = transform_str_to_source_text(source);
+    // SAFETY: `options` and `src` are live locals.
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }?;
 
     // Register before loading so the load hook (and the module's own imports)
@@ -748,8 +762,7 @@ pub unsafe fn register_source_module(
         reg.borrow_mut().insert(
             name.to_string(),
             ModuleEntry {
-                // SAFETY: module was just compiled and is non-null.
-                module_obj: unsafe { Heap::from_raw(module.as_raw()) },
+                module_obj: Heap::from(module),
             },
         );
     });
@@ -777,8 +790,7 @@ pub unsafe fn register_source_module(
 ///
 /// # Safety
 ///
-/// - `cx` must be a valid `JSContext` pointer.
-/// - [`init_module_loader`] must have been called first.
+/// [`init_module_loader`] must have been called first.
 // TODO: mark this as safe: it's no less safe than `evaluate_with_filename`, really
 pub unsafe fn evaluate_module<'s>(
     scope: &'s Scope<'_>,
@@ -789,6 +801,7 @@ pub unsafe fn evaluate_module<'s>(
     let options = js::compile::options(scope, c_filename, 1);
 
     let mut src = transform_str_to_source_text(source);
+    // SAFETY: `options` and `src` are live locals.
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
         .map_err(|_| ExnThrown)?;
 
@@ -808,6 +821,8 @@ pub unsafe fn evaluate_module<'s>(
             };
             let path_str =
                 js::JSString::from_str(scope, &abs.to_string_lossy()).map_err(|_| ExnThrown)?;
+            // SAFETY: `module` is the rooted module object `compile_module` returned, and `path_str` is
+            // rooted.
             unsafe { SetModulePrivate(module.as_raw(), &path_str.as_value()) };
         }
     }
@@ -823,8 +838,7 @@ pub unsafe fn evaluate_module<'s>(
 ///
 /// # Safety
 ///
-/// - `cx` must be valid.
-/// - `env` must be a valid module environment object.
+/// `env` must be a valid module environment object.
 pub unsafe fn set_module_export<'s, V: ToJSVal<'s> + ?Sized>(
     scope: &'s Scope<'_>,
     env: HandleObject,
@@ -832,12 +846,8 @@ pub unsafe fn set_module_export<'s, V: ToJSVal<'s> + ?Sized>(
     value: &V,
 ) -> bool {
     let c_name = CString::new(name).unwrap();
-    let val = match value.to_jsval(scope) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
     let env_obj = js::Object::from_handle(env).expect("module environment object is null");
-    env_obj.set_property(scope, &c_name, val).is_ok()
+    env_obj.set_property(scope, &c_name, value).is_ok()
 }
 
 #[cfg(test)]
@@ -880,7 +890,7 @@ mod tests {
         let config =
             RuntimeConfig::from_args(["starling", "-e", "42"].iter().map(|s| s.to_string()))
                 .unwrap();
-        Runtime::init(&config)
+        Runtime::init(&config).expect("runtime init")
     }
 
     /// Helper: read back a globalThis property as f64.

@@ -175,6 +175,62 @@ fn a_runtime_that_will_not_start_keeps_its_reasons_off_the_wire() {
     );
 }
 
+/// A runtime whose startup failed responds to every later request with a 500 without running the
+/// startup again: a reused instance evaluates the content script once.
+#[test]
+fn a_failed_startup_is_not_retried_by_later_requests() {
+    let Some(server) = Serve::new(18461)
+        .reusing_one_instance()
+        .script("console.error('startup-ran'); throw new Error('startup failed');")
+        .ready(Ready::AnyResponse)
+        .start()
+    else {
+        return;
+    };
+
+    let (first, second) = met_in_one_instance(&server, || {
+        let first = server.full_request("GET", "/", "");
+        (first, server.full_request("GET", "/", ""))
+    });
+    assert!(first.starts_with("HTTP/1.1 500"), "{first}");
+    assert!(second.starts_with("HTTP/1.1 500"), "{second}");
+
+    let log = server.log();
+    let (instances, _) = server.instances_since(0);
+    let distinct: std::collections::HashSet<_> = instances.iter().collect();
+    assert_eq!(
+        log.matches("startup-ran").count(),
+        distinct.len(),
+        "each instance must run the failing startup once, not once per request: {log}"
+    );
+}
+
+/// A `fetch` whose request has a header the host refuses rejects with a `TypeError` naming
+/// that header. `http2-settings` is allowed by Fetch but refused by `wasi:http`.
+#[test]
+fn a_fetch_with_a_header_the_host_refuses_rejects_naming_it() {
+    let upstream = common::start_upstream("UPSTREAM-BODY");
+    let handler = format!(
+        r#"addEventListener('fetch', (event) => {{
+            if (new URL(event.request.url).pathname === '/ready') {{
+                event.respondWith(new Response('ready'));
+                return;
+            }}
+            event.respondWith(
+                fetch('http://127.0.0.1:{upstream}/', {{ headers: {{ 'http2-settings': 'AAMAAABk' }} }})
+                    .then(() => new Response('sent'), (e) => new Response(e.name + ': ' + e.message))
+            );
+        }});"#
+    );
+    let Some(server) = Serve::new(18462).script(&handler).start() else {
+        return;
+    };
+
+    let body = server.get("/");
+    assert!(body.starts_with("TypeError: "), "{body}");
+    assert!(body.contains("http2-settings"), "{body}");
+}
+
 /// An unusual status is the handler's to choose: it reaches the client as itself, and the host
 /// must not act on it behind the handler's back — a `421` invites a client to retry elsewhere, not
 /// the server to re-dispatch (`serve_delivers_an_unusual_status_without_retrying_it`). That the

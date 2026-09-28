@@ -669,21 +669,33 @@ pub fn cancel_pending_future(promise: Stack<Promise>) -> bool {
     removed
 }
 
-/// Drop every pending async-promise future owned by `owner` (or unowned, id 0).
+/// Drop every pending async-promise future owned by `owner`, which must not be 0.
 ///
 /// Called when an event loop terminates with futures still in flight (e.g. WPT mode stops the loop
 /// once a test's completion callback fires, even though a cancelled/disturbed body read is still
 /// pending). Dropping each future cancels its in-flight host I/O and unregisters its
 /// `RootedHeap` from the engine's extra-roots tracer while the `JSContext` is still alive.
 /// Otherwise engine teardown's `finishRoots` would trace a now-freed box and crash.
+///
+/// Unowned futures (id 0, spawned with no loop active) are left in place: any loop may be
+/// waiting on one. [`cancel_all_pending_futures`] drops them.
 pub fn cancel_pending_futures_for(owner: u64) {
+    debug_assert_ne!(owner, 0, "unowned futures belong to no single loop");
     let drop_owned = |queue: &RefCell<Vec<PendingPromise>>| {
         queue
             .borrow_mut()
-            .retain(|(future_owner, _, _)| *future_owner != owner && *future_owner != 0);
+            .retain(|(future_owner, _, _)| *future_owner != owner);
     };
     pending_futures(drop_owned);
     active_futures(drop_owned);
+}
+
+/// Drop every pending async-promise future, whatever its owner. For runtime teardown, which must
+/// call it while the `JSContext` is still alive, for the reason [`cancel_pending_futures_for`]
+/// gives.
+pub fn cancel_all_pending_futures() {
+    pending_futures(|f| f.borrow_mut().clear());
+    active_futures(|a| a.borrow_mut().clear());
 }
 
 /// Whether any async-promise future owned by `owner` (or unowned) is pending (spawned but not yet
@@ -744,11 +756,7 @@ pub fn poll_pending_futures(
 /// Settle promises whose futures completed (from [`poll_pending_futures`]): resolve/reject each and
 /// drain the reactions they queue. Must be called with the owning event loop active so a reaction
 /// that touches the loop (a timer, releasing interest) reaches the right loop.
-///
-/// # Safety
-///
-/// `js_cx` must be a valid `JSContext` whose current realm is entered.
-pub unsafe fn settle_completed_futures(scope: &Scope<'_>, completed: Vec<CompletedFuture>) {
+pub fn settle_completed_futures(scope: &Scope<'_>, completed: Vec<CompletedFuture>) {
     if completed.is_empty() {
         return;
     }

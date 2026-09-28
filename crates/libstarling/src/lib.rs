@@ -16,14 +16,6 @@ mod serve_common;
 #[cfg(target_arch = "wasm32")]
 pub mod serve_wasm;
 
-/// Sleep for `duration` on the WASIp3 monotonic clock — the timer every event-loop driver on wasm32
-/// awaits, here rather than repeated at each of them.
-#[cfg(target_arch = "wasm32")]
-pub(crate) async fn wasm_sleep(duration: std::time::Duration) {
-    let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
-    wasip3::clocks::monotonic_clock::wait_for(nanos).await;
-}
-
 /// Register all built-in global initializers.
 ///
 /// This must be called before `Runtime::init()` to ensure built-in web
@@ -99,7 +91,7 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
         );
     }
 
-    let (runtime, mut invocation) = match core_runtime::setup(config)? {
+    let (runtime, invocation) = match core_runtime::setup(config)? {
         Some(pair) => pair,
         None => return Ok(()),
     };
@@ -120,12 +112,12 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
     // SAFETY: `scope` (and the `Runtime` it borrows from) lives until the
     // explicit `drop(scope)` below.
     let raw_cx = unsafe { scope.raw_cx_no_gc() };
-    let el = invocation.event_loop_mut();
+    let el = invocation.event_loop();
 
     // SAFETY: `raw_cx` is valid for the duration of the await — `scope`
     // keeps the `Runtime` alive and the realm entered.
     unsafe {
-        run_to_completion(raw_cx, el, wasm_sleep).await;
+        run_to_completion(raw_cx, el, platform::clock::sleep).await;
     }
 
     drop(scope);
@@ -137,7 +129,7 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn drive_event_loop_native(
     runtime: std::rc::Rc<runtime::Runtime>,
-    mut invocation: invocation::InvocationState,
+    invocation: invocation::InvocationState,
 ) -> Result<(), String> {
     // Enable both the timer and IO drivers: timers back `setTimeout`, and IO backs
     // `fetch`'s async HTTP transport (which uses tokio TCP sockets).
@@ -159,7 +151,7 @@ fn drive_event_loop_native(
     // Tasks running inside `run_to_completion` (timers, promise reactions,
     // etc.) need an active realm to call into JS.
     let scope = runtime.default_global();
-    let el = invocation.event_loop_mut();
+    let el = invocation.event_loop();
 
     tokio_rt.block_on(async {
         // SAFETY: the scope (and its Runtime) must outlive this future.

@@ -115,7 +115,7 @@ impl Container {
 // ============================================================================
 
 fn main() {
-    let rt = Runtime::init(&RuntimeConfig::default());
+    let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
     let scope = rt.default_global();
     let global = scope.global();
 
