@@ -473,6 +473,12 @@ const PRIVATE_DATA_SLOT: u32 = 0;
 #[cfg(debug_assertions)]
 const BORROW_FLAG_SLOT: u32 = 1;
 
+/// The reserved slot of an instance of a class with [`ClassDef::HAS_ERROR_DATA`] that holds its
+/// stack: the `SavedFrame` [`capture_stack_from_error`](capture_stack_from_error)
+/// captured, replaced by the formatted string when the `stack` getter first reads it. Empty if no
+/// stack was captured.
+pub const ERROR_STACK_SLOT: u32 = MIN_CLASS_RESERVED_SLOTS;
+
 /// Minimum number of reserved slots required for a class instance.
 ///
 /// Slot 0 ([`PRIVATE_DATA_SLOT`]) holds the boxed Rust data. In debug builds,
@@ -1845,6 +1851,10 @@ pub unsafe fn register_class<'s, T: ClassDef>(
         define_to_string_tag(scope, proto.handle(), T::TO_STRING_TAG);
     }
 
+    if T::HAS_ERROR_DATA {
+        define_error_stack_accessor::<T>(scope, proto);
+    }
+
     // Install constants on the constructor (and optionally the prototype).
     if !constants.is_empty() {
         let attrs = (crate::class_spec::JSPROP_READONLY
@@ -2725,6 +2735,109 @@ fn install_unforgeable_from_template<T: ClassDef>(
         )
     };
     ExnThrown::check(ok)
+}
+
+// ---------------------------------------------------------------------------
+// Error stacks
+// ---------------------------------------------------------------------------
+
+/// Define `stack` on the prototype of an error-data class `T` as an accessor like
+/// `Error.prototype.stack`: non-enumerable, configurable, with a getter that formats the stack an
+/// instance captured and a setter that defines an own data property.
+///
+/// # Panics
+///
+/// Panics if a function allocation or the property definition fails.
+fn define_error_stack_accessor<T: ClassDef>(scope: &Scope<'_>, proto: Object<'_>) {
+    let getter = crate::Function::new(scope, Some(error_stack_getter::<T>), 0, 0, c"get stack")
+        .expect("failed to create the stack getter");
+    let setter = crate::Function::new(scope, Some(error_stack_setter), 1, 0, c"set stack")
+        .expect("failed to create the stack setter");
+    let ok = unsafe {
+        wrappers2::JS_DefineProperty2(
+            scope.cx_mut(),
+            proto.handle(),
+            c"stack".as_ptr(),
+            getter.handle(),
+            setter.handle(),
+            0,
+        )
+    };
+    assert!(ok, "failed to define the stack accessor");
+}
+
+/// The `stack` getter of error-data class `T`. Returns the stack the instance captured, formatted
+/// on the first read, or `undefined` for any other object. Throws a `TypeError` if `this` is not
+/// an object.
+unsafe extern "C" fn error_stack_getter<T: ClassDef>(
+    cx: *mut RawJSContext,
+    argc: u32,
+    vp: *mut Value,
+) -> bool {
+    // SAFETY: SpiderMonkey guarantees cx is valid and a realm is entered during a native call.
+    let scope = RootScope::from_current_realm(cx);
+    let args = CallArgs::from_vp(vp, argc);
+    let this = args.thisv();
+    if !this.is_object() {
+        crate::error::throw_type_error(&scope, c"stack getter called on a non-object");
+        return false;
+    }
+    let obj = this.to_object();
+    args.rval().set(value::undefined());
+    if !is_derived_from_type(get_class_tag(obj), class_tag::<T>()) {
+        return true;
+    }
+    // SAFETY: `obj` is an instance of `T` or a class derived from it, so it has the slot.
+    let stored = unsafe { crate::object::get_native_reserved_slot(obj, ERROR_STACK_SLOT) };
+    if !stored.is_object() {
+        args.rval().set(stored);
+        return true;
+    }
+    let raw = scope.cx_mut().raw_cx();
+    rooted!(in(raw) let frame = stored.to_object());
+    rooted!(in(raw) let mut formatted = ptr::null_mut::<crate::native::JSString>());
+    let formatted_ok = unsafe {
+        crate::stack::build_stack_string(
+            &scope,
+            std::ptr::null_mut(),
+            frame.handle(),
+            formatted.handle_mut(),
+            0,
+            mozjs::jsapi::StackFormat::Default,
+        )
+    };
+    if formatted_ok.is_err() {
+        return false;
+    }
+    let formatted = unsafe { mozjs::jsval::StringValue(&*formatted.get()) };
+    // SAFETY: as above.
+    unsafe { crate::object::set_reserved_slot(obj, ERROR_STACK_SLOT, &formatted) };
+    args.rval().set(formatted);
+    true
+}
+
+/// The `stack` setter of error-data classes: defines `stack` as an own, enumerable, writable and
+/// configurable data property of `this`, as `Error.prototype.stack`'s setter does. Throws a
+/// `TypeError` if `this` is not an object.
+unsafe extern "C" fn error_stack_setter(cx: *mut RawJSContext, argc: u32, vp: *mut Value) -> bool {
+    // SAFETY: SpiderMonkey guarantees cx is valid and a realm is entered during a native call.
+    let scope = RootScope::from_current_realm(cx);
+    let args = CallArgs::from_vp(vp, argc);
+    let this = args.thisv();
+    if !this.is_object() {
+        crate::error::throw_type_error(&scope, c"stack setter called on a non-object");
+        return false;
+    }
+    let obj = Object::from_raw(&scope, this.to_object()).expect("objects are non-null");
+    let attrs = crate::class_spec::JSPROP_ENUMERATE as std::ffi::c_uint;
+    if obj
+        .define_property(&scope, c"stack", *args.get(0), attrs)
+        .is_err()
+    {
+        return false;
+    }
+    args.rval().set(value::undefined());
+    true
 }
 
 // ---------------------------------------------------------------------------

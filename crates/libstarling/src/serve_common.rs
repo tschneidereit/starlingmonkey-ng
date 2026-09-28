@@ -9,12 +9,12 @@
 use core_runtime::event_loop::{run_until, with_event_loop, EventLoop};
 use core_runtime::invocation::InvocationState;
 use fetch_event::fetch_event::FetchEvent;
-use js::error::ThrowException;
+use js::conversion::ToJSVal;
 use web_globals::events::algorithms::ScriptStackState;
 
 use std::time::{Duration, Instant};
 use web_fetch::request::Request;
-use web_globals::dom_exception::DOMExceptionError;
+use web_globals::dom_exception::DOMException;
 use web_globals::signals::abort_controller::{AbortController, AbortControllerImpl};
 
 pub(crate) const NO_FETCH_LISTENER: &str =
@@ -201,8 +201,9 @@ pub(crate) fn signal_request_abort(
     message: &str,
 ) {
     with_event_loop(event_loop, |_| {
-        let _ = DOMExceptionError::new(name, message).throw(scope);
-        let reason = js::exception::take_pending_or_undefined(scope);
+        let reason = DOMException::new(scope, message.into(), name.into())
+            .and_then(|exception| exception.to_jsval_throwing(scope))
+            .unwrap_or_else(|_| js::exception::take_pending_or_undefined(scope));
         if abort_controller
             .abort(scope, reason, ScriptStackState::Empty)
             .is_err()

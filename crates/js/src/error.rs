@@ -23,7 +23,6 @@ use std::fmt;
 use std::ptr;
 
 use crate::exception::is_pending;
-use crate::function::EmptyArgs;
 use crate::gc::scope::Scope;
 use crate::Object;
 use mozjs::jsapi::{
@@ -457,39 +456,31 @@ pub fn throw_error(scope: &Scope<'_>, msg: &str) -> ExnThrown {
 // capture_stack_from_error
 // ---------------------------------------------------------------------------
 
-/// Capture the current call stack from a temporary `Error` object and set it
-/// as the `stack` property on `obj`.
-///
-/// This creates `new Error()` to let SpiderMonkey capture the stack trace,
-/// reads the resulting `stack` property, and copies it onto `obj`.
+/// Capture the current call stack as a `SavedFrame` and store it in `obj`'s
+/// [`ERROR_STACK_SLOT`](crate::class::ERROR_STACK_SLOT), for the `stack` accessor on the class's
+/// prototype to format when it is read.
 ///
 /// Used by error-like classes (e.g. DOMException, or any class with
-/// `js_proto = "Error"`) that need `[[ErrorData]]` behavior.
+/// `js_proto = "Error"`) that need `[[ErrorData]]` behavior. `obj` must be an instance of such a
+/// class.
 ///
-/// Silently returns without setting `stack` if any step fails.
-///
+/// Leaves the slot empty if no script is running, or if the capture fails. A failed capture's
+/// exception is cleared.
 pub fn capture_stack_from_error(scope: &Scope<'_>, obj: &Object<'_>) {
-    use crate::class_spec::JSProtoKey;
-
-    // Create `new Error()` to capture the current stack.
-    let error_ctor = match crate::class::get_class_object(scope, JSProtoKey::JSProto_Error) {
-        Ok(ctor) => ctor,
-        Err(_) => return,
-    };
-
-    let ctor_val = scope.root_value(unsafe { crate::value::from_object(error_ctor.get()) });
-
-    let error_obj = match crate::Function::construct(scope, ctor_val, EmptyArgs) {
-        Ok(obj) => obj,
-        Err(_) => return,
-    };
-
-    // Read the `stack` property from the Error object.
-    let stack_val = match error_obj.get_property(scope, c"stack") {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
-    // Set the stack as a non-enumerable own property on the target object.
-    let _ = obj.define_property(scope, c"stack", stack_val, 0);
+    // SpiderMonkey's `Error` keeps at most this many frames (`MAX_REPORTED_STACK_DEPTH`).
+    const MAX_FRAMES: u32 = 128;
+    match crate::stack::capture_saved_frame(scope, MAX_FRAMES) {
+        Ok(Some(frame)) => {
+            // SAFETY: `obj` is an instance of an error-data class, which has the slot.
+            unsafe {
+                crate::object::set_reserved_slot(
+                    obj.as_raw(),
+                    crate::class::ERROR_STACK_SLOT,
+                    &crate::value::from_object(frame.as_raw()),
+                )
+            }
+        }
+        Ok(None) => {}
+        Err(ExnThrown) => crate::exception::clear(scope),
+    }
 }

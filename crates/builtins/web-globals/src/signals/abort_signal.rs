@@ -6,14 +6,16 @@
 //! should be aborted. It extends EventTarget so it can fire "abort" events.
 
 use core_runtime::{webidl_interface, webidl_methods};
+use js::conversion::FromJSVal;
 use js::error::ExnThrown;
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
-use js::native::{CallArgs, ExceptionStackBehavior, Value};
+use js::native::{ExceptionStackBehavior, Value};
 use js::prelude::HandleValue;
-use js::{value, Function, Object};
+use js::Callable;
 
 use super::algorithms;
+use crate::dom_exception::DOMException;
 use crate::events::algorithms as event_algorithms;
 use crate::events::event_target::{EventTarget, EventTargetImpl};
 
@@ -78,7 +80,7 @@ pub struct AbortSignal {
     /// The `onabort` event handler attribute.
     ///
     /// <https://dom.spec.whatwg.org/#dom-abortsignal-onabort>
-    pub(crate) onabort_handler: Option<Heap<js::function::Function>>,
+    pub(crate) onabort_handler: Option<Heap<js::function::Callable>>,
 }
 
 #[webidl_methods]
@@ -128,17 +130,8 @@ impl AbortSignal {
     ///
     /// IDL event handler attribute: `attribute EventHandler onabort;`
     #[getter]
-    fn onabort(&self, scope: &Scope<'_>, args: &CallArgs) -> Result<(), ExnThrown> {
-        match &self.data().onabort_handler {
-            Some(heap) => {
-                let func = heap.get(scope);
-                args.rval().set(func.as_value());
-            }
-            None => {
-                args.rval().set(value::null());
-            }
-        }
-        Ok(())
+    fn onabort<'r>(&self, scope: &'r Scope<'_>) -> Option<Callable<'r>> {
+        self.data().onabort_handler.get(scope)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-abortsignal-onabort>
@@ -157,31 +150,21 @@ impl AbortSignal {
         }
 
         // If the new value is a function, store it and add as listener.
-        if val.is_null() || val.is_undefined() {
-            self.data_mut().onabort_handler = None;
-        } else if let Ok(obj) = Object::from_value(scope, *val) {
-            if let Ok(func) = obj.cast::<Function<'_>>() {
-                // View this signal as the EventTarget it extends to register the
-                // listener (the onabort handler never carries its own signal).
-                let target = Object::from_value(scope, self.as_value())
-                    .expect("AbortSignal is an object")
-                    .cast::<EventTarget<'_>>()
-                    .expect("AbortSignal is an EventTarget");
+        match Callable::from_jsval(scope, val, ()) {
+            Ok(func) => {
+                // The onabort handler is registered without an abort signal.
                 event_algorithms::add_an_event_listener(
-                    &target,
+                    self,
                     "abort".to_string(),
-                    func,
+                    *func,
                     false,
                     None,
                     false,
                     None,
                 );
-                self.data_mut().onabort_handler = Some(Heap::from(func));
-            } else {
-                self.data_mut().onabort_handler = None;
+                self.data_mut().onabort_handler.set(func);
             }
-        } else {
-            self.data_mut().onabort_handler = None;
+            Err(_) => self.data_mut().onabort_handler = None,
         }
     }
 
@@ -199,8 +182,12 @@ impl AbortSignal {
         match reason {
             Some(r) => signal.data_mut().abort_reason.set(r.get()),
             None => {
-                let err_val = algorithms::create_abort_error(scope)?;
-                signal.data_mut().abort_reason.set(err_val.get());
+                let err_val = DOMException::new(
+                    scope,
+                    "signal is aborted without reason".into(),
+                    "AbortError".into(),
+                )?;
+                signal.data_mut().abort_reason.set(err_val.as_value());
             }
         }
 
@@ -237,47 +224,10 @@ impl AbortSignal {
         // TODO: use a WebIDL sequence for this, after making that usable outside of unions.
         signals: HandleValue<'_>,
     ) -> Result<AbortSignal<'r>, ExnThrown> {
-        let signals = read_signal_sequence(scope, signals)?;
+        let signals = Vec::<AbortSignal>::from_jsval_throwing(scope, signals, ())?;
 
         // Step 1: Return the result of creating a dependent abort signal from signals using
         //         AbortSignal and the current realm.
         algorithms::create_dependent_abort_signal(scope, &signals)
     }
-}
-
-/// Convert a `sequence<AbortSignal>` argument into a `Vec` of signals.
-///
-/// WebIDL sequences are defined in terms of the iterator protocol; this only
-/// handles array-like inputs (index access via the `length` property), which
-/// covers every enabled caller. A non-`AbortSignal` element throws a
-/// `TypeError`.
-fn read_signal_sequence<'r>(
-    scope: &'r Scope<'_>,
-    value: HandleValue<'_>,
-) -> Result<Vec<AbortSignal<'r>>, ExnThrown> {
-    let obj = Object::from_value(scope, *value)
-        .map_err(|_| js::error::throw_type_error(scope, c"AbortSignal.any expects a sequence"))?;
-
-    let len_val = obj.get_property(scope, c"length")?;
-    let length = if len_val.is_int32() {
-        len_val.to_int32().max(0) as u32
-    } else if len_val.is_double() {
-        len_val.to_double().max(0.0) as u32
-    } else {
-        0
-    };
-
-    let mut signals = Vec::new();
-    for i in 0..length {
-        let elem = obj.get_element(scope, i)?;
-        let elem_obj = Object::from_value(scope, *elem).map_err(|_| {
-            js::error::throw_type_error(scope, c"AbortSignal.any: element is not an AbortSignal")
-        })?;
-        let signal = elem_obj.cast::<AbortSignal<'_>>().map_err(|_| {
-            js::error::throw_type_error(scope, c"AbortSignal.any: element is not an AbortSignal")
-        })?;
-        signals.push(signal);
-    }
-
-    Ok(signals)
 }

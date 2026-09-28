@@ -74,9 +74,7 @@ fn test_event_loop() {
     let scope = rt.default_global();
 
     // Install timer globals for timer tests.
-    unsafe {
-        install_timer_globals(&scope, scope.global());
-    }
+    install_timer_globals(&scope, scope.global());
 
     // ---- Test 1: Basic EventLoop operations ----
     {

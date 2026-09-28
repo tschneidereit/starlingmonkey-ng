@@ -13,6 +13,7 @@ use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::{Function, Object};
+use smallvec::SmallVec;
 
 use super::event::Event;
 use super::event_target::{EventListener, EventTarget, EventTargetImpl};
@@ -51,27 +52,57 @@ fn next_listener_id() -> u64 {
 /// (Note: while the spec presents this as a WebIDL spec concept, it's entirely
 /// specific to event handling, so this file is indeed the right place for it.)
 ///
+/// `options` is converted as the WebIDL union `(EventListenerOptions or boolean)`:
+/// `undefined`, `null` and objects become the dictionary, and any other value is
+/// converted with `ToBoolean`.
+///
 /// To flatten options, run these steps:
-pub(crate) fn flatten_options(scope: &Scope<'_>, options: Option<HandleValue<'_>>) -> bool {
-    match options {
-        None => false,
-        Some(val) => {
-            // Step 1: If _options_ is a boolean, then return _options_.
-            if val.is_boolean() {
-                val.to_boolean()
-            } else if val.is_object() {
-                // Step 2: Return _options_["``capture``"].
-                let obj = js::Object::from_value(scope, *val).expect("options should be an object");
-                if let Ok(capture_val) = obj.get_property(scope, c"capture") {
-                    bool::from_jsval(scope, capture_val, ()).unwrap()
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        }
+pub(crate) fn flatten_options(
+    scope: &Scope<'_>,
+    options: Option<HandleValue<'_>>,
+) -> Result<bool, ExnThrown> {
+    match options_dictionary(scope, options) {
+        // Step 1: If _options_ is a boolean, then return _options_.
+        OptionsArgument::Boolean(capture) => Ok(capture),
+        // Step 2: Return _options_["``capture``"].
+        OptionsArgument::Dictionary(obj) => read_bool_option(scope, obj.as_ref(), c"capture"),
     }
+}
+
+/// An `(EventListenerOptions or boolean)` argument, converted as the WebIDL union.
+enum OptionsArgument<'s> {
+    Boolean(bool),
+    /// The dictionary, read from the object, or `None` for `undefined` and `null`.
+    Dictionary(Option<Object<'s>>),
+}
+
+fn options_dictionary<'s>(
+    scope: &'s Scope<'_>,
+    options: Option<HandleValue<'_>>,
+) -> OptionsArgument<'s> {
+    match options {
+        None => OptionsArgument::Dictionary(None),
+        Some(val) if val.is_null_or_undefined() => OptionsArgument::Dictionary(None),
+        Some(val) => match Object::from_value(scope, *val) {
+            Ok(obj) => OptionsArgument::Dictionary(Some(obj)),
+            Err(_) => OptionsArgument::Boolean(
+                bool::from_jsval(scope, val, ()).expect("ToBoolean cannot fail"),
+            ),
+        },
+    }
+}
+
+/// Read a `boolean` member of an options dictionary, defaulting to false.
+fn read_bool_option(
+    scope: &Scope<'_>,
+    dictionary: Option<&Object<'_>>,
+    name: &std::ffi::CStr,
+) -> Result<bool, ExnThrown> {
+    let Some(dictionary) = dictionary else {
+        return Ok(false);
+    };
+    let value = dictionary.get_property(scope, name)?;
+    Ok(bool::from_jsval(scope, value, ()).expect("ToBoolean cannot fail"))
 }
 
 /// <https://dom.spec.whatwg.org/#event-flatten-more>
@@ -85,70 +116,51 @@ pub(crate) fn flatten_more_options<'s>(
     scope: &'s Scope<'_>,
     options: Option<HandleValue<'_>>,
 ) -> Result<ListenerOptions<'s>, ExnThrown> {
-    match options {
-        None => Ok(ListenerOptions {
-            capture: false,
-            passive: None,
-            once: false,
-            signal: None,
-        }),
-        Some(val) => {
-            if val.is_boolean() {
-                // Step 1: Let _capture_ be the result of `flattening` _options_.
-                Ok(ListenerOptions {
-                    capture: val.to_boolean(),
-                    passive: None,
-                    once: false,
-                    signal: None,
-                })
-            } else if val.is_object() {
-                let obj = Object::from_value(scope, *val).unwrap();
-
-                // Step 1: Let _capture_ be the result of `flattening` _options_.
-                let capture = obj
-                    .get_property(scope, c"capture")
-                    .map(|v| bool::from_jsval(scope, v, ()).unwrap())
-                    .unwrap_or(false);
-
-                // Step 2: Let _once_ be false.
-                // Step 4: If _options_ is a `dictionary`: Set _once_ to _options_["``once``"].
-                let once = obj
-                    .get_property(scope, c"once")
-                    .map(|v| bool::from_jsval(scope, v, ()).unwrap())
-                    .unwrap_or(false);
-
-                // Step 3: Let _passive_ and _signal_ be null.
-                // Step 4 (cont.): If _options_["``passive``"] `exists`, then set _passive_ to
-                //                 _options_["``passive``"].
-                let passive = obj.get_property(scope, c"passive").ok().and_then(|v| {
-                    if v.is_undefined() {
-                        None
-                    } else {
-                        Some(bool::from_jsval(scope, v, ()).unwrap())
-                    }
-                });
-
-                // Step 4 (cont.): If _options_["``signal``"] `exists`, then set _signal_ to
-                //                 _options_["``signal``"].
-                let signal = read_signal_option(scope, &obj)?;
-
-                // Step 5: Return _capture_, _passive_, _once_, and _signal_.
-                Ok(ListenerOptions {
-                    capture,
-                    passive,
-                    once,
-                    signal,
-                })
-            } else {
-                Ok(ListenerOptions {
-                    capture: false,
-                    passive: None,
-                    once: false,
-                    signal: None,
-                })
-            }
+    let dictionary = match options_dictionary(scope, options) {
+        // Step 1: Let _capture_ be the result of `flattening` _options_.
+        OptionsArgument::Boolean(capture) => {
+            // Step 2: Let _once_ be false.
+            // Step 3: Let _passive_ and _signal_ be null.
+            // Step 5: Return _capture_, _passive_, _once_, and _signal_.
+            return Ok(ListenerOptions {
+                capture,
+                passive: None,
+                once: false,
+                signal: None,
+            });
         }
-    }
+        OptionsArgument::Dictionary(dictionary) => dictionary,
+    };
+    // Step 1: Let _capture_ be the result of `flattening` _options_.
+    let capture = read_bool_option(scope, dictionary.as_ref(), c"capture")?;
+    // Step 2: Let _once_ be false.
+    // Step 3: Let _passive_ and _signal_ be null.
+    // Step 4: If _options_ is a `dictionary`, then:
+    // Step 4.1: Set _once_ to _options_["``once``"].
+    let once = read_bool_option(scope, dictionary.as_ref(), c"once")?;
+    // Step 4.2: If _options_["``passive``"] `exists`, then set _passive_ to
+    //           _options_["``passive``"].
+    let passive = match &dictionary {
+        Some(obj) => {
+            let v = obj.get_property(scope, c"passive")?;
+            (!v.is_undefined())
+                .then(|| bool::from_jsval(scope, v, ()).expect("ToBoolean cannot fail"))
+        }
+        None => None,
+    };
+    // Step 4.3: If _options_["``signal``"] `exists`, then set _signal_ to
+    //           _options_["``signal``"].
+    let signal = match &dictionary {
+        Some(obj) => read_signal_option(scope, obj)?,
+        None => None,
+    };
+    // Step 5: Return _capture_, _passive_, _once_, and _signal_.
+    Ok(ListenerOptions {
+        capture,
+        passive,
+        once,
+        signal,
+    })
 }
 
 /// Read the `signal` member of an `addEventListener` options dictionary.
@@ -183,7 +195,7 @@ fn read_signal_option<'s>(
 pub(crate) fn add_an_event_listener(
     target: &EventTarget<'_>,
     event_type: String,
-    callback: Function<'_>,
+    callback: Object<'_>,
     capture: bool,
     passive: Option<bool>,
     once: bool,
@@ -213,11 +225,7 @@ pub(crate) fn add_an_event_listener(
         .event_listener_list
         .iter()
         .find(|l| {
-            !l.removed
-                && l.event_type == event_type
-                && l.capture == capture
-                // TODO: implement Eq for Heap and Stack and remove the use of raw pointers.
-                && l.callback.eq_stack(&callback)
+            l.event_type == event_type && l.capture == capture && l.callback.eq_stack(&callback)
         })
         .map(|l| l.id);
     let listener_id = match existing_id {
@@ -231,7 +239,6 @@ pub(crate) fn add_an_event_listener(
                 capture,
                 passive,
                 once,
-                removed: false,
             });
             id
         }
@@ -251,7 +258,7 @@ pub(crate) fn add_an_event_listener(
 pub(crate) fn remove_an_event_listener(
     target: &mut EventTargetImpl,
     event_type: &str,
-    callback: &Function<'_>,
+    callback: &Object<'_>,
     capture: bool,
 ) {
     // Step 1: (ServiceWorkerGlobalScope warning — not applicable.)
@@ -259,6 +266,8 @@ pub(crate) fn remove_an_event_listener(
     // Step 2: Set _listener_'s `removed` to true and `remove` _listener_ from _eventTarget_'s
     //         `event listener list`. Identity is compared via the stored Heap's
     //         live pointer (see `add_an_event_listener`).
+    //         Listeners have no `removed` flag: dispatch re-locates each listener in the live
+    //         list by id, so it skips any listener that is no longer in the list.
     target.event_listener_list.retain(|l| {
         !(l.event_type == event_type && l.capture == capture && l.callback.eq_stack(callback))
     });
@@ -360,7 +369,7 @@ fn invoke_listeners(
         return;
     }
 
-    // Snapshot the listener list to avoid issues with listeners added or
+    // Snapshot the listener list for a specific type to avoid issues with listeners added or
     // removed during dispatch. We capture only listener `id`s and metadata; the
     // live list is re-consulted by `id` each iteration, so callbacks are always
     // fetched fresh and rooted (no stored GC pointers, no rooting gap).
@@ -368,43 +377,41 @@ fn invoke_listeners(
         id: u64,
         passive: Option<bool>,
         once: bool,
-        event_type: String,
     }
 
-    let snapshots: Vec<ListenerSnapshot> = target
-        .data()
-        .event_listener_list
-        .iter()
-        .filter(|l| !l.removed)
-        .map(|l| ListenerSnapshot {
-            id: l.id,
-            passive: l.passive,
-            once: l.once,
-            event_type: l.event_type.clone(),
-        })
-        .collect();
-
-    let event_type = event.data().event_type.clone();
+    let snapshots: SmallVec<[ListenerSnapshot; 8]> = {
+        let event_data = event.data();
+        target
+            .data()
+            .event_listener_list
+            .iter()
+            .filter(|l| l.event_type == event_data.event_type)
+            .map(|l| ListenerSnapshot {
+                id: l.id,
+                passive: l.passive,
+                once: l.once,
+            })
+            .collect()
+    };
 
     for snap in &snapshots {
-        if snap.event_type != event_type {
-            continue;
-        }
-
         // Re-locate the listener in the live list; it may have been removed by
         // a previous callback.
         let Some(pos) = target
             .data()
             .event_listener_list
             .iter()
-            .position(|l| l.id == snap.id && !l.removed)
+            .position(|l| l.id == snap.id)
         else {
             continue;
         };
 
+        // Root the callback before a `once` removal drops the listener's `Heap`.
+        let callback: Object<'_> = target.data().event_listener_list[pos].callback.get(scope);
+
         // If listener's `once` is true, remove it.
         if snap.once {
-            target.data_mut().event_listener_list[pos].removed = true;
+            target.data_mut().event_listener_list.remove(pos);
         }
 
         // Set in-passive-listener flag if passive.
@@ -412,21 +419,11 @@ fn invoke_listeners(
             event.set_in_passive_listener(true);
         }
 
-        // Call the listener. We root the callback from the Heap at call time.
-        // The `target.data()` borrow is released before the call so a listener
-        // that mutates the list (e.g. by aborting a signal that removes
-        // listeners) does not hit a `RefCell` double borrow.
-        {
-            let callback: Function<'_> = {
-                let listener = &target.data().event_listener_list[pos];
-                listener.callback.get(scope)
-            };
-
-            if Function::call(scope, target, callback, &[event]).is_err() {
-                // Per the spec, exceptions from event listeners are "reported"
-                // but do not stop event dispatch.
-                js::exception::report_and_clear(scope, "event listener");
-            }
+        // Call the listener.
+        if call_event_listener(scope, target, callback, event).is_err() {
+            // Per the spec, exceptions from event listeners are "reported"
+            // but do not stop event dispatch.
+            js::exception::report_and_clear(scope, "event listener");
         }
 
         script_stack_state.clean_up_after_running_script(scope);
@@ -437,6 +434,32 @@ fn invoke_listeners(
             break;
         }
     }
+}
+
+/// <https://webidl.spec.whatwg.org/#call-a-user-objects-operation>, for the
+/// `handleEvent` operation of the `EventListener` callback interface: a callable
+/// listener is called with the event's current target as `this`, and any other
+/// object has its `handleEvent` method called with the listener as `this`.
+fn call_event_listener(
+    scope: &Scope<'_>,
+    target: &EventTarget<'_>,
+    listener: Object<'_>,
+    event: &Event<'_>,
+) -> Result<(), ExnThrown> {
+    if listener.is_callable() {
+        Function::call(scope, target, listener, &[event])?;
+        return Ok(());
+    }
+    let handle_event_id = js::class::get_or_init_property_id(scope, c"handleEvent")?;
+    let handle_event = listener.get_property_by_id(scope, handle_event_id)?;
+    if !Object::from_value(scope, handle_event).is_ok_and(|f| f.is_callable()) {
+        return Err(throw_type_error(
+            scope,
+            c"event listener's handleEvent is not callable",
+        ));
+    }
+    Function::call(scope, listener, handle_event, &[event])?;
+    Ok(())
 }
 
 /// <https://dom.spec.whatwg.org/#concept-event-fire>

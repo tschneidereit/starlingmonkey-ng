@@ -26,7 +26,7 @@ use js::prelude::HandleValue;
 use js::promise::{PromiseFuture, PromiseOutcome};
 use js::{Object, Promise, Uint8Array};
 use platform::http::{BodySender, OutgoingBody};
-use web_streams::readable::default_reader::DefaultReaderImpl;
+use web_streams::readable::default_reader::{DefaultReader, DefaultReaderImpl};
 use web_streams::readable::native_read::{
     acquire_native_reader, native_reader_read, NativeReadSteps,
 };
@@ -127,7 +127,10 @@ fn outgoing_body_inner(
         return OutgoingBody::Host(host_body);
     }
     match object.body_stream(scope) {
-        Some(stream) => outgoing_body_from_stream(scope, stream, start_reading),
+        Some(stream) => {
+            let reader = object.take_send_reader(scope);
+            outgoing_body_from_stream(scope, stream, reader, start_reading)
+        }
         None => OutgoingBody::Bytes(bytes::Bytes::new()),
     }
 }
@@ -181,7 +184,8 @@ impl OutgoingBodyPump {
 ///
 /// A host body that has never been read is handed straight through; anything
 /// else is pumped through a `DefaultReader`, or cancelled unsent where
-/// `start_reading` is false.
+/// `start_reading` is false. The pump reads through `reader` when the caller
+/// already locked the stream with one, and acquires its own otherwise.
 ///
 /// By this point the request/response is committed to being sent, so a failure
 /// to start reading cannot be thrown to the caller. It becomes a body that
@@ -189,6 +193,7 @@ impl OutgoingBodyPump {
 pub(crate) fn outgoing_body_from_stream(
     scope: &Scope<'_>,
     stream: ReadableStream<'_>,
+    reader: Option<DefaultReader<'_>>,
     start_reading: bool,
 ) -> OutgoingBody {
     // The shortcut refuses once the body has actually been read from: a chunk may sit in a
@@ -220,7 +225,7 @@ pub(crate) fn outgoing_body_from_stream(
             let _ = promise.set_any_is_handled(scope);
             OutgoingBody::Consumed
         }
-        None => pump_body_from_stream(scope, stream).unwrap_or_else(|_| {
+        None => pump_body_from_stream(scope, stream, reader).unwrap_or_else(|_| {
             // The pump could not be started, so the exception it left pending has no caller to
             // propagate to. Clear it rather than leaving it to surface at an unrelated point,
             // and let the failing body carry the failure instead.
@@ -235,9 +240,13 @@ pub(crate) fn outgoing_body_from_stream(
 fn pump_body_from_stream(
     scope: &Scope<'_>,
     stream: ReadableStream<'_>,
+    reader: Option<DefaultReader<'_>>,
 ) -> Result<OutgoingBody, ExnThrown> {
     let (sender, body) = platform::http::body_channel();
-    let reader = acquire_native_reader(scope, &stream)?;
+    let reader = match reader {
+        Some(reader) => reader,
+        None => acquire_native_reader(scope, &stream)?,
+    };
     let state = create_instance_with::<OutgoingBodyPumpImpl>(scope, |_| OutgoingBodyPumpImpl {
         reader: Heap::from(reader),
         sender: Some(sender),

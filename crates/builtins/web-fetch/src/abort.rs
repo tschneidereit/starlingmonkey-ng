@@ -109,7 +109,11 @@ pub(crate) fn abort_fetch(
     //     that now owns it. `on_abort` does that before calling this algorithm.
     if let Some(stream) = HostBackedBodyOwner::body_stream(request, scope) {
         if stream.is_readable() {
-            stream.cancel_internal(scope, error);
+            // Rejects if the stream's `cancel()` throws. Nothing observes this promise, so it is
+            // marked handled rather than reported as an unhandled rejection.
+            let _ = stream
+                .cancel_internal(scope, error)
+                .set_any_is_handled(scope);
         }
     }
 
@@ -165,7 +169,8 @@ fn on_settled(
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let state = cast_payload::<AbortFetchState>(scope, payload);
-    if let Some(response) = state.data().response.get(scope) {
+    let response = state.data().response.get(scope);
+    if let Some(response) = response {
         if response_body_is_abortable(scope, &response) {
             // Still abortable: `Response::consume` detaches once the body has been read.
             response.set_abort_state(&state);

@@ -15,11 +15,11 @@
 use platform::clock::Instant;
 use std::time::Duration;
 
-use js::conversion::ToJSVal;
 use js::error::{throw_error, ExnThrown};
 use js::gc::handle::Heap;
 use js::heap::RootedTraceableBox;
 use js::native::Value;
+use js::prelude::HandleValue;
 
 use js::gc::scope::Scope;
 
@@ -29,7 +29,7 @@ use super::{with_active_event_loop, Task, TaskId};
 /// a string to evaluate as a classic script when the timer fires.
 enum TimerHandler {
     Function {
-        callback: RootedTraceableBox<Heap<js::object::Object>>,
+        callback: RootedTraceableBox<Heap<js::function::Callable>>,
         /// The `setTimeout`/`setInterval` arguments after the timeout, passed
         /// to the callback on every invocation (HTML timer initialization
         /// steps: "invoke handler given arguments").
@@ -79,12 +79,8 @@ pub struct TimerTask {
 
 impl TimerTask {
     /// Create a timer task with a function handler and its call arguments.
-    ///
-    /// # Safety
-    ///
-    /// `callback` must be a valid JS function object.
-    unsafe fn function(
-        callback: Object,
+    fn function(
+        callback: js::Callable<'_>,
         args: Vec<RootedTraceableBox<Heap<Value>>>,
         interval: Option<Duration>,
         nesting_level: u32,
@@ -184,140 +180,79 @@ impl Task for TimerTask {
 // Timer global functions (setTimeout, setInterval, etc.)
 // ---------------------------------------------------------------------------
 
-// TODO: move these to a separate crate under `builtins`, and use `#[jsglobals]`.
-
-use js::native::RawJSContext;
-use js::{value, Object};
-
-use js::gc::scope::RootScope;
-
 /// Install `setTimeout`, `setInterval`, `clearTimeout`, and `clearInterval`
 /// on a global object.
-///
-/// # Safety
-///
-/// - `scope` must have an active realm.
-/// - `global` must be the realm's global object.
-pub unsafe fn install_timer_globals(scope: &Scope<'_>, global: js::Object<'_>) {
-    let set_timeout = c"setTimeout";
-    let set_interval = c"setInterval";
-    let clear_timeout = c"clearTimeout";
-    let clear_interval = c"clearInterval";
-
-    js::Function::define(
-        scope,
-        global.handle(),
-        set_timeout,
-        Some(js_set_timeout),
-        1,
-        0,
-    )
-    .unwrap();
-    js::Function::define(
-        scope,
-        global.handle(),
-        set_interval,
-        Some(js_set_interval),
-        1,
-        0,
-    )
-    .unwrap();
-    js::Function::define(
-        scope,
-        global.handle(),
-        clear_timeout,
-        Some(js_clear_timeout),
-        1,
-        0,
-    )
-    .unwrap();
-    js::Function::define(
-        scope,
-        global.handle(),
-        clear_interval,
-        Some(js_clear_interval),
-        1,
-        0,
-    )
-    .unwrap();
+pub fn install_timer_globals(scope: &Scope<'_>, global: js::Object<'_>) {
+    timer_globals::add_to_global(scope, global);
 }
 
-/// `setTimeout(callback, delay?)` — schedule a one-shot timer.
-///
-/// Returns a numeric timer ID that can be passed to `clearTimeout`.
-unsafe extern "C" fn js_set_timeout(
-    raw_cx: *mut RawJSContext,
-    argc: u32,
-    vp: *mut js::native::Value,
-) -> bool {
-    queue_timer_from_js(raw_cx, argc, vp, false)
+/// WebIDL `TimerHandler = (Function or DOMString)`.
+#[js::macros::webidl_union]
+pub enum TimerHandlerArg<'a> {
+    Function(js::Callable<'a>),
+    String(String),
 }
 
-/// `setInterval(callback, delay?)` — schedule a repeating timer.
-///
-/// Returns a numeric timer ID that can be passed to `clearInterval`.
-unsafe extern "C" fn js_set_interval(
-    raw_cx: *mut RawJSContext,
-    argc: u32,
-    vp: *mut js::native::Value,
-) -> bool {
-    queue_timer_from_js(raw_cx, argc, vp, true)
-}
+/// The timer methods of `WindowOrWorkerGlobalScope`.
+#[js::macros::jsglobals]
+mod timer_globals {
+    use js::error::ExnThrown;
+    use js::gc::scope::Scope;
+    use js::prelude::HandleValue;
 
-/// Common implementation for `setTimeout` and `setInterval`.
-unsafe fn queue_timer_from_js(
-    raw_cx: *mut RawJSContext,
-    argc: u32,
-    vp: *mut js::native::Value,
-    repeating: bool,
-) -> bool {
-    let scope = RootScope::from_current_realm(raw_cx);
-    let args = js::native::CallArgs::from_vp(vp, argc);
-
-    // Argument 0: handler (required) — WebIDL `TimerHandler = (Function or DOMString)`. A callable is
-    // invoked when the timer fires; anything else is coerced to a string and evaluated as code (the
-    // `setTimeout("code", ms)` form).
-    if argc == 0 {
-        throw_error(&scope, "setTimeout/setInterval requires a handler argument");
-        return false;
+    /// <https://html.spec.whatwg.org/#dom-settimeout>
+    pub fn set_timeout(
+        scope: &Scope<'_>,
+        handler: super::TimerHandlerArg<'_>,
+        timeout: Option<i32>,
+        arguments: RestArgs<HandleValue<'_>>,
+    ) -> Result<u64, ExnThrown> {
+        // Return the result of running the `timer initialization steps` given `this`, _handler_,
+        // _timeout_, _arguments_, and false.
+        super::timer_initialization_steps(scope, handler, timeout.unwrap_or(0), &arguments, false)
     }
-    let arg0 = args.get(0);
-    let callable = arg0
-        .is_object()
-        .then(|| Object::from_value(&scope, *arg0).ok())
-        .flatten()
-        .filter(|object| object.is_callable());
 
-    let code = match &callable {
-        Some(_) => None,
-        None => {
-            use js::conversion::FromJSVal;
-            match String::from_jsval(&scope, js::native::Handle::from_raw(arg0), ()) {
-                Ok(code) => Some(code),
-                Err(error) => {
-                    error.throw(&scope);
-                    return false;
-                }
-            }
-        }
+    /// <https://html.spec.whatwg.org/#dom-setinterval>
+    pub fn set_interval(
+        scope: &Scope<'_>,
+        handler: super::TimerHandlerArg<'_>,
+        timeout: Option<i32>,
+        arguments: RestArgs<HandleValue<'_>>,
+    ) -> Result<u64, ExnThrown> {
+        // Return the result of running the `timer initialization steps` given `this`, _handler_,
+        // _timeout_, _arguments_, and true.
+        super::timer_initialization_steps(scope, handler, timeout.unwrap_or(0), &arguments, true)
+    }
+
+    /// <https://html.spec.whatwg.org/#dom-cleartimeout>
+    pub fn clear_timeout(id: Option<u64>) {
+        // `remove` `this`'s `map of setTimeout and setInterval IDs`[_id_].
+        super::with_active_event_loop(|el| el.clear_js_timer(id.unwrap_or(0)));
+    }
+
+    /// <https://html.spec.whatwg.org/#dom-clearinterval>
+    pub fn clear_interval(id: Option<u64>) {
+        // `remove` `this`'s `map of setTimeout and setInterval IDs`[_id_].
+        super::with_active_event_loop(|el| el.clear_js_timer(id.unwrap_or(0)));
+    }
+}
+
+/// <https://html.spec.whatwg.org/#timer-initialisation-steps>, for `setTimeout` (`repeat` false)
+/// and `setInterval` (`repeat` true).
+fn timer_initialization_steps(
+    scope: &Scope<'_>,
+    handler: TimerHandlerArg<'_>,
+    timeout: i32,
+    arguments: &js::class::RestArgs<HandleValue<'_>>,
+    repeat: bool,
+) -> Result<u64, ExnThrown> {
+    // A function handler is invoked when the timer fires, and a string one is evaluated as code.
+    let (callable, code) = match handler {
+        TimerHandlerArg::Function(callable) => (Some(callable), None),
+        TimerHandlerArg::String(code) => (None, Some(code)),
     };
 
-    // Argument 1: delay in milliseconds (optional, default 0).
-    // <https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#timer-initialisation-steps>
-    let delay_ms = if argc > 1 {
-        use js::conversion::{ConversionBehavior, FromJSVal};
-        let delay_handle = js::native::Handle::from_raw(args.get(1));
-        match i32::from_jsval(&scope, delay_handle, ConversionBehavior::Default) {
-            Ok(delay) => delay.max(0) as u64,
-            Err(error) => {
-                error.throw(&scope);
-                return false;
-            }
-        }
-    } else {
-        0
-    };
-    let delay = Duration::from_millis(delay_ms);
+    let delay = Duration::from_millis(timeout.max(0) as u64);
 
     // HTML timer initialization steps: "Let nesting level be the task's timer nesting level"
     // (the currently running timer task's, or 0), clamp the timeout once nested deeper than
@@ -328,21 +263,22 @@ unsafe fn queue_timer_from_js(
 
     let deadline = Instant::now() + delay;
 
-    let interval = repeating.then_some(delay);
+    let interval = repeat.then_some(delay);
 
     // HTML timer initialization steps: "Let arguments be... the rest of the arguments"
     // For the handler form, everything after the timeout is forwarded to the callback on every
     // invocation. For the string form, additional arguments are ignored.
     let extra_args: Vec<RootedTraceableBox<Heap<Value>>> = match &callable {
-        Some(_) => (2..argc)
-            .map(|i| RootedTraceableBox::new(Heap::from(*args.get(i))))
+        Some(_) => arguments
+            .iter()
+            .map(|arg| RootedTraceableBox::new(Heap::from(arg.get())))
             .collect(),
         None => Vec::new(),
     };
 
     // Queue on the current event loop.
     let timer_id = with_active_event_loop(|el| {
-        el.queue_js_timer(&scope, deadline, |timer_id| match callable {
+        el.queue_js_timer(scope, deadline, |timer_id| match callable {
             Some(callback) => Box::new(TimerTask::function(
                 callback,
                 extra_args,
@@ -351,66 +287,14 @@ unsafe fn queue_timer_from_js(
                 timer_id,
             )),
             None => {
-                // Not callable: run the handler's string as code.
-                // TODO: can we do the eval once instead of on every fire?
+                // Not callable: run the handler's string as code. The HTML timer initialization
+                // steps create a new classic script from it each time the timer fires, so the
+                // string is kept rather than a compiled script.
                 let code = code.expect("non-callable handler was converted to a string above");
                 Box::new(TimerTask::code(code, interval, task_nesting, timer_id))
             }
         })
     });
 
-    match timer_id {
-        Some(timer_id) => {
-            args.rval().set(timer_id.to_jsval(&scope).unwrap().get());
-            true
-        }
-        None => {
-            throw_error(&scope, "No active event loop");
-            false
-        }
-    }
-}
-
-/// `clearTimeout(id)` / `clearInterval(id)` — cancel a timer.
-unsafe extern "C" fn js_clear_timeout(
-    raw_cx: *mut RawJSContext,
-    argc: u32,
-    vp: *mut js::native::Value,
-) -> bool {
-    clear_timer_from_js(raw_cx, argc, vp)
-}
-
-unsafe extern "C" fn js_clear_interval(
-    raw_cx: *mut RawJSContext,
-    argc: u32,
-    vp: *mut js::native::Value,
-) -> bool {
-    clear_timer_from_js(raw_cx, argc, vp)
-}
-
-unsafe fn clear_timer_from_js(
-    raw_cx: *mut RawJSContext,
-    argc: u32,
-    vp: *mut js::native::Value,
-) -> bool {
-    let scope = RootScope::from_current_realm(raw_cx);
-    let args = js::native::CallArgs::from_vp(vp, argc);
-    let id = if argc > 0 {
-        use js::conversion::{ConversionBehavior, FromJSVal};
-        let id_handle = js::native::Handle::from_raw(args.get(0));
-        match u64::from_jsval(&scope, id_handle, ConversionBehavior::Default) {
-            Ok(id) => id,
-            Err(error) => {
-                error.throw(&scope);
-                return false;
-            }
-        }
-    } else {
-        0
-    };
-
-    with_active_event_loop(|el| el.clear_js_timer(id));
-
-    args.rval().set(value::undefined());
-    true
+    timer_id.ok_or_else(|| throw_error(scope, "No active event loop"))
 }

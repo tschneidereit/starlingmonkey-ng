@@ -16,6 +16,8 @@ use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::Promise;
 use url::Url;
+use web_streams::readable::default_reader::{DefaultReader, DefaultReaderImpl};
+use web_streams::readable::native_read::acquire_native_reader;
 use web_streams::readable::ReadableStream;
 
 js::webidl_enum! {
@@ -113,6 +115,9 @@ pub struct Response {
     /// algorithm from the `AbortSignal`, which would otherwise keep it, and this response,
     /// alive for the life of the signal.
     pub(crate) abort_state: Option<Heap<crate::abort::AbortFetchStateImpl>>,
+    /// The reader [`Response::reserve_body_for_sending`] acquired on `body_stream`, which the
+    /// send path reads the body through.
+    pub(crate) send_reader: Option<Heap<DefaultReaderImpl>>,
 }
 
 #[webidl_methods]
@@ -169,6 +174,7 @@ impl Response {
             body: BodyStorage::new(body, body_stream),
             headers: Heap::from(headers),
             abort_state: None,
+            send_reader: None,
         }
     }
 
@@ -465,7 +471,8 @@ impl Response<'_> {
     /// The body has been consumed, so an abort can no longer affect it: detach the `fetch` abort
     /// algorithm from its signal.
     fn detach_abort_state(&self, scope: &Scope<'_>) {
-        if let Some(state) = self.data_mut().abort_state.take_rooted(scope) {
+        let state = self.data_mut().abort_state.take_rooted(scope);
+        if let Some(state) = state {
             state.detach(scope);
         }
     }
@@ -487,11 +494,13 @@ impl Response<'_> {
         // Drop an unread host body (the `.body`/consume path never ran): closes the connection.
         self.data_mut().body.host = None;
         // Stop an in-flight host read driving the `.body` stream.
-        if let Some(source) = self.data().body.source.get(scope) {
+        let source = self.data().body.source.get(scope);
+        if let Some(source) = source {
             source.abort(scope);
         }
         // Error the `.body` stream so pending and future reads reject.
-        if let Some(stream) = self.data().body.stream.get(scope) {
+        let stream = self.data().body.stream.get(scope);
+        if let Some(stream) = stream {
             stream.error(scope, reason);
         }
     }
@@ -674,6 +683,10 @@ impl HostBackedBodyOwner for Response<'_> {
     fn object(&self) -> js::Object<'_> {
         self.as_object()
     }
+
+    fn take_send_reader<'r>(&self, scope: &'r Scope<'_>) -> Option<DefaultReader<'r>> {
+        self.data_mut().send_reader.take_rooted(scope)
+    }
 }
 
 impl Response<'_> {
@@ -708,8 +721,18 @@ impl Response<'_> {
         BodyMixin::is_unusable(self, scope)
     }
 
-    /// Mark the body as read, so `bodyUsed` reports true.
-    pub fn mark_body_used(&self) {
+    /// Commit the body to being sent: mark it as read, so `bodyUsed` reports true, and lock a
+    /// materialized `.body` stream with the reader [`Response::take_send_body`] later reads it
+    /// through, so author code can no longer read from it.
+    pub fn reserve_body_for_sending(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
         BodyMixin::set_source_disturbed(self);
+        let stream = self.data().body.stream.get(scope);
+        if let Some(stream) = stream {
+            if !stream.is_locked() {
+                let reader = acquire_native_reader(scope, &stream)?;
+                self.data_mut().send_reader.set(reader);
+            }
+        }
+        Ok(())
     }
 }

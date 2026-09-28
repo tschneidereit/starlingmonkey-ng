@@ -21,26 +21,6 @@ use crate::events;
 use crate::events::algorithms::ScriptStackState;
 use crate::events::event_target::EventTarget;
 
-/// Create a new "AbortError" DOMException as a JS value without throwing it.
-pub(crate) fn create_abort_error<'s>(scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
-    let exception = DOMException::new(
-        scope,
-        Some("signal is aborted without reason".into()),
-        Some("AbortError".into()),
-    )?;
-    exception.to_jsval_throwing(scope)
-}
-
-/// Create a new "TimeoutError" DOMException as a JS value without throwing it.
-fn create_timeout_error<'s>(scope: &'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown> {
-    let exception = DOMException::new(
-        scope,
-        Some("signal timed out".into()),
-        Some("TimeoutError".into()),
-    )?;
-    exception.to_jsval_throwing(scope)
-}
-
 /// <https://dom.spec.whatwg.org/#create-a-dependent-abort-signal>
 ///
 /// To create a dependent abort signal, given a list `signals`, returns a new
@@ -117,10 +97,10 @@ pub fn create_dependent_abort_signal<'r>(
 /// <https://dom.spec.whatwg.org/#abortsignal-signal-abort>
 ///
 /// To signal abort, given an AbortSignal object signal and an optional reason.
-pub(crate) fn signal_abort(
-    scope: &Scope<'_>,
+pub(crate) fn signal_abort<'s>(
+    scope: &'s Scope<'_>,
     signal: &AbortSignal<'_>,
-    reason: HandleValue<'_>,
+    reason: impl ToJSVal<'s>,
     script_stack_state: ScriptStackState,
 ) -> Result<(), ExnThrown> {
     // Step 1: If _signal_ is `aborted`, then return.
@@ -130,11 +110,16 @@ pub(crate) fn signal_abort(
 
     // Step 2: Set _signal_'s `abort reason` to _reason_ if it is given; otherwise to a new
     //         "``AbortError``" ``DOMException``.
+    let reason = reason.to_jsval_throwing(scope)?;
     if !reason.is_undefined() {
         signal.data_mut().abort_reason.set(reason.get());
     } else {
-        let err_val = create_abort_error(scope)?;
-        signal.data_mut().abort_reason.set(err_val.get());
+        let err_val = DOMException::new(
+            scope,
+            "signal is aborted without reason".into(),
+            "AbortError".into(),
+        )?;
+        signal.data_mut().abort_reason.set(err_val.as_value());
     }
 
     // Step 3: Let _dependentSignalsToAbort_ be a new `list`.
@@ -329,7 +314,7 @@ impl Task for AbortTimeoutTask {
         let signal: AbortSignal<'_> = self.signal.take(scope);
         // `Queue a global task` [...] to `signal abort` given _signal_ and a new
         // "``TimeoutError``" ``DOMException``.
-        let reason = create_timeout_error(scope)?;
+        let reason = DOMException::new(scope, "signal timed out".into(), "TimeoutError".into())?;
         signal_abort(scope, &signal, reason, ScriptStackState::Empty)
     }
 

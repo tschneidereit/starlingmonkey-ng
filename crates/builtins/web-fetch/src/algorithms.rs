@@ -352,7 +352,8 @@ fn is_safelisted_content_type_essence(essence: &str) -> bool {
 /// To determine whether a header (name, value) is a CORS-safelisted request-header, run these steps:
 pub(crate) fn is_cors_safelisted_request_header(name: &str, value: &str) -> bool {
     // Step 1: If _value_’s `length` is greater than 128, then return false.
-    if value.len() > 128 {
+    // (A byte sequence is held as a string of code points ≤ U+00FF, one per byte.)
+    if value.chars().count() > 128 {
         return false;
     }
 
@@ -641,22 +642,6 @@ pub(crate) fn is_method(method: &str) -> bool {
     !method.is_empty() && method.bytes().all(is_http_token_byte)
 }
 
-/// Whether `value` is a valid `ReferrerPolicy` WebIDL enum value (including the empty string).
-/// <https://w3c.github.io/webappsec-referrer-policy/#enumdef-referrerpolicy>
-pub(crate) fn is_valid_referrer_policy(value: &str) -> bool {
-    matches!(
-        value,
-        "" | "no-referrer"
-            | "no-referrer-when-downgrade"
-            | "same-origin"
-            | "origin"
-            | "strict-origin"
-            | "origin-when-cross-origin"
-            | "strict-origin-when-cross-origin"
-            | "unsafe-url"
-    )
-}
-
 /// <https://fetch.spec.whatwg.org/#cors-safelisted-method>
 /// A CORS-safelisted method is a byte-case-insensitive match for `GET`, `HEAD`, or `POST`.
 pub(crate) fn is_cors_safelisted_method(method: &str) -> bool {
@@ -714,7 +699,7 @@ pub(crate) fn is_no_cors_safelisted_request_header_after_append(
         return false;
     }
     // `CORS-safelisted request-header` Step 1: the combined value's length.
-    if existing.len() + 2 + value.len() > 128 {
+    if existing.chars().count() + 2 + value.chars().count() > 128 {
         return false;
     }
     // ``accept``: a `CORS-unsafe request-header byte` in the combined value is one in either part.

@@ -40,6 +40,35 @@ pub unsafe fn capture_current_stack(
     ExnThrown::check(ok)
 }
 
+/// Capture up to `max_frames` frames of the current JavaScript call stack as a `SavedFrame`
+/// object. Returns `None` if no script is running.
+pub fn capture_saved_frame<'s>(
+    scope: &'s Scope<'_>,
+    max_frames: u32,
+) -> Result<Option<crate::Object<'s>>, ExnThrown> {
+    let mut capture = std::mem::MaybeUninit::<StackCapture>::uninit();
+    // SAFETY: the glue function initializes `capture`, which holds no pointers into itself and
+    // so can be moved afterwards.
+    let mut capture = unsafe {
+        mozjs::jsapi::JS_StackCapture_MaxFrames(max_frames, capture.as_mut_ptr());
+        capture.assume_init()
+    };
+    // SAFETY: the pointer is only used to root `frame` in this frame.
+    let raw = unsafe { scope.cx_mut().raw_cx() };
+    mozjs::rooted!(in(raw) let mut frame = std::ptr::null_mut::<JSObject>());
+    // SAFETY: `capture` was initialized above.
+    unsafe {
+        capture_current_stack(
+            scope,
+            frame.handle_mut(),
+            &mut capture,
+            HandleObject::null(),
+        )?
+    };
+    // SAFETY: `frame` is null or a live `SavedFrame`, which `from_raw` roots in `scope`.
+    Ok(unsafe { crate::Object::from_raw(scope, frame.get()) })
+}
+
 /// Build a string representation of a stack trace.
 ///
 /// `principals` controls security-filtered access — pass `std::ptr::null_mut()`

@@ -118,11 +118,21 @@ impl DOMException {
     ///
     /// `constructor(optional DOMString message = "", optional DOMString name = "Error")`
     #[constructor]
-    fn new(message: Option<String>, name: Option<String>) -> Self {
+    fn new_js(message: Option<String>, name: Option<String>) -> Self {
         Self {
-            message: message.unwrap_or_default(),
+            // Step 1: Set `this`'s `name` to _name_.
             name: name.unwrap_or_else(|| "Error".to_string()),
+            // Step 2: Set `this`'s `message` to _message_.
+            message: message.unwrap_or_default(),
         }
+    }
+
+    /// Creates a new `DOMException`.
+    ///
+    /// In difference to the JS-facing constructor `new_js`, both arguments
+    /// to `new` are required, with no defaults.`
+    pub fn new(message: String, name: String) -> Self {
+        Self { name, message }
     }
 
     // -----------------------------------------------------------------------
@@ -162,7 +172,7 @@ impl DOMException {
 /// This creates a new DOMException object and sets it as the pending exception.
 pub fn throw_dom_exception(scope: &Scope<'_>, name: &str, message: &str) -> ExnThrown {
     // Get the DOMException constructor from the global.
-    let exception = match DOMException::new(scope, Some(message.into()), Some(name.into())) {
+    let exception = match DOMException::new(scope, message.into(), name.into()) {
         Ok(exc) => exc,
         Err(_) => return ExnThrown,
     };
@@ -260,7 +270,7 @@ mod dom_exception_integration {
         runtime::register_global_initializer(super::DOMException::add_to_global);
         let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
         let scope = rt.default_global();
-        let e = super::DOMException::new(&scope, None, None).unwrap();
+        let e = super::DOMException::new(&scope, String::new(), "Error".into()).unwrap();
         assert_eq!(&*e.name(), "Error");
         assert_eq!(&*e.message(), "");
         assert_eq!(e.code(), 0);
@@ -428,6 +438,21 @@ mod throw_exception_integration {
             },
             code,
         )
+    }
+
+    /// Capturing the stack for a new `DOMException` is best-effort: a throwing
+    /// `Error.prototype.stack` accessor leaves the construction intact and no
+    /// exception pending.
+    #[test]
+    fn construction_survives_a_throwing_stack_accessor() {
+        assert_eq!(
+            eval(
+                "Object.defineProperty(Error.prototype, 'stack', { get() { throw 1; }, configurable: true });
+                 const e = new DOMException('m', 'NotFoundError');
+                 e.name + ',' + e.message"
+            ),
+            "NotFoundError,m"
+        );
     }
 
     #[test]

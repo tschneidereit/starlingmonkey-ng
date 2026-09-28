@@ -16,7 +16,7 @@ use js::iteration::{create_iter_result, pair_iterator_result, IterationKind};
 use js::prelude::HandleValue;
 
 /// <https://webidl.spec.whatwg.org/#dfn-default-iterator-object>
-#[webidl_interface(name = "URLSearchParams Iterator")]
+#[webidl_interface(hidden, name = "URLSearchParams Iterator")]
 pub struct URLSearchParamsIterator {
     /// Reference to the URLSearchParams being iterated.
     pub(crate) params: Heap<URLSearchParamsImpl>,

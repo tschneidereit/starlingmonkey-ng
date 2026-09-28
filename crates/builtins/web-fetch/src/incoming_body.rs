@@ -21,6 +21,7 @@ use js::promise::{PromiseFuture, PromiseOutcome};
 use js::{value, Function, Promise};
 use platform::http::IncomingBody;
 use web_streams::readable::default_controller::ReadableStreamDefaultControllerImpl;
+use web_streams::readable::default_reader::DefaultReader;
 use web_streams::readable::readable_stream::{ReadableStream, ReadableStreamImpl};
 use web_streams::readable::ReadableStreamDefaultController;
 use web_streams::AlgorithmArg;
@@ -128,7 +129,8 @@ impl HostBodySource<'_> {
     /// Abort the body: cancel the in-flight chunk read (if any) — which drops the
     /// host body and closes the connection — and drop any idle host body.
     pub(crate) fn abort(&self, scope: &Scope<'_>) {
-        if let Some(pull) = self.data_mut().current_pull.take_rooted(scope) {
+        let pull = self.data_mut().current_pull.take_rooted(scope);
+        if let Some(pull) = pull {
             js::promise::cancel_pending_future(pull);
         }
         // A deferred pull has no host read to cancel, but its promise must still be
@@ -228,6 +230,12 @@ pub(crate) trait HostBackedBodyOwner {
     /// The `.body` stream, once materialized.
     fn body_stream<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStream<'r>> {
         self.with_body(|body| body.stream.get(scope))
+    }
+
+    /// Take the reader acquired on the `.body` stream when the body was committed to being sent,
+    /// if any. Sending reads the stream through it.
+    fn take_send_reader<'r>(&self, _scope: &'r Scope<'_>) -> Option<DefaultReader<'r>> {
+        None
     }
 
     /// Take the host body whether or not a stream exists (the outgoing path,

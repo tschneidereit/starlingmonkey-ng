@@ -1016,3 +1016,25 @@ fn responding_marks_the_body_used_at_settle_time() {
         String::from_jsval(&scope, eval(&scope, "String(globalThis.kept.bodyUsed)"), ()).unwrap();
     assert_eq!(used, "true", "no byte has been transmitted yet");
 }
+
+/// Once `respondWith`'s promise settles, a `.body` stream the handler already
+/// materialized is locked for sending, so author code can no longer read it.
+#[test]
+fn respond_with_locks_a_materialized_body_stream() {
+    let (_, probe) = dispatch(
+        "(event) => {
+            const response = new Response(new ReadableStream({
+                start(c) { c.enqueue(new Uint8Array([1])); c.close(); },
+            }));
+            response.body;
+            event.respondWith(response);
+            event.waitUntil(new Promise(resolve => setTimeout(() => {
+                try { response.body.getReader(); globalThis.__probe = 'readable'; }
+                catch (e) { globalThis.__probe = `${e.constructor.name},${response.bodyUsed}`; }
+                resolve();
+            }, 0)));
+        }",
+        "new Request('http://example.com/')",
+    );
+    assert_eq!(probe, "TypeError,true");
+}

@@ -15,7 +15,7 @@ impl Navigator {
     /// <https://html.spec.whatwg.org/multipage/system-state.html#dom-navigator-useragent>
     #[getter]
     fn user_agent(&self) -> String {
-        String::from("StarlingMonkey)")
+        String::from("StarlingMonkey")
     }
 }
 

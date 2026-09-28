@@ -554,3 +554,15 @@ fn usp_delete_on_opaque_path_with_fragment_preserves_trailing_space_encoding() {
         "data:space   %20#test"
     );
 }
+
+#[test]
+fn url_search_params_iterator_is_not_a_global() {
+    assert_eq!(
+        eval("typeof globalThis['URLSearchParams Iterator']"),
+        "undefined"
+    );
+    assert_eq!(
+        eval("Object.prototype.toString.call(new URLSearchParams('a=1').entries())"),
+        "[object URLSearchParams Iterator]"
+    );
+}

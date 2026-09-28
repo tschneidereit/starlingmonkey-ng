@@ -18,7 +18,7 @@ use js::error::{throw_type_error, ExnThrown};
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
-use js::{Object, Promise};
+use js::Promise;
 use url::Url;
 use web_globals::signals::algorithms::create_dependent_abort_signal;
 use web_globals::signals::{AbortSignal, AbortSignalImpl};
@@ -48,6 +48,21 @@ js::webidl_enum! {
         Video => "video",
         Worker => "worker",
         Xslt => "xslt",
+    }
+}
+
+js::webidl_enum! {
+    /// <https://w3c.github.io/webappsec-referrer-policy/#enumdef-referrerpolicy>
+    pub enum ReferrerPolicy {
+        Empty => "",
+        NoReferrer => "no-referrer",
+        NoReferrerWhenDowngrade => "no-referrer-when-downgrade",
+        SameOrigin => "same-origin",
+        Origin => "origin",
+        StrictOrigin => "strict-origin",
+        OriginWhenCrossOrigin => "origin-when-cross-origin",
+        StrictOriginWhenCrossOrigin => "strict-origin-when-cross-origin",
+        UnsafeUrl => "unsafe-url",
     }
 }
 
@@ -131,7 +146,7 @@ pub struct RequestRecord {
     /// <https://fetch.spec.whatwg.org/#concept-request-referrer>
     pub referrer: Referrer,
     /// <https://fetch.spec.whatwg.org/#concept-request-referrer-policy>
-    pub referrer_policy: String,
+    pub referrer_policy: ReferrerPolicy,
     /// <https://fetch.spec.whatwg.org/#concept-request-mode>
     pub mode: RequestMode,
     /// <https://fetch.spec.whatwg.org/#concept-request-credentials-mode>
@@ -164,7 +179,7 @@ impl Default for RequestRecord {
             url_list: Vec::new(),
             destination: RequestDestination::Empty,
             referrer: Referrer::Client,
-            referrer_policy: String::new(),
+            referrer_policy: ReferrerPolicy::Empty,
             mode: RequestMode::NoCors,
             credentials_mode: RequestCredentials::SameOrigin,
             cache_mode: RequestCache::Default,
@@ -356,7 +371,7 @@ impl Request {
             // Step 13.5: Set _request_’s `referrer` to "`client`".
             request.referrer = Referrer::Client;
             // Step 13.6: Set _request_’s `referrer policy` to the empty string.
-            request.referrer_policy = String::new();
+            request.referrer_policy = ReferrerPolicy::Empty;
             // Step 13.7: Set _request_’s `URL` to _request_’s `current URL`.
             // Step 13.8: Set _request_’s `URL list` to « _request_’s `URL` ».
             let current = request.current_url().clone();
@@ -393,14 +408,8 @@ impl Request {
             }
             // Step 15: If _init_["`referrerPolicy`"] `exists`, then set _request_’s `referrer
             //     policy` to it.
-            if config::enforce_fetch_restrictions() {
-                if let Some(policy) = init.referrer_policy.take() {
-                    // ReferrerPolicy is a WebIDL enum, so an invalid value is a TypeError.
-                    if !algorithms::is_valid_referrer_policy(&policy) {
-                        return Err(throw_type_error(scope, c"Invalid referrerPolicy value"));
-                    }
-                    request.referrer_policy = policy;
-                }
+            if let Some(policy) = init.referrer_policy {
+                request.referrer_policy = policy;
             }
         }
         // Step 16: Let _mode_ be _init_["`mode`"] if it `exists`, and _fallbackMode_ otherwise.
@@ -470,24 +479,8 @@ impl Request {
                 request.method = algorithms::normalize_a_method(method);
             }
             // Step 26: If _init_["`signal`"] `exists`, then set _signal_ to it.
-            if let Some(signal_init) = &init.signal {
-                signal = match signal_init {
-                    None => None,
-                    Some(value) => {
-                        let obj = Object::from_value(scope, value.get())
-                            .ok()
-                            .and_then(|o| o.cast::<AbortSignal>().ok());
-                        match obj {
-                            Some(s) => Some(s),
-                            None => {
-                                return Err(throw_type_error(
-                                    scope,
-                                    c"Request signal must be an AbortSignal",
-                                ));
-                            }
-                        }
-                    }
-                };
+            if let Some(signal_init) = init.signal {
+                signal = signal_init;
             }
             // Step 27: If _init_["`priority`"] `exists`, then:
             // Step 27.1: If _request_’s `internal priority` is not null, then update _request_’s
@@ -650,12 +643,9 @@ impl Request {
                 .as_ref()
                 .and_then(|req| req.data().body.stream.get(scope));
             // Step 41.1: If _inputBody_ is `unusable`, then `throw` a `TypeError`.
-            let unusable = input_body
+            let unusable = input_request
                 .as_ref()
-                .is_some_and(|body| body.source_disturbed)
-                || input_stream
-                    .as_ref()
-                    .is_some_and(|stream| stream.is_disturbed() || stream.is_locked());
+                .is_some_and(|req| req.is_unusable(scope));
             if unusable {
                 return Err(throw_type_error(scope, c"input Request body is unusable"));
             }
@@ -777,10 +767,9 @@ impl Request {
 
     /// <https://fetch.spec.whatwg.org/#dom-request-referrerpolicy>
     #[getter]
-    fn referrer_policy(&self) -> String {
-        // WebIDL: ReferrerPolicy
+    fn referrer_policy(&self) -> ReferrerPolicy {
         // Step 1: Return `this`’s `request`’s `referrer policy`.
-        self.data().request.referrer_policy.clone()
+        self.data().request.referrer_policy
     }
 
     /// <https://fetch.spec.whatwg.org/#dom-request-mode>
@@ -1072,14 +1061,14 @@ pub struct RequestInit<'a> {
     pub headers: Option<HeadersInit>,
     pub body: Option<BodyInit<'a>>,
     pub referrer: Option<String>,
-    pub referrer_policy: Option<String>, // WebIDL: ReferrerPolicy
+    pub referrer_policy: Option<ReferrerPolicy>,
     pub mode: Option<RequestMode>,
     pub credentials: Option<RequestCredentials>,
     pub cache: Option<RequestCache>,
     pub redirect: Option<RequestRedirect>,
     pub integrity: Option<String>,
     pub keepalive: Option<bool>,
-    pub signal: Option<Option<HandleValue<'a>>>, // WebIDL: AbortSignal
+    pub signal: Option<Option<AbortSignal<'a>>>,
     pub duplex: Option<RequestDuplex>,
     pub priority: Option<RequestPriority>,
     pub window: Option<HandleValue<'a>>, // WebIDL: any

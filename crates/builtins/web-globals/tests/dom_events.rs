@@ -471,3 +471,69 @@ fn global_listener_survives_compacting_gc() {
 
     assert_eq!(String::from_jsval(&scope, val, ()).unwrap(), "1");
 }
+
+/// `addEventListener` accepts `EventListener` objects with a `handleEvent`
+/// method, calling it with the object as `this`.
+#[test]
+fn add_event_listener_accepts_handle_event_objects() {
+    assert_eq!(
+        eval(
+            "const t = new EventTarget();
+             const listener = { seen: '', handleEvent(e) { this.seen = e.type; } };
+             t.addEventListener('ping', listener);
+             t.dispatchEvent(new Event('ping'));
+             listener.seen"
+        ),
+        "ping"
+    );
+}
+
+/// A non-object callback is a TypeError, while `null` adds nothing.
+#[test]
+fn add_event_listener_rejects_non_object_callbacks() {
+    assert_eq!(
+        eval(
+            "const t = new EventTarget();
+             t.addEventListener('ping', null);
+             let threw = false;
+             try { t.addEventListener('ping', 42); } catch (e) { threw = e instanceof TypeError; }
+             String(threw)"
+        ),
+        "true"
+    );
+}
+
+/// A non-boolean, non-object `options` value is converted with `ToBoolean`, so
+/// `1` registers a capturing listener that `removeEventListener(.., true)` removes.
+#[test]
+fn listener_options_convert_primitives_with_to_boolean() {
+    assert_eq!(
+        eval(
+            "const t = new EventTarget();
+             let count = 0;
+             const f = () => count++;
+             t.addEventListener('ping', f, 1);
+             t.removeEventListener('ping', f, true);
+             t.dispatchEvent(new Event('ping'));
+             String(count)"
+        ),
+        "0"
+    );
+}
+
+/// An exception thrown while reading an options member propagates instead of
+/// being left pending.
+#[test]
+fn throwing_options_getter_propagates() {
+    assert_eq!(
+        eval(
+            "const t = new EventTarget();
+             let msg = '';
+             try {
+                 t.addEventListener('ping', () => {}, { get capture() { throw new Error('boom'); } });
+             } catch (e) { msg = e.message; }
+             msg"
+        ),
+        "boom"
+    );
+}

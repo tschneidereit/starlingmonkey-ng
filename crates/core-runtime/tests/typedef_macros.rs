@@ -97,6 +97,50 @@ mod js_proto_tests {
     fn stack_is_nonempty() {
         assert_eq!(eval("new CustomError('x').stack.length > 0"), "true");
     }
+
+    /// The stack is the one at construction, formatted when it is first read.
+    #[test]
+    fn stack_is_captured_at_construction() {
+        assert_eq!(
+            eval(
+                "function make() { return new CustomError('x'); }
+                 function read(e) { return e.stack; }
+                 const s = read(make());
+                 [s.includes('make@'), s.includes('read@')].join()"
+            ),
+            "true,false"
+        );
+    }
+
+    /// Like `Error.prototype.stack`, `stack` is an accessor on the prototype: instances have no
+    /// own `stack` until one is assigned, and the getter returns `undefined` for other objects.
+    #[test]
+    fn stack_is_a_prototype_accessor() {
+        assert_eq!(
+            eval(
+                "const e = new CustomError('x');
+                 const d = Object.getOwnPropertyDescriptor(CustomError.prototype, 'stack');
+                 const own = Object.getOwnPropertyDescriptor(e, 'stack');
+                 e.stack = 'replaced';
+                 const after = Object.getOwnPropertyDescriptor(e, 'stack');
+                 [typeof d.get, typeof d.set, d.enumerable, d.configurable, own,
+                  after.value, after.enumerable, after.writable,
+                  d.get.call(CustomError.prototype), d.get.call({})].join()"
+            ),
+            "function,function,false,true,,replaced,true,true,,"
+        );
+    }
+
+    #[test]
+    fn stack_getter_throws_on_primitives() {
+        assert_eq!(
+            eval(
+                "const get = Object.getOwnPropertyDescriptor(CustomError.prototype, 'stack').get;
+                 try { get.call(1); 'no throw' } catch (e) { e.constructor.name }"
+            ),
+            "TypeError"
+        );
+    }
 }
 
 mod constant_tests {

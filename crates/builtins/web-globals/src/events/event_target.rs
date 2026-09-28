@@ -8,11 +8,10 @@
 
 use core_runtime::webidl_interface;
 use core_runtime::webidl_methods;
-use js::error::ExnThrown;
+use js::error::{throw_type_error, ExnThrown};
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
-use js::Function;
 use js::Object;
 
 use super::algorithms;
@@ -24,27 +23,39 @@ use crate::events::event::EventFlags;
 ///
 /// <https://dom.spec.whatwg.org/#concept-event-listener>
 #[js::must_root]
+#[derive(core_runtime::Traceable)]
 pub(crate) struct EventListener {
     /// Identity used to re-locate this listener in the live list during
     /// dispatch (the snapshot stores ids, not pointers — see `algorithms.rs`).
+    #[no_trace]
     pub(crate) id: u64,
+    #[no_trace]
     pub(crate) event_type: String,
-    /// The GC-traced callback function. Listener identity is compared by
-    /// reading this Heap's live pointer ([`Heap::as_ptr`]), so it stays
-    /// correct across a compacting GC.
-    pub(crate) callback: Heap<js::function::Function>,
+    /// The `EventListener` callback object: a callable, or an object with a
+    /// `handleEvent` method. Listener identity is compared by reading this
+    /// Heap's live pointer ([`Heap::as_ptr`]), so it stays correct across a
+    /// compacting GC.
+    pub(crate) callback: Heap<js::object::Object>,
+    #[no_trace]
     pub(crate) capture: bool,
+    #[no_trace]
     pub(crate) passive: Option<bool>,
+    #[no_trace]
     pub(crate) once: bool,
-    pub(crate) removed: bool,
 }
 
-// Safety: the only GC pointer is the `callback` Heap; all other fields are
-// primitive.
-unsafe impl js::heap::Trace for EventListener {
-    unsafe fn trace(&self, trc: *mut js::native::JSTracer) {
-        self.callback.trace(trc);
+/// Convert an `EventListener?` argument: `None` for `null` and `undefined`, the
+/// object for any object, and a TypeError for anything else.
+fn event_listener_argument<'s>(
+    scope: &'s Scope<'_>,
+    callback: HandleValue<'_>,
+) -> Result<Option<Object<'s>>, ExnThrown> {
+    if callback.is_null_or_undefined() {
+        return Ok(None);
     }
+    Object::from_value(scope, *callback)
+        .map(Some)
+        .map_err(|_| throw_type_error(scope, c"event listener must be an object"))
 }
 
 /// <https://dom.spec.whatwg.org/#interface-eventtarget>
@@ -79,13 +90,7 @@ impl EventTarget {
         //         must happen even when `callback` is null.
         let options = algorithms::flatten_more_options(scope, options)?;
 
-        if callback.is_null() || callback.is_undefined() {
-            return Ok(());
-        }
-        let Ok(obj) = Object::from_value(scope, *callback) else {
-            return Ok(());
-        };
-        let Ok(callback) = obj.cast::<Function<'_>>() else {
+        let Some(callback) = event_listener_argument(scope, callback)? else {
             return Ok(());
         };
 
@@ -112,24 +117,19 @@ impl EventTarget {
         event_type: String,
         callback: HandleValue<'_>,
         options: Option<HandleValue<'_>>,
-    ) {
+    ) -> Result<(), ExnThrown> {
         // Step 1: Let _capture_ be the result of `flattening` _options_.
-        let capture = algorithms::flatten_options(scope, options);
+        let capture = algorithms::flatten_options(scope, options)?;
 
-        if callback.is_null() || callback.is_undefined() {
-            return;
-        }
-        let Ok(obj) = Object::from_value(scope, *callback) else {
-            return;
-        };
-        let Ok(callback) = obj.cast::<Function<'_>>() else {
-            return;
+        let Some(callback) = event_listener_argument(scope, callback)? else {
+            return Ok(());
         };
 
         // Step 2: If `this`'s `event listener list` `contains` an `event listener` whose `type`
         //         is _type_, `callback` is _callback_, and `capture` is _capture_, then `remove an
         //         event listener` with `this` and that `event listener`.
         algorithms::remove_an_event_listener(&mut self.data_mut(), &event_type, &callback, capture);
+        Ok(())
     }
 
     /// <https://dom.spec.whatwg.org/#dom-eventtarget-dispatchevent>
@@ -174,12 +174,44 @@ impl EventTarget {
         let _ = algorithms::dispatch(scope, &event, self, script_stack_state);
     }
 
-    /// Whether any listener for `event_type` would be invoked by a dispatch. Listeners already
-    /// removed are still in the list until dispatch prunes them, and do not count.
+    /// Whether any listener for `event_type` would be invoked by a dispatch.
     pub fn has_listener_for(&self, event_type: &str) -> bool {
         self.data()
             .event_listener_list
             .iter()
-            .any(|listener| !listener.removed && listener.event_type == event_type)
+            .any(|listener| listener.event_type == event_type)
+    }
+}
+
+// Nothing platform-specific in these tests, so skip them on wasm32.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::EventTarget;
+    use core_runtime::config::RuntimeConfig;
+    use core_runtime::runtime::{self, Runtime};
+    use js::conversion::FromJSVal;
+
+    /// A `once` listener leaves the event listener list when it runs. JS cannot observe the
+    /// list's length, so this reads it directly.
+    #[test]
+    fn dispatch_removes_once_listeners_from_the_list() {
+        runtime::register_global_initializer(crate::add_to_global);
+        let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
+        let scope = rt.default_global();
+        let value = js::compile::evaluate_with_filename(
+            &scope,
+            "const t = new EventTarget();
+             t.addEventListener('x', () => {});
+             for (let i = 0; i < 3; i++) {
+               t.addEventListener('x', () => {}, { once: true });
+               t.dispatchEvent(new Event('x'));
+             }
+             t",
+            "test.js",
+            1,
+        )
+        .expect("script should evaluate");
+        let target = EventTarget::from_jsval(&scope, value, ()).expect("an EventTarget");
+        assert_eq!(target.data().event_listener_list.len(), 1);
     }
 }

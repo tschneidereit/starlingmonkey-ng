@@ -318,9 +318,7 @@ impl Runtime {
             self.default_global.set(scope.global());
         }
 
-        unsafe {
-            event_loop::timer::install_timer_globals(&scope, scope.global());
-        }
+        event_loop::timer::install_timer_globals(&scope, scope.global());
 
         // Call any registered global initializers (e.g., web-globals, WPT builtins).
         // Snapshot the list first: an initializer (or JS it runs) may itself

@@ -393,6 +393,7 @@ fn process_class_def(attr: TokenStream, item: TokenStream, config: ClassConfig) 
     let has_error_data_const = if opts.js_proto.as_deref() == Some("Error") {
         quote! {
             const HAS_ERROR_DATA: bool = true;
+            const RESERVED_SLOTS: u32 = ::js::class::ERROR_STACK_SLOT + 1;
         }
     } else {
         quote! {}

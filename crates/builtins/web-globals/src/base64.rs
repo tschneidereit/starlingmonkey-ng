@@ -18,6 +18,12 @@ pub mod base64_globals {
     /// Throws `DOMException` with name `"InvalidCharacterError"` if the string
     /// contains any code point above U+00FF.
     pub fn btoa(data: String) -> Result<String, DOMExceptionError> {
+        // <https://html.spec.whatwg.org/#dom-btoa>: The `btoa(data)` method must throw an
+        // "``InvalidCharacterError``" ``DOMException`` if _data_ contains any character whose code
+        // point is greater than U+00FF. Otherwise, the user agent must convert _data_ to a byte
+        // sequence whose _n_th byte is the eight-bit representation of the _n_th code point of
+        // _data_, and then must apply `forgiving-base64 encode` to that byte sequence and return
+        // the result.
         super::btoa(&data).map_err(|msg| DOMExceptionError::new("InvalidCharacterError", msg))
     }
 
@@ -27,6 +33,11 @@ pub mod base64_globals {
     /// decodes it. Throws `DOMException` with name `"InvalidCharacterError"` if
     /// the input is not valid base64.
     pub fn atob(data: String) -> Result<String, DOMExceptionError> {
+        // <https://html.spec.whatwg.org/#dom-atob>
+        // Step 1: Let _decodedData_ be the result of running `forgiving-base64 decode` on _data_.
+        // Step 2: If _decodedData_ is failure, then throw an "``InvalidCharacterError``"
+        //         ``DOMException``.
+        // Step 3: Return _decodedData_.
         super::atob(&data).map_err(|msg| DOMExceptionError::new("InvalidCharacterError", msg))
     }
 }

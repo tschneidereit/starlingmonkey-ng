@@ -18,7 +18,7 @@ use js::prelude::HandleValue;
 /// A WebIDL `ByteString`. The inner `String`'s `char`s are guaranteed to all be
 /// ≤ U+00FF, so each maps one-to-one to a byte.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct ByteString(pub String);
+pub struct ByteString(String);
 
 impl ByteString {
     /// Borrow the contents as a string slice.

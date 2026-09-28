@@ -18,7 +18,7 @@ use js::{value, Function, Promise, PromiseOf};
 use std::ops::Deref;
 use web_fetch::request::{Request, RequestImpl};
 use web_fetch::response::{Response, ResponseImpl};
-use web_globals::dom_exception::DOMExceptionError;
+use web_globals::dom_exception::{DOMException, DOMExceptionError};
 use web_globals::events::algorithms::ScriptStackState;
 use web_globals::events::EventTarget;
 
@@ -293,22 +293,23 @@ fn on_respond_fulfilled(
     // Step 10.2.2.1: If _response_ is `unusable`, then set the `respond-with error flag` and abort
     //     these steps.
     let unusable = response.is_body_unusable(scope);
-    // Step 10.2.1: Let _potentialResponse_ be a copy of _response_’s associated response, except
-    //     for its body.
-    // Only copying the headers, since everything else is effectively unchangeable from content.
-    let headers = (!unusable).then(|| response.headers_list(scope));
+    if !unusable {
+        // Steps 10.2.2 to 10.2.5 are implemented at the platform layer instead of here, except
+        // for the effect step 10.2.2's transform has on the response handed in, which is to take
+        // its body, and step 10.2.5.1's getting a reader for the body's stream, which
+        // `reserve_body_for_sending` acquires now so author code can no longer read from it.
+        response.reserve_body_for_sending(scope)?;
+    }
     {
         let mut data = event.data_mut();
         if unusable {
             data.respond_with_error = true;
         } else {
-            // Steps 10.2.2 to 10.2.5 are implemented at the platform layer instead of here, except
-            // for the effect step 10.2.2's transform has on the response handed in, which is to
-            // take its body.
-            // `mark_body_used` has the same content-visible effect as step 10.2.5.1's getting a
-            // reader for the body: it locks the stream, so no other readers can be acquired.
-            response.mark_body_used();
-            data.potential_response_headers = headers;
+            // Step 10.2.1: Let _potentialResponse_ be a copy of _response_’s associated response,
+            //              except for its body.
+            // Note: We only copy the headers, since everything else is effectively unchangeable
+            // from content.
+            data.potential_response_headers = Some(response.headers_list(scope));
             // Step 10.2.6: Set _event_’s `potential response` to _potentialResponse_.
             data.potential_response.set(response);
         }
@@ -399,8 +400,11 @@ impl<'s> FetchEvent<'s> {
             } else {
                 "the fetch event was not responded to"
             };
-            let _ = DOMExceptionError::new("NetworkError", reason).throw(scope);
-            handled.reject_with_pending(scope).and_then(|()| {
+            match DOMException::new(scope, reason.into(), "NetworkError".into()) {
+                Ok(exception) => handled.reject(scope, exception),
+                Err(_) => handled.reject_with_pending(scope),
+            }
+            .and_then(|()| {
                 // Most handlers never look at `handled`, and a rejection nobody subscribed to is
                 // reported as an unhandled rejection, which would put a spurious warning on the
                 // stderr of every failed request.

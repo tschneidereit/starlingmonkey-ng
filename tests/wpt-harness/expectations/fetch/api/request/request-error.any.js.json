@@ -41,8 +41,7 @@
     "permissive_status": "FAIL"
   },
   "Bad referrerPolicy init parameter value": {
-    "status": "PASS",
-    "permissive_status": "FAIL"
+    "status": "PASS"
   },
   "Bad mode init parameter value": {
     "status": "PASS"

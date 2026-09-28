@@ -94,3 +94,21 @@ fn setter_overrides_after_init() {
     // Restore for other tests on this thread.
     core_runtime::config::set_enforce_fetch_restrictions(false);
 }
+
+/// `referrerPolicy` is stored and validated whether or not fetch restrictions
+/// are enforced.
+#[test]
+fn referrer_policy_is_kept_without_restrictions() {
+    let config = RuntimeConfig::from_arg_string("--enforce-fetch-restrictions=false").unwrap();
+    let out = run(
+        &config,
+        r#"
+        const r = new Request("http://example.com/", { referrerPolicy: "origin" });
+        let threw = false;
+        try { new Request("http://example.com/", { referrerPolicy: "bogus" }); }
+        catch (e) { threw = e instanceof TypeError; }
+        globalThis.__out = `${r.referrerPolicy},${threw}`;
+        "#,
+    );
+    assert_eq!(out, "origin,true");
+}
