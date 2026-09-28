@@ -122,3 +122,5 @@ impl<'s> Stack<'s, Set> {
 }
 
 crate::gc::handle::deref_to_object!(Set);
+
+crate::gc::handle::from_jsval_via_cast!(Set, c"Value isn't a Set");

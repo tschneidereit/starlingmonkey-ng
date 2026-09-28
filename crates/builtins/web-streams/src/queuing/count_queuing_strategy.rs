@@ -56,10 +56,7 @@ impl CountQueuingStrategy {
         js::class::get_or_init_shared_function(
             scope,
             count_queuing_strategy_size as *const () as usize,
-            |scope| {
-                let undef = HandleValue::undefined();
-                Function::new_callback(scope, c"size", 0, count_queuing_strategy_size, undef)
-            },
+            |scope| Function::new_callback(scope, c"size", 0, count_queuing_strategy_size, ()),
         )
     }
 }

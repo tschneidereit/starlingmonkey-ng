@@ -27,10 +27,8 @@ use crate::function::EmptyArgs;
 use crate::gc::scope::Scope;
 use crate::Object;
 use mozjs::jsapi::{
-    JSErrorFormatString, JSExnType, JSString, JS_ClearPendingException, JS_GetPendingException,
-    JS_IsExceptionPending, JS_ReportErrorNumberUTF8, StackFormat,
+    JSErrorFormatString, JSExnType, JSString, JS_ReportErrorNumberUTF8, StackFormat,
 };
-use mozjs::jsval::UndefinedValue;
 use mozjs::rooted;
 use mozjs::rust::wrappers2;
 #[cfg(debug_assertions)]
@@ -94,21 +92,15 @@ impl ExnThrown {
         // guaranteed by the `Scope` parameter.
         unsafe {
             let raw = scope.cx_mut().raw_cx();
-            if !JS_IsExceptionPending(raw) {
+            let Some(exc_val) = crate::exception::take_pending(scope) else {
                 return CapturedError::default();
-            }
-
-            let mut exc_val = scope.root_value_mut(UndefinedValue());
-            if !JS_GetPendingException(raw, exc_val.reborrow().into()) {
-                return CapturedError::default();
-            }
-            JS_ClearPendingException(raw);
+            };
 
             // For object exceptions, extract the attached stack and, for
             // `Error` objects, the engine's error report.
             let mut stack = None;
             if exc_val.is_object() {
-                let exc_obj = Object::from_value(scope, *exc_val).unwrap();
+                let exc_obj = Object::from_value(scope, exc_val).unwrap();
 
                 // Try to extract the stack trace from the exception object.
                 let maybe_stack =
@@ -158,14 +150,14 @@ impl ExnThrown {
 
             // No error report (a primitive throw like `throw "boom"`, or a non-`Error` object without engine error data): stringify the value itself.
             // Any attached stack extracted above is kept.
-            let message = match crate::string::Str::from_value(scope, exc_val.handle()) {
+            let message = match crate::string::Str::from_value(scope, exc_val) {
                 Ok(s) => s
                     .to_utf8(scope)
                     .unwrap_or_else(|_| "(non-Error exception)".into()),
                 Err(ExnThrown) => {
                     // ToString itself threw (a symbol, or a throwing
                     // `toString`); discard that secondary exception.
-                    JS_ClearPendingException(raw);
+                    crate::exception::clear(scope);
                     "(non-Error exception)".into()
                 }
             };

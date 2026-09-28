@@ -10,7 +10,7 @@ use core_runtime::webidl_dictionary;
 
 pub use byte_length_queuing_strategy::ByteLengthQueuingStrategy;
 pub use count_queuing_strategy::CountQueuingStrategy;
-use js::Object;
+use js::Callable;
 pub use queue_with_sizes::{QueueWithSizes, ValueWithSize};
 
 /// <https://streams.spec.whatwg.org/#dictdef-queuingstrategy>
@@ -27,4 +27,4 @@ pub struct QueuingStrategyInit {
 }
 
 /// WebIDL callback `QueuingStrategySize`: (chunk: HandleValue<'_>) -> f64
-pub type QueuingStrategySize<'s> = Object<'s>;
+pub type QueuingStrategySize<'s> = Callable<'s>;

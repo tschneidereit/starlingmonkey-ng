@@ -12,7 +12,7 @@ use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::prelude::ToJSVal;
 use js::Function;
-use js::{Object, Promise};
+use js::{Callable, Promise};
 
 /// Invoke a stored promise-returning stream algorithm (a controller's pull or
 /// cancel algorithm) following WebIDL "invoke a Promise-returning operation":
@@ -28,7 +28,7 @@ pub(crate) fn invoke_promise_algorithm<'r>(
     scope: &'r Scope<'_>,
     algorithm: HandleValue<'r>,
     receiver: HandleValue<'r>,
-    args: &[HandleValue<'r>],
+    args: &[impl ToJSVal<'r>],
 ) -> Promise<'r> {
     if algorithm.is_undefined() {
         // An absent algorithm resolves with undefined. This branch runs once
@@ -92,11 +92,11 @@ pub(crate) fn invoke_algorithm<'r>(
 /// otherwise produce a spurious unhandled rejection. Attaching the reaction also
 /// marks `promise` itself handled, which is correct — the stream is consuming
 /// it.
-pub(crate) fn react(
-    scope: &Scope<'_>,
+pub(crate) fn react<'r, P: ToJSVal<'r>>(
+    scope: &'r Scope<'_>,
     promise: &Promise<'_>,
-    on_fulfilled: Option<(Callback, HandleValue<'_>)>,
-    on_rejected: Option<(Callback, HandleValue<'_>)>,
+    on_fulfilled: Option<(Callback, P)>,
+    on_rejected: Option<(Callback, P)>,
 ) -> Result<(), ExnThrown> {
     let fulfilled = match on_fulfilled {
         Some((cb, payload)) => Some(Function::new_callback(scope, c"", 1, cb, payload)?),
@@ -123,7 +123,7 @@ pub(crate) fn react(
 /// here: a present member that is not callable is a `TypeError` (`message`).
 pub(crate) fn callback_member<'r>(
     scope: &'r Scope<'_>,
-    member: Option<&Object<'_>>,
+    member: Option<&Callable<'_>>,
     message: &CStr,
 ) -> Result<HandleValue<'r>, ExnThrown> {
     match member {
@@ -131,28 +131,4 @@ pub(crate) fn callback_member<'r>(
         Some(obj) if obj.is_callable() => Ok(scope.root_value(obj.as_value())),
         Some(_) => Err(js::error::throw_type_error(scope, message)),
     }
-}
-
-/// Validate that each present callback dictionary member is callable.
-///
-/// WebIDL converts a dictionary's callback-function members as part of converting
-/// the dictionary, throwing a `TypeError` for a non-callable value. The macro
-/// holds these members as plain [`Object`]s and defers callability to the use
-/// sites (see [`callback_member`]); a stream constructor applies the check up
-/// front — before its later steps, e.g. the `type`/`readableType` `RangeError` —
-/// so a non-callable member surfaces the spec's `TypeError` rather than a later
-/// error. `members` are listed in lexicographic order of the member identifiers
-/// to match WebIDL's dictionary-conversion order.
-pub(crate) fn ensure_callback_members_callable(
-    scope: &Scope<'_>,
-    members: &[(Option<&Object<'_>>, &CStr)],
-) -> Result<(), ExnThrown> {
-    for &(member, message) in members {
-        if let Some(obj) = member {
-            if !obj.is_callable() {
-                return Err(js::error::throw_type_error(scope, message));
-            }
-        }
-    }
-    Ok(())
 }

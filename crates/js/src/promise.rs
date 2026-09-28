@@ -375,6 +375,8 @@ impl<'s> Stack<'s, Promise> {
 
 crate::gc::handle::deref_to_object!(Promise);
 
+crate::gc::handle::from_jsval_via_cast!(Promise, c"Value isn't a Promise");
+
 /// The WebIDL [`Promise<T>`](https://webidl.spec.whatwg.org/#idl-promise) type:
 /// a `Promise<'s>` that carries the type its value is checked against.
 ///
@@ -419,9 +421,10 @@ impl<'s, T> PromiseOf<'s, T> {
         // `react` to the wrapper with the conversion to `T` as its fulfillment steps. Resolving
         // with a non-thenable settles `wrapped` immediately, so the check runs in the next
         // microtask; resolving with a thenable defers it to that thenable's resolution.
-        // TODO: check if we can use a singleton callback per type here.
         let on_fulfilled =
-            crate::Function::new_callback(scope, c"", 1, check, crate::value::undefined())?;
+            crate::class::get_or_init_shared_function(scope, check as usize, |scope| {
+                crate::Function::new_callback(scope, c"", 1, check, crate::value::undefined())
+            })?;
         // A `None` rejection reaction forwards the rejection unchanged, which is what the spec's
         // `onRejectedSteps` amount to for a caller that supplies no rejection steps.
         let checked = wrapped.then(scope, Some(*on_fulfilled), None)?;
@@ -783,7 +786,7 @@ fn settle_promise(scope: &Scope<'_>, promise: Stack<Promise>, outcome: PromiseOu
                 }
                 Err(_) => {
                     // The resolve callback left a pending exception; reject with it.
-                    if let Ok(error) = crate::exception::take_pending(scope) {
+                    if let Some(error) = crate::exception::take_pending(scope) {
                         let _ = promise.reject(scope, error);
                     }
                 }
@@ -791,7 +794,7 @@ fn settle_promise(scope: &Scope<'_>, promise: Stack<Promise>, outcome: PromiseOu
         }
         PromiseOutcome::Reject(message) => {
             let _ = crate::error::TypeError(message).throw(scope);
-            if let Ok(error) = crate::exception::take_pending(scope) {
+            if let Some(error) = crate::exception::take_pending(scope) {
                 let _ = promise.reject(scope, error);
             }
         }

@@ -83,3 +83,5 @@ impl<'s> Stack<'s, WeakMap> {
 }
 
 crate::gc::handle::deref_to_object!(WeakMap);
+
+crate::gc::handle::from_jsval_via_cast!(WeakMap, c"Value isn't a WeakMap");

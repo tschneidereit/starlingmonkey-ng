@@ -6,11 +6,12 @@ use core_runtime::{jsclass, jsmethods};
 use js::conversion::FromJSVal;
 use js::error::ExnThrown;
 use js::exception::take_pending_or_undefined;
+use js::function::cast_payload;
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
 use js::native::{Handle, Value};
-use js::prelude::{CallbackArgs, HandleObject, HandleValue, ToJSVal};
+use js::prelude::{CallbackArgs, HandleObject, HandleValue};
 use js::{value, Function, Object, Promise};
 use web_globals::signals::{AbortSignal, AbortSignalImpl};
 
@@ -205,7 +206,7 @@ fn start_promise_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, payload, ())?;
+    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
     // Set _controller_.[[started]] to true.
     controller.data_mut().started = true;
     debug_assert!(!controller.data().pulling);
@@ -221,7 +222,7 @@ fn start_promise_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, payload, ())?;
+    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
     // Perform ! DefaultControllerError(controller, r).
     readable_stream_default_controller_error(scope, &controller, args.get(0));
     Ok(value::undefined())
@@ -233,7 +234,7 @@ fn pull_promise_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, payload, ())?;
+    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
     // Set _controller_.[[pulling]] to false.
     controller.data_mut().pulling = false;
     // If _controller_.[[pullAgain]] is true, set it to false and call pull-if-needed again.
@@ -250,7 +251,7 @@ fn pull_promise_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, payload, ())?;
+    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
     // Perform ! DefaultControllerError(controller, e).
     readable_stream_default_controller_error(scope, &controller, args.get(0));
     Ok(value::undefined())
@@ -265,7 +266,7 @@ fn byte_start_promise_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = ReadableByteStreamController::from_jsval_throwing(scope, payload, ())?;
+    let controller = cast_payload::<ReadableByteStreamController>(scope, payload);
     // Set _controller_.[[started]] to true.
     controller.data_mut().started = true;
     debug_assert!(!controller.data().pulling);
@@ -281,7 +282,7 @@ fn byte_start_promise_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = ReadableByteStreamController::from_jsval_throwing(scope, payload, ())?;
+    let controller = cast_payload::<ReadableByteStreamController>(scope, payload);
     // Perform ! ByteStreamControllerError(controller, r).
     readable_byte_stream_controller_error(scope, &controller, args.get(0));
     Ok(value::undefined())
@@ -293,7 +294,7 @@ fn byte_pull_promise_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = ReadableByteStreamController::from_jsval_throwing(scope, payload, ())?;
+    let controller = cast_payload::<ReadableByteStreamController>(scope, payload);
     // Set _controller_.[[pulling]] to false.
     controller.data_mut().pulling = false;
     // If _controller_.[[pullAgain]] is true, set it to false and call pull-if-needed again.
@@ -310,7 +311,7 @@ fn byte_pull_promise_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let controller = ReadableByteStreamController::from_jsval_throwing(scope, payload, ())?;
+    let controller = cast_payload::<ReadableByteStreamController>(scope, payload);
     // Perform ! ByteStreamControllerError(controller, e).
     readable_byte_stream_controller_error(scope, &controller, args.get(0));
     Ok(value::undefined())
@@ -344,9 +345,9 @@ fn tee_pull(scope: &Scope<'_>, state: TeeState<'_>) {
 fn tee_pull_native(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    state: HandleValue<'_>,
+    payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = TeeState::from_jsval(scope, state, ()).unwrap();
+    let state = cast_payload::<TeeState>(scope, payload);
     tee_pull(scope, state);
     // Return `a promise resolved with` undefined.
     // Fully internal, so the per-global reused instance serves.
@@ -396,7 +397,7 @@ fn tee_cancel1_native(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = TeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<TeeState>(scope, payload);
     Ok(tee_cancel(scope, state, args.get(0), true))
 }
 
@@ -406,7 +407,7 @@ fn tee_cancel2_native(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = TeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<TeeState>(scope, payload);
     Ok(tee_cancel(scope, state, args.get(0), false))
 }
 
@@ -416,7 +417,7 @@ fn tee_closed_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = TeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<TeeState>(scope, payload);
     let r = args.get(0);
     let branch1 = state.data().branch1.get(scope);
     let branch2 = state.data().branch2.get(scope);
@@ -454,9 +455,9 @@ const TEE_ENQUEUE_INFALLIBLE: &str =
 fn tee_chunk_microtask(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    state: HandleValue<'_>,
+    payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = TeeState::from_jsval(scope, state, ()).unwrap();
+    let state = cast_payload::<TeeState>(scope, payload);
     let chunk = state.data().pending_chunk.get(scope);
     state.data().pending_chunk.set(value::undefined());
     // Set _readAgain_ to false.
@@ -985,7 +986,7 @@ fn from_pull_native(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = FromIterableState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<FromIterableState>(scope, payload);
     let controller = args.get(0);
     let record: js::iteration::AsyncIteratorRecord<'_> = state.data().record.get(scope);
     // Let _nextResult_ be `IteratorNext`(_iteratorRecord_). If abrupt, return a
@@ -1026,10 +1027,7 @@ fn from_pull_fulfilled(
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let iter_result = args.get(0);
-    let controller = Object::from_value(scope, *payload)
-        .map_err(|_| ExnThrown)?
-        .cast::<ReadableStreamDefaultController>()
-        .map_err(|_| ExnThrown)?;
+    let controller = cast_payload::<ReadableStreamDefaultController>(scope, payload);
     // If _iterResult_ is not an Object, throw a TypeError.
     let result_obj = js::iteration::iter_result_object(scope, iter_result)?;
     // Let _done_ be ? `IteratorComplete`(_iterResult_).
@@ -1052,7 +1050,7 @@ fn from_cancel_native(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = FromIterableState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<FromIterableState>(scope, payload);
     let record: js::iteration::AsyncIteratorRecord<'_> = state.data().record.get(scope);
     let p = record.return_promise(scope, args.get(0))?;
     Ok(p.as_value())
@@ -1292,7 +1290,6 @@ fn pipe_setup_propagation_and_start(
     let reader: DefaultReader<'_> = state.data().reader.get(scope);
     let writer: WritableStreamDefaultWriter<'_> = state.data().writer.get(scope);
     let prevent_cancel = state.data().prevent_cancel;
-    let payload = scope.root_value(state.as_value());
 
     let reader_closed = reader.data().closed_promise.get(scope);
     let writer_closed = writer.data().closed_promise.get(scope);
@@ -1307,7 +1304,7 @@ fn pipe_setup_propagation_and_start(
             scope,
             &reader_closed,
             None,
-            Some((pipe_fwd_error_rejected, payload)),
+            Some((pipe_fwd_error_rejected, state)),
         )?;
     }
 
@@ -1321,7 +1318,7 @@ fn pipe_setup_propagation_and_start(
             scope,
             &writer_closed,
             None,
-            Some((pipe_bwd_error_rejected, payload)),
+            Some((pipe_bwd_error_rejected, state)),
         )?;
     }
 
@@ -1333,7 +1330,7 @@ fn pipe_setup_propagation_and_start(
         support::react(
             scope,
             &reader_closed,
-            Some((pipe_fwd_close_fulfilled, payload)),
+            Some((pipe_fwd_close_fulfilled, state)),
             None,
         )?;
     }
@@ -1390,7 +1387,7 @@ fn pipe_ready_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<PipeState>(scope, payload);
     // Re-check before reading: shutdown may have begun (and released the reader)
     // while we waited for the writer.
     if state.data().shutting_down {
@@ -1450,9 +1447,9 @@ pub(crate) fn pipe_read_request_chunk_steps(
 fn pipe_deferred_write(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    state: HandleValue<'_>,
+    payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, state, ()).unwrap();
+    let state = cast_payload::<PipeState>(scope, payload);
     let chunk = state.data().pending_chunk.get(scope);
     state.data().pending_chunk.set(value::undefined());
     let writer = pipe_writer(scope, state);
@@ -1491,10 +1488,10 @@ fn pipe_deferred_write(
 fn pipe_write_settled(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    state: HandleValue<'_>,
+    payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, state, ()).unwrap();
-    debug_assert!(state.data_mut().pending_writes > 0);
+    let state = cast_payload::<PipeState>(scope, payload);
+    debug_assert!(state.data().pending_writes > 0);
     state.data_mut().pending_writes -= 1;
     if state.data().pending_writes == 0 && state.data().shutdown_waiting {
         state.data_mut().shutdown_waiting = false;
@@ -1524,7 +1521,7 @@ fn pipe_fwd_error_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<PipeState>(scope, payload);
     pipe_fwd_error(scope, state, args.get(0));
     Ok(value::undefined())
 }
@@ -1548,7 +1545,7 @@ fn pipe_bwd_error_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<PipeState>(scope, payload);
     pipe_bwd_error(scope, state, args.get(0));
     Ok(value::undefined())
 }
@@ -1567,7 +1564,7 @@ fn pipe_fwd_close_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<PipeState>(scope, payload);
     pipe_fwd_close(scope, state);
     Ok(value::undefined())
 }
@@ -1655,7 +1652,7 @@ fn pipe_shutdown_proceed_deferred(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<PipeState>(scope, payload);
     if state.data().pending_writes > 0 {
         state.data_mut().shutdown_waiting = true;
     } else {
@@ -1676,12 +1673,11 @@ fn pipe_shutdown_do_proceed(scope: &Scope<'_>, state: PipeState<'_>) {
         return;
     }
     let action_promise = pipe_run_action(scope, state);
-    let payload = scope.root_value(state.as_value());
     let _ = support::react(
         scope,
         &action_promise,
-        Some((pipe_action_fulfilled, payload)),
-        Some((pipe_action_rejected, payload)),
+        Some((pipe_action_fulfilled, state)),
+        Some((pipe_action_rejected, state)),
     );
 }
 
@@ -1753,7 +1749,7 @@ fn pipe_action_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<PipeState>(scope, payload);
     pipe_finalize(scope, state, Some(args.get(0)));
     Ok(value::undefined())
 }
@@ -1798,7 +1794,7 @@ fn pipe_abort_algorithm(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<PipeState>(scope, payload);
     pipe_run_abort_algorithm(scope, state);
     Ok(value::undefined())
 }
@@ -1856,7 +1852,7 @@ impl TeeState<'_> {
         self.data_mut().reader.set(reader);
 
         // The chunk-steps microtask callback, reused for every chunk.
-        let microtask = Function::new_callback(scope, c"", 0, tee_chunk_microtask, state_value)?;
+        let microtask = Function::new_callback(scope, c"", 0, tee_chunk_microtask, self)?;
         self.data_mut().chunk_microtask_fn.set(microtask);
 
         // Step 13: Let _pullAlgorithm_ be the following steps: (steps implemented in `tee_pull_native` and its callees)
@@ -1964,20 +1960,17 @@ impl PipeState<'_> {
         self.data_mut().prevent_cancel = prevent_cancel;
         self.data_mut().signal = signal.map(Heap::from);
 
-        let payload = scope.root_value(self.as_value());
-        let deferred = Function::new_callback(scope, c"", 0, pipe_deferred_write, payload)?;
+        let deferred = Function::new_callback(scope, c"", 0, pipe_deferred_write, self)?;
         self.data_mut().deferred_write_fn.set(deferred);
-        let settled = Function::new_callback(scope, c"", 1, pipe_write_settled, payload)?;
+        let settled = Function::new_callback(scope, c"", 1, pipe_write_settled, self)?;
         self.data_mut().write_settled_fn.set(settled);
-        let ready_ok = Function::new_callback(scope, c"", 1, pipe_ready_fulfilled, payload)?;
+        let ready_ok = Function::new_callback(scope, c"", 1, pipe_ready_fulfilled, self)?;
         self.data_mut().ready_fulfilled_fn.set(ready_ok);
         // The ready-rejection swallower uses no per-pipe state; share one per global.
         let ready_err = js::class::get_or_init_shared_function(
             scope,
             pipe_ready_rejected as *const () as usize,
-            |scope| {
-                Function::new_callback(scope, c"", 1, pipe_ready_rejected, HandleValue::undefined())
-            },
+            |scope| Function::new_callback(scope, c"", 1, pipe_ready_rejected, ()),
         )?;
         self.data_mut().ready_rejected_fn.set(ready_err);
         self.data_mut().promise.set(Promise::new_pending(scope)?);
@@ -1994,8 +1987,8 @@ impl PipeState<'_> {
         //          If _signal_ is `aborted`, perform _abortAlgorithm_ and return _promise_. `Add`
         //          _abortAlgorithm_ to _signal_.
         if let Some(signal) = signal {
-            let abort_fn = Function::new_callback(scope, c"", 0, pipe_abort_algorithm, payload)?;
-            self.data_mut().abort_algorithm = Some(Heap::from(abort_fn));
+            let abort_fn = Function::new_callback(scope, c"", 0, pipe_abort_algorithm, self)?;
+            self.data_mut().abort_algorithm.set(abort_fn);
             if signal.aborted() {
                 pipe_run_abort_algorithm(scope, *self);
                 return Ok(());
@@ -2021,14 +2014,13 @@ pub(crate) fn readable_stream_default_tee<'r>(
 
     // Steps 4-18 implemented in `TeeState::new` and the native functions for the algorithms it sets up.
     let state = TeeState::new(scope, *stream, reader, clone_for_branch2)?;
-    let state_value = scope.root_value(state.as_value());
 
     // Step 19: `Upon rejection` of _reader_.`[[closedPromise]]` with reason _r_, Perform !
     //          `DefaultControllerError`(_branch1_.`[[controller]]`, _r_). Perform !
     //          `DefaultControllerError`(_branch2_.`[[controller]]`, _r_). If
     //          _canceled1_ is false or _canceled2_ is false, `resolve` _cancelPromise_ with
     //          undefined.
-    let on_rejected = Function::new_callback(scope, c"", 1, tee_closed_rejected, state_value)?;
+    let on_rejected = Function::new_callback(scope, c"", 1, tee_closed_rejected, state)?;
     reader
         .closed(scope)
         .add_reactions(scope, None, Some(*on_rejected))?;
@@ -2366,7 +2358,7 @@ fn byte_tee_forward_rejected(
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let (state_v, this_reader_v) = pair_parts(scope, payload);
-    let state = ByteTeeState::from_jsval(scope, state_v, ()).unwrap();
+    let state = cast_payload::<ByteTeeState>(scope, state_v);
     let r = args.get(0);
     // If _thisReader_ is not _reader_ (the current reader), return.
     let this_reader = Object::from_value(scope, *this_reader_v).map_err(|_| ExnThrown)?;
@@ -2477,7 +2469,7 @@ fn byte_tee_pull1(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = ByteTeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<ByteTeeState>(scope, payload);
     byte_tee_pull(scope, state, false);
     // The returned resolved promise is internal (the branch controller only
     // attaches its pull reactions to it): the per-global reused instance serves.
@@ -2489,7 +2481,7 @@ fn byte_tee_pull2(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = ByteTeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<ByteTeeState>(scope, payload);
     byte_tee_pull(scope, state, true);
     // As in `byte_tee_pull1`: the per-global reused instance serves.
     Ok(Promise::shared_resolved_undefined(scope)?.as_value())
@@ -2533,7 +2525,7 @@ fn byte_tee_cancel1(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = ByteTeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<ByteTeeState>(scope, payload);
     Ok(byte_tee_cancel(scope, state, args.get(0), false))
 }
 
@@ -2542,7 +2534,7 @@ fn byte_tee_cancel2(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = ByteTeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<ByteTeeState>(scope, payload);
     Ok(byte_tee_cancel(scope, state, args.get(0), true))
 }
 
@@ -2595,9 +2587,9 @@ fn byte_tee_error_both_branches_and_cancel(
 fn byte_tee_default_microtask(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
-    state: HandleValue<'_>,
+    payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = ByteTeeState::from_jsval(scope, state, ()).unwrap();
+    let state = cast_payload::<ByteTeeState>(scope, payload);
     let chunk = state.data().pending_chunk.get(scope);
     state.data().pending_chunk.set(value::undefined());
     state.data_mut().read_again_for_branch1 = false;
@@ -2707,7 +2699,7 @@ fn byte_tee_byob_microtask(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = ByteTeeState::from_jsval(scope, payload, ()).unwrap();
+    let state = cast_payload::<ByteTeeState>(scope, payload);
     let chunk = state.data().pending_chunk.get(scope);
     state.data().pending_chunk.set(value::undefined());
     let for_branch2 = state.data().pending_for_branch2;
@@ -2950,9 +2942,12 @@ pub(crate) fn readable_stream_cancel<'r>(
     };
     // Step 8: Return the result of `reacting` to _sourceCancelPromise_ with a fulfillment step that
     //         returns undefined.
-    let on_fulfilled =
-        Function::new_callback(scope, c"", 1, return_undefined, HandleValue::undefined())
-            .expect("create reaction");
+    let on_fulfilled = js::class::get_or_init_shared_function(
+        scope,
+        return_undefined as *const () as usize,
+        |scope| Function::new_callback(scope, c"", 1, return_undefined, ()),
+    )
+    .expect("create reaction");
     source_cancel_promise
         .then(scope, Some(*on_fulfilled), None)
         .expect("then")
@@ -3563,12 +3558,8 @@ pub(crate) fn readable_stream_default_controller_call_pull_if_needed(
     //         source's `pull(controller)`).
     let pull_algorithm = controller.data().pull_algorithm.get(scope);
     let receiver = controller.data().algorithm_receiver.get(scope);
-    let pull_promise = support::invoke_promise_algorithm(
-        scope,
-        pull_algorithm,
-        receiver,
-        &[scope.root_value(controller.as_value())],
-    );
+    let pull_promise =
+        support::invoke_promise_algorithm(scope, pull_algorithm, receiver, &[controller]);
     // Step 7: `Upon fulfillment` of _pullPromise_, Set _controller_.`[[pulling]]` to false. If
     //         _controller_.`[[pullAgain]]` is true, Set _controller_.`[[pullAgain]]` to false.
     //         Perform ! `DefaultControllerCallPullIfNeeded`(_controller_).
@@ -3576,11 +3567,10 @@ pub(crate) fn readable_stream_default_controller_call_pull_if_needed(
     //         `DefaultControllerError`(_controller_, _e_).
     // (Steps 7 and 8 are implemented by `pull_promise_fulfilled` / `pull_promise_rejected`.)
     if controller.data().pull_fulfilled_fn.is_none() {
-        let payload = scope.root_value(controller.as_value());
-        let fulfilled = Function::new_callback(scope, c"", 1, pull_promise_fulfilled, payload)
+        let fulfilled = Function::new_callback(scope, c"", 1, pull_promise_fulfilled, controller)
             .expect("create pull reaction");
-        controller.data_mut().pull_fulfilled_fn = Some(Heap::from(fulfilled));
-        let rejected = Function::new_callback(scope, c"", 1, pull_promise_rejected, payload)
+        controller.data_mut().pull_fulfilled_fn.set(fulfilled);
+        let rejected = Function::new_callback(scope, c"", 1, pull_promise_rejected, controller)
             .expect("create pull reaction");
         controller.data_mut().pull_rejected_fn = Some(Heap::from(rejected));
     }
@@ -3854,12 +3844,8 @@ pub(crate) fn set_up_readable_stream_default_controller(
     stream.data_mut().controller = Some(Heap::from(controller_obj));
     // Step 9: Let _startResult_ be the result of performing _startAlgorithm_. (This might throw an
     //         exception.)
-    let start_result = support::invoke_algorithm(
-        scope,
-        start_algorithm,
-        algorithm_receiver,
-        &[scope.root_value(controller.as_value())],
-    )?;
+    let start_result =
+        support::invoke_algorithm(scope, start_algorithm, algorithm_receiver, &[controller])?;
     // Step 10: Let _startPromise_ be `a promise resolved with` _startResult_.
     //          As in the writable controller's setup, WebIDL "a promise resolved
     //          with" creates a new promise (it does not return a promise input
@@ -3871,12 +3857,11 @@ pub(crate) fn set_up_readable_stream_default_controller(
     // Step 12: `Upon rejection` of _startPromise_ with reason _r_, Perform !
     //          `DefaultControllerError`(_controller_, _r_).
     // (Steps 11 and 12 are implemented by `start_promise_fulfilled` / `start_promise_rejected`.)
-    let payload = scope.root_value(controller.as_value());
     support::react(
         scope,
         &start_promise,
-        Some((start_promise_fulfilled, payload)),
-        Some((start_promise_rejected, payload)),
+        Some((start_promise_fulfilled, controller)),
+        Some((start_promise_rejected, controller)),
     )?;
     Ok(())
 }
@@ -3969,12 +3954,8 @@ pub(crate) fn readable_byte_stream_controller_call_pull_if_needed(
     //         byte source's `pull(controller)`).
     let pull_algorithm = controller.data().pull_algorithm.get(scope);
     let receiver = controller.data().algorithm_receiver.get(scope);
-    let pull_promise = support::invoke_promise_algorithm(
-        scope,
-        pull_algorithm,
-        receiver,
-        &[scope.root_value(controller.as_value())],
-    );
+    let pull_promise =
+        support::invoke_promise_algorithm(scope, pull_algorithm, receiver, &[controller]);
     // Step 7: `Upon fulfillment` of _pullPromise_, Set _controller_.`[[pulling]]` to false. If
     //         _controller_.`[[pullAgain]]` is true, Set _controller_.`[[pullAgain]]` to false.
     //         Perform ! `ByteStreamControllerCallPullIfNeeded`(_controller_).
@@ -3982,13 +3963,14 @@ pub(crate) fn readable_byte_stream_controller_call_pull_if_needed(
     //         `ByteStreamControllerError`(_controller_, _e_).
     // (Steps 7 and 8 are implemented by `byte_pull_promise_fulfilled` / `byte_pull_promise_rejected`.)
     if controller.data().pull_fulfilled_fn.is_none() {
-        let payload = controller.to_jsval(scope).unwrap();
-        let fulfilled = Function::new_callback(scope, c"", 1, byte_pull_promise_fulfilled, payload)
-            .expect("create byte pull reaction");
-        controller.data_mut().pull_fulfilled_fn = Some(Heap::from(fulfilled));
-        let rejected = Function::new_callback(scope, c"", 1, byte_pull_promise_rejected, payload)
-            .expect("create byte pull reaction");
-        controller.data_mut().pull_rejected_fn = Some(Heap::from(rejected));
+        let fulfilled =
+            Function::new_callback(scope, c"", 1, byte_pull_promise_fulfilled, controller)
+                .expect("create byte pull reaction");
+        controller.data_mut().pull_fulfilled_fn.set(fulfilled);
+        let rejected =
+            Function::new_callback(scope, c"", 1, byte_pull_promise_rejected, controller)
+                .expect("create byte pull reaction");
+        controller.data_mut().pull_rejected_fn.set(rejected);
     }
     let fulfilled = controller
         .data()
@@ -5414,7 +5396,7 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     cancel_algorithm: HandleValue<'_>,
     algorithm_receiver: HandleValue<'_>,
     high_water_mark: f64,
-    auto_allocate_chunk_size: Option<f64>,
+    auto_allocate_chunk_size: Option<u64>,
 ) -> Result<(), ExnThrown> {
     // Step 1: Assert: _stream_.`[[controller]]` is undefined.
     debug_assert!(stream.data().controller.is_none());
@@ -5422,8 +5404,7 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     //         `IsInteger`(_autoAllocateChunkSize_) is true. Assert: _autoAllocateChunkSize_ is
     //         positive.
     if let Some(size) = auto_allocate_chunk_size {
-        debug_assert_eq!(size.fract(), 0.0);
-        debug_assert!(size > 0.0);
+        debug_assert!(size > 0);
     }
     // Step 3: Set _controller_.`[[stream]]` to _stream_.
     controller.data_mut().stream = Some(Heap::from(*stream));
@@ -5469,12 +5450,8 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     let controller_obj = Object::from_value(scope, controller.as_value()).map_err(|_| ExnThrown)?;
     stream.data_mut().controller = Some(Heap::from(controller_obj));
     // Step 14: Let _startResult_ be the result of performing _startAlgorithm_.
-    let start_result = support::invoke_algorithm(
-        scope,
-        start_algorithm,
-        algorithm_receiver,
-        &[scope.root_value(controller.as_value())],
-    )?;
+    let start_result =
+        support::invoke_algorithm(scope, start_algorithm, algorithm_receiver, &[controller])?;
     // Step 15: Let _startPromise_ be `a promise resolved with` _startResult_.
     //          As in the default controller's setup, WebIDL "a promise resolved with" creates a new
     //          promise (it does not return a promise input as-is the way `Promise.resolve` does).
@@ -5486,12 +5463,11 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     //          `ByteStreamControllerError`(_controller_, _r_).
     // (Steps 16 and 17 are implemented by `byte_start_promise_fulfilled` /
     // `byte_start_promise_rejected`.)
-    let payload = controller.to_jsval(scope).unwrap();
     support::react(
         scope,
         &start_promise,
-        Some((byte_start_promise_fulfilled, payload)),
-        Some((byte_start_promise_rejected, payload)),
+        Some((byte_start_promise_fulfilled, controller)),
+        Some((byte_start_promise_rejected, controller)),
     )?;
     Ok(())
 }
@@ -5542,22 +5518,11 @@ pub(crate) fn set_up_readable_byte_stream_controller_from_underlying_source(
     )?;
     // Step 8: Let _autoAllocateChunkSize_ be _underlyingSourceDict_["``autoAllocateChunkSize``"],
     //         if it `exists`, or undefined otherwise.
-    // WebIDL `[EnforceRange] unsigned long long`: a non-finite value, or one that's
-    // negative after truncating toward zero, throws a `TypeError`. (The upper
-    // bound 2^64-1 is beyond `f64` precision.) Applied here because the dictionary
-    // member is held as `f64` rather than enforced during conversion.
-    let auto_allocate_chunk_size = match underlying_source_dict.auto_allocate_chunk_size {
-        Some(n) if !n.is_finite() || n.trunc() < 0.0 => {
-            return Err(js::error::throw_type_error(
-                scope,
-                c"autoAllocateChunkSize is out of range",
-            ));
-        }
-        Some(n) => Some(n.trunc()),
-        None => None,
-    };
+    let auto_allocate_chunk_size = underlying_source_dict
+        .auto_allocate_chunk_size
+        .map(|size| size.0);
     // Step 9: If _autoAllocateChunkSize_ is 0, then throw a ``TypeError`` exception.
-    if auto_allocate_chunk_size == Some(0.0) {
+    if auto_allocate_chunk_size == Some(0) {
         return Err(js::error::throw_type_error(
             scope,
             c"autoAllocateChunkSize cannot be 0",

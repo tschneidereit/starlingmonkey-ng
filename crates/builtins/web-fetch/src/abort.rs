@@ -12,8 +12,8 @@ use crate::request::Request;
 use crate::response::Response;
 use core_runtime::jsclass;
 use core_runtime::jsmethods;
-use js::conversion::FromJSVal;
 use js::error::ExnThrown;
+use js::function::cast_payload;
 use js::function::CallbackArgs;
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
@@ -164,7 +164,7 @@ fn on_settled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = AbortFetchState::from_jsval_throwing(scope, payload, ())?;
+    let state = cast_payload::<AbortFetchState>(scope, payload);
     if let Some(response) = state.data().response.get(scope) {
         if response_body_is_abortable(scope, &response) {
             // Still abortable: `Response::consume` detaches once the body has been read.
@@ -184,7 +184,7 @@ fn on_abort(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = AbortFetchState::from_jsval_throwing(scope, payload, ())?;
+    let state = cast_payload::<AbortFetchState>(scope, payload);
     let promise = state.data().promise.get(scope);
     let reason = args.get(0);
 

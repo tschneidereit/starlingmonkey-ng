@@ -63,8 +63,7 @@ impl ByteLengthQueuingStrategy {
             scope,
             byte_length_queuing_strategy_size as *const () as usize,
             |scope| {
-                let undef = HandleValue::undefined();
-                Function::new_callback(scope, c"size", 1, byte_length_queuing_strategy_size, undef)
+                Function::new_callback(scope, c"size", 1, byte_length_queuing_strategy_size, ())
             },
         )
     }

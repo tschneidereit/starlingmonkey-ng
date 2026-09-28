@@ -6,13 +6,13 @@ use std::cell::OnceCell;
 use std::ops::{Deref, DerefMut};
 
 use core_runtime::{webidl_interface, webidl_methods, webidl_union};
-use js::class::{get_iterator_prototype, get_prototype_for};
 use js::conversion::{Record, ToJSVal};
 use js::error::{throw_type_error, ExnThrown};
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
+use js::iteration::{create_iter_result, pair_iterator_result, IterationKind};
 use js::prelude::HandleValue;
-use js::{Function, JSString, Object};
+use js::{Callable, JSString, Object};
 
 use crate::algorithms;
 use crate::algorithms::sort_and_combine_a_header_list;
@@ -270,85 +270,53 @@ impl Headers {
         Ok(())
     }
 
-    /// <https://webidl.spec.whatwg.org/#es-iterable> — `entries()` yields `[name, value]`
-    /// pairs over the result of `sort and combine` of this's header list.
+    /// <https://webidl.spec.whatwg.org/#js-iterable>: `entries`. The value pairs to iterate over
+    /// are the result of `sort and combine` of this's header list.
     #[method]
     fn entries<'r>(&self, scope: &'r Scope<'_>) -> Result<HeadersIterator<'r>, ExnThrown> {
-        self.create_iterator(scope, IteratorKind::Entries)
+        // Return a newly created `default iterator object` for _definition_, with _jsValue_ as
+        // its `target`, "`key+value`" as its `kind`, and `index` set to 0.
+        HeadersIterator::new(scope, *self, IterationKind::KeyValue)
     }
 
-    /// <https://webidl.spec.whatwg.org/#es-iterable> — `keys()` yields header names.
+    /// <https://webidl.spec.whatwg.org/#js-iterable>: `keys`.
     #[method]
     fn keys<'r>(&self, scope: &'r Scope<'_>) -> Result<HeadersIterator<'r>, ExnThrown> {
-        self.create_iterator(scope, IteratorKind::Keys)
+        // Return a newly created `default iterator object` for _definition_, with _jsValue_ as
+        // its `target`, "`key`" as its `kind`, and `index` set to 0.
+        HeadersIterator::new(scope, *self, IterationKind::Key)
     }
 
-    /// <https://webidl.spec.whatwg.org/#es-iterable> — `values()` yields header values.
+    /// <https://webidl.spec.whatwg.org/#js-iterable>: `values`.
     #[method]
     fn values<'r>(&self, scope: &'r Scope<'_>) -> Result<HeadersIterator<'r>, ExnThrown> {
-        self.create_iterator(scope, IteratorKind::Values)
+        // Return a newly created `default iterator object` for _definition_, with _jsValue_ as
+        // its `target`, "`value`" as its `kind`, and `index` set to 0.
+        HeadersIterator::new(scope, *self, IterationKind::Value)
     }
 
-    /// <https://webidl.spec.whatwg.org/#es-forEach> — invoke `callback` once per (value, name)
-    /// over the sorted-and-combined header list.
+    /// <https://webidl.spec.whatwg.org/#js-iterable>: `forEach`.
     #[method(name = "forEach")]
     fn for_each(
         &self,
         scope: &Scope<'_>,
-        callback: HandleValue,
+        callback: Callable<'_>,
         this_arg: Option<HandleValue>,
     ) -> Result<(), ExnThrown> {
-        // WebIDL converts the argument to a callback function, which requires it to be callable —
-        // a non-callable object is a TypeError, not something to be called and fail later.
-        let is_callable =
-            Object::from_value(scope, callback.get()).is_ok_and(|object| object.is_callable());
-        if !is_callable {
-            return Err(throw_type_error(
-                scope,
-                c"forEach callback must be a function",
-            ));
-        }
-        // WebIDL's `forEach` re-reads "the list of value pairs to iterate over" on every turn, so
-        // a callback that appends to or deletes from these headers changes what the rest of the
-        // iteration sees. Recompute rather than iterating a snapshot taken up front.
-        let mut index = 0;
-        loop {
-            // The callback may mutate the list, which drops the cached result these references
-            // point into, so none of them may outlive this block.
-            let (value_js, name_js) = {
-                let data = self.data();
-                let combined = data.header_list.sorted_and_combined();
-                let Some((name, value)) = combined.get(index) else {
-                    break;
-                };
-                (
-                    value.as_str().to_jsval_throwing(scope)?,
-                    name.as_str().to_jsval_throwing(scope)?,
-                )
+        let this_arg = this_arg.unwrap_or(HandleValue::undefined());
+        js::iteration::for_each_pair(scope, *self, callback, this_arg, |i| {
+            let data = self.data();
+            let Some((name, value)) = data.header_list.sorted_and_combined().get(i) else {
+                return Ok(None);
             };
-            let self_js = scope.root_value(self.as_value());
-            Function::call(
-                scope,
-                this_arg.unwrap_or(HandleValue::undefined()),
-                callback,
-                &[value_js, name_js, self_js],
-            )?;
-            index += 1;
-        }
-        Ok(())
+            let name = name.as_str().to_jsval_throwing(scope)?;
+            let value = value.as_str().to_jsval_throwing(scope)?;
+            Ok(Some((name, value)))
+        })
     }
 }
 
 impl Headers<'_> {
-    /// Create a `HeadersIterator` over this object's headers for the given kind.
-    fn create_iterator<'r>(
-        &self,
-        scope: &'r Scope<'_>,
-        kind: IteratorKind,
-    ) -> Result<HeadersIterator<'r>, ExnThrown> {
-        HeadersIterator::new(scope, *self, kind)
-    }
-
     /// Define `Symbol.iterator` on `Headers.prototype` (an alias of `entries`).
     fn install_symbol_iterator(scope: &Scope<'_>) {
         js::class::add_symbol_alias::<HeadersImpl>(
@@ -359,33 +327,20 @@ impl Headers<'_> {
     }
 }
 
-/// Which kind of values the iterator produces.
-#[derive(Clone, Copy, Default)]
-pub enum IteratorKind {
-    /// Yields `[name, value]` pairs.
-    #[default]
-    Entries,
-    /// Yields names only.
-    Keys,
-    /// Yields values only.
-    Values,
-}
-
-/// <https://webidl.spec.whatwg.org/#es-iterable>
+/// <https://webidl.spec.whatwg.org/#dfn-default-iterator-object>
 #[webidl_interface(hidden, name = "Headers Iterator")]
 pub struct HeadersIterator {
     /// The `Headers` object being iterated.
     pub(crate) headers: Heap<HeadersImpl>,
     /// Current position in the sorted-and-combined list.
     pub(crate) index: usize,
-    /// What kind of values to yield.
     #[no_trace]
-    pub(crate) kind: IteratorKind,
+    pub(crate) kind: IterationKind,
 }
 
 #[webidl_methods]
 impl HeadersIterator {
-    fn new(headers: Headers, kind: IteratorKind) -> Self {
+    fn new(headers: Headers, kind: IterationKind) -> Self {
         Self {
             headers: Heap::from(headers),
             index: 0,
@@ -396,52 +351,26 @@ impl HeadersIterator {
     /// <https://webidl.spec.whatwg.org/#es-iterator-prototype-next>
     #[method]
     fn next<'a>(&self, scope: &'a Scope<'a>) -> Result<Object<'a>, ExnThrown> {
-        let result = Object::new(scope, None)?;
+        // Steps 1-5: Implemented in `#[method]`.
+        // Step 6: Let _index_ be _object_'s `index`.
         let index = self.data().index;
+        // Step 7: Let _kind_ be _object_'s `kind`.
         let kind = self.data().kind;
+        // Step 8: Let _values_ be _object_'s `target`'s `value pairs to iterate over`.
         let headers = self.data().headers.get(scope);
         let headers_data = headers.data();
-        let combined = headers_data.header_list.sorted_and_combined();
-
-        if let Some((name, value)) = combined.get(index) {
-            let js_value = match kind {
-                IteratorKind::Entries => {
-                    let arr = js::Array::new(scope, 2)?;
-                    let name_val = name.as_str().to_jsval_throwing(scope)?;
-                    let val_val = value.as_str().to_jsval_throwing(scope)?;
-                    arr.set_element(scope, 0, name_val)?;
-                    arr.set_element(scope, 1, val_val)?;
-                    scope.root_value(arr.as_value())
-                }
-                IteratorKind::Keys => name.as_str().to_jsval_throwing(scope)?,
-                IteratorKind::Values => value.as_str().to_jsval_throwing(scope)?,
-            };
-            self.data_mut().index = index + 1;
-            result.set_property(scope, c"value", js_value)?;
-            result.set_property(scope, c"done", false)?;
-        } else {
-            result.set_property(scope, c"value", js::value::undefined())?;
-            result.set_property(scope, c"done", true)?;
-        }
-
-        Ok(result)
-    }
-
-    /// Chain the `HeadersIterator` prototype under `%IteratorPrototype%` to satisfy
-    /// the interface's `iterable<>` declaration.
-    fn install_symbol_iterator(scope: &Scope<'_>) {
-        let proto = unsafe {
-            Object::from_raw(
-                scope,
-                get_prototype_for::<HeadersIteratorImpl>(scope)
-                    .expect("HeadersIterator class not registered"),
-            )
-            .expect("HeadersIterator prototype is null")
+        let values = headers_data.header_list.sorted_and_combined();
+        // Step 9: Let _len_ be the length of _values_.
+        // Step 10: If _index_ is greater than or equal to _len_, then return
+        //          CreateIteratorResultObject(undefined, true).
+        // Step 11: Let _pair_ be the entry in _values_ at index _index_.
+        let Some((name, value)) = values.get(index) else {
+            return create_iter_result(scope, HandleValue::undefined(), true);
         };
-
-        if let Ok(iterator_proto) = get_iterator_prototype(scope) {
-            let _ = proto.set_prototype(scope, iterator_proto.handle());
-        }
+        // Step 12: Set _object_'s index to _index_ + 1.
+        self.data_mut().index = index + 1;
+        // Step 13: Return the `iterator result` for _pair_ and _kind_.
+        pair_iterator_result(scope, name.as_str(), value.as_str(), kind)
     }
 }
 
@@ -449,5 +378,6 @@ pub(crate) fn add_to_global(scope: &Scope, global: Object) {
     Headers::add_to_global(scope, global);
     Headers::install_symbol_iterator(scope);
     HeadersIterator::add_to_global(scope, global);
-    HeadersIterator::install_symbol_iterator(scope);
+    js::class::inherit_from_iterator_prototype::<HeadersIteratorImpl>(scope)
+        .expect("setting a class prototype's prototype can only fail due to OOM");
 }

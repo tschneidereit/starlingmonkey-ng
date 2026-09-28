@@ -826,8 +826,6 @@ enum MethodKind {
     Setter {
         js_name: String,
     },
-    /// Post-construction initialization hook.
-    PostInit,
 }
 
 /// How the return value of a method should be handled.
@@ -1125,9 +1123,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                 } else if attr.path().is_ident("destructor") {
                     kind = Some(MethodKind::Destructor);
                     false
-                } else if attr.path().is_ident("post_init") {
-                    kind = Some(MethodKind::PostInit);
-                    false
                 } else {
                     true // keep other attrs
                 }
@@ -1206,8 +1201,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
     // Setup-style constructor: detected when #[constructor] has &self/&mut self.
     // The constructor body runs on the stack newtype after allocation + boxing.
     let mut setup_ctor_info: Option<usize> = None; // index into `methods`
-                                                   // New-style post_init: runs on the stack newtype with auto-extracted params.
-    let mut new_post_init_info: Option<usize> = None; // index into `methods`
 
     // Collect property accessors indexed by JS name for pairing
     struct PropertyEntry {
@@ -1256,9 +1249,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
             MethodKind::Destructor => {
                 destructor_takes_object = method.fn_item.sig.inputs.len() > 1;
                 destructor_fn_name = Some(method.fn_item.sig.ident.clone());
-            }
-            MethodKind::PostInit => {
-                new_post_init_info = Some(i);
             }
             MethodKind::Method { js_name } => {
                 let (native_fn, builder_call) = gen_method_native(
@@ -1344,19 +1334,16 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
     }
 
     // ================================================================
-    // Remove setup-style ctors, new-style post_init, and stack newtype methods from impl FooImpl.
+    // Remove setup-style ctors and stack newtype methods from impl FooImpl.
     // ================================================================
     // Setup-style ctor bodies run on the stack newtype (as `__ctor_setup_*`),
     // so they are dropped from the FooImpl block; old-style ctors stay there.
-    let mut remove_fn_names: Vec<Ident> = ctor_indices
+    let remove_fn_names: Vec<Ident> = ctor_indices
         .iter()
         .map(|i| &methods[*i])
         .filter(|m| m.has_self || m.has_mut_self)
         .map(|m| m.fn_item.sig.ident.clone())
         .collect();
-    if let Some(i) = new_post_init_info {
-        remove_fn_names.push(methods[i].fn_item.sig.ident.clone());
-    }
 
     // Collect names of methods that go on the newtype.
     let newtype_method_names: Vec<Ident> = methods
@@ -1365,7 +1352,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         .map(|m| m.fn_item.sig.ident.clone())
         .collect();
 
-    // Remove setup ctors, post_init, and stack newtype methods from the FooImpl impl block.
+    // Remove setup ctors and stack newtype methods from the FooImpl impl block.
     let mut newtype_items: Vec<ImplItem> = Vec::new();
     {
         let remove_names: Vec<&Ident> = remove_fn_names.iter().collect();
@@ -1375,7 +1362,7 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
             if let ImplItem::Fn(ref fn_item) = item {
                 let ident = &fn_item.sig.ident;
                 if remove_names.iter().any(|n| *ident == **n) {
-                    continue; // setup ctors / post_init — dropped entirely
+                    continue; // setup ctors are dropped entirely
                 }
                 if newtype_method_names.contains(ident) || helper_fn_names.contains(ident) {
                     // Registered methods and unannotated helpers alike move to
@@ -1513,66 +1500,20 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         quote! {}
     };
 
-    // Generate the PostInitRegistrar impl.
-    //
-    // Three cases:
-    //   1. Setup-style ctor (with or without explicit post_init)
-    //   2. Old-style ctor with new-style post_init (&self on newtype)
-    //   3. No post_init at all (no-op, handled by autoref fallback)
-    let post_init_impl = if setup_ctor_info.is_some() || new_post_init_info.is_some() {
-        // Root the object and create the stack newtype for both ctor setup and post_init.
-        let cast = quote! {
-            let __typed = obj.cast::<#type_name>().unwrap();
-        };
-
-        // Generate the setup-style constructor call (if present).
-        let setup_call = if let Some(idx) = setup_ctor_info {
-            let info = &methods[idx];
-            let setup_fn_name = setup_fn_ident(&info.fn_item.sig.ident);
-            let arg_extractions =
-                gen_arg_extractions(&info.params, quote!(args), true, quote!(scope), info.nargs);
-            let arg_names: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
-            let call = if info.has_cx {
-                quote! { #type_name::#setup_fn_name(&__typed, scope, #(#arg_names),*) }
-            } else {
-                quote! { #type_name::#setup_fn_name(&__typed, #(#arg_names),*) }
-            };
-            quote! {
-                #(#arg_extractions)*
-                match #call {
-                    Ok(()) => {},
-                    Err(__e) => {
-                        unsafe { ::js::error::ThrowException::throw(__e, scope); }
-                        return Err(::js::error::ExnThrown);
-                    }
-                }
-            }
+    // Generate the PostInitRegistrar impl for a setup-style constructor: extract the
+    // arguments and run the constructor body on the rooted newtype. Classes without one
+    // fall back to the no-op registrar through autoref specialization.
+    let post_init_impl = if let Some(idx) = setup_ctor_info {
+        let info = &methods[idx];
+        let setup_fn_name = setup_fn_ident(&info.fn_item.sig.ident);
+        let arg_extractions =
+            gen_arg_extractions(&info.params, quote!(args), true, quote!(scope), info.nargs);
+        let arg_names: Vec<_> = info.params.iter().map(|(name, _)| quote!(#name)).collect();
+        let call = if info.has_cx {
+            quote! { #type_name::#setup_fn_name(&__typed, scope, #(#arg_names),*) }
         } else {
-            quote! {}
+            quote! { #type_name::#setup_fn_name(&__typed, #(#arg_names),*) }
         };
-
-        // Generate the post_init call (if present).
-        let post_init_call = if let Some(idx) = new_post_init_info {
-            let info = &methods[idx];
-            let pi_fn_name = format_ident!("__post_init");
-            let call = if info.has_cx {
-                quote! { #type_name::#pi_fn_name(&__typed, scope) }
-            } else {
-                quote! { #type_name::#pi_fn_name(&__typed) }
-            };
-            quote! {
-                match #call {
-                    Ok(()) => {},
-                    Err(__e) => {
-                        unsafe { ::js::error::ThrowException::throw(__e, scope); }
-                        return Err(::js::error::ExnThrown);
-                    }
-                }
-            }
-        } else {
-            quote! {}
-        };
-
         quote! {
             #[allow(clippy::not_unsafe_ptr_arg_deref)]
             impl ::js::class::__PostInitRegistrar<#inner_name> for ::js::class::__PostInitReg<#inner_name> {
@@ -1582,10 +1523,9 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
                     obj: ::js::Object<'_>,
                     args: &::js::native::CallArgs,
                 ) -> ::std::result::Result<(), ::js::error::ExnThrown> {
-                    #cast
-                    #setup_call
-                    #post_init_call
-                    Ok(())
+                    let __typed = obj.cast::<#type_name>().unwrap();
+                    #(#arg_extractions)*
+                    #call.map_err(|__e| ::js::error::ThrowException::throw(__e, scope))
                 }
             }
         }
@@ -1607,48 +1547,12 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         }
     };
 
-    // Generate `impl<'s> Foo<'s>` containing constructors, add_to_global(), and
-    // supporting methods such as setup-style constructor post_init methods.
-
-    // The `#[post_init]` body, moved onto the newtype as `__post_init`.
-    let moved_post_init_fn = new_post_init_info
-        .map(|pi_idx| {
-            let pi = &methods[pi_idx];
-            let mut pi_fn = pi.fn_item.clone();
-            pi_fn.sig.ident = format_ident!("__post_init");
-            pi_fn.vis = Visibility::Inherited; // private
-            pi_fn.attrs.retain(|a| !a.path().is_ident("post_init"));
-            quote! { #pi_fn }
-        })
-        .unwrap_or_else(|| quote! {});
-
-    // The `__post_init` call setup-style factories make after running setup.
-    let factory_post_init_call = if let Some(pi_idx) = new_post_init_info {
-        let pi_info = &methods[pi_idx];
-        let pi_fn_ident = format_ident!("__post_init");
-        if pi_info.has_cx {
-            quote! { #type_name::#pi_fn_ident(&__typed, scope).map_err(|e| {
-                ::js::error::ThrowException::throw(e, scope)
-            })?; }
-        } else {
-            quote! { #type_name::#pi_fn_ident(&__typed).map_err(|e| {
-                ::js::error::ThrowException::throw(e, scope)
-            })?; }
-        }
-    } else {
-        quote! {}
-    };
-
+    // Generate `impl<'s> Foo<'s>` containing constructors and add_to_global().
     let mut ctor_items: Vec<proc_macro2::TokenStream> = Vec::new();
     for i in &ctor_indices {
         let method = &methods[*i];
         if method.has_self || method.has_mut_self {
-            ctor_items.push(gen_setup_factory(
-                method,
-                &type_name,
-                &inner_name,
-                &factory_post_init_call,
-            ));
+            ctor_items.push(gen_setup_factory(method, &type_name, &inner_name));
         } else if !method.is_raw {
             // A raw (`&CallArgs`) constructor is callable only from a JSNative
             // wrapper, so it gets no Rust-side factory.
@@ -1665,7 +1569,6 @@ fn process_methods(_attr: TokenStream, item: TokenStream, config: ClassConfig) -
         impl<'s> #type_name<'s> {
             #(#ctor_items)*
             #add_to_global_fn
-            #moved_post_init_fn
         }
     };
 
@@ -1948,13 +1851,10 @@ fn parse_method_info(
 /// on `FooImpl`. Methods on the newtype receive `self` as the rooted stack
 /// newtype, giving access to both the JS object and the private data.
 fn is_method_on_newtype(method: &MethodInfo) -> bool {
-    // Constructors, destructors, post-init, and static methods stay on FooImpl.
+    // Constructors, destructors, and static methods stay on FooImpl.
     if matches!(
         method.kind,
-        MethodKind::Constructor
-            | MethodKind::Destructor
-            | MethodKind::PostInit
-            | MethodKind::StaticMethod { .. }
+        MethodKind::Constructor | MethodKind::Destructor | MethodKind::StaticMethod { .. }
     ) {
         return false;
     }
@@ -2866,12 +2766,11 @@ fn setup_fn_ident(ident: &Ident) -> Ident {
 /// A Rust-side instantiation function on the stack newtype for a setup-style
 /// constructor (`&self` receiver): allocate a default-initialized JS object,
 /// run the moved constructor body (`__ctor_setup_*`, emitted alongside) on the
-/// rooted newtype, then `__post_init` if the class declares one.
+/// rooted newtype.
 fn gen_setup_factory(
     info: &MethodInfo,
     type_name: &Ident,
     inner_name: &Ident,
-    post_init_call: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let factory_name = &info.fn_item.sig.ident;
     let setup_ident = setup_fn_ident(factory_name);
@@ -2909,9 +2808,7 @@ fn gen_setup_factory(
     let mut setup_fn = info.fn_item.clone();
     setup_fn.sig.ident = setup_ident;
     setup_fn.vis = Visibility::Inherited; // private
-    setup_fn
-        .attrs
-        .retain(|a| !a.path().is_ident("constructor") && !a.path().is_ident("post_init"));
+    setup_fn.attrs.retain(|a| !a.path().is_ident("constructor"));
 
     quote! {
         /// Construct a new instance and return the stack newtype.
@@ -2923,7 +2820,6 @@ fn gen_setup_factory(
                     #inner_name::default()
                 })?;
                 #setup_call
-                #post_init_call
                 #[cfg(debug_assertions)]
                 if let Some(__data) = ::js::class::get_private::<#inner_name>(__typed.0.as_raw()) {
                     ::js::class::ClassDef::debug_assert_fully_initialized(__data);
@@ -3150,7 +3046,7 @@ fn emit_native_fn(
                     #this_in_closure
                     #(#extractions)*
                     #rest_setup
-                    #call
+                    #call.map_err(|__e| ::js::error::ThrowException::throw(__e, &scope))
                 })();
                 match __result {
                     Ok(__v) => {
@@ -3486,7 +3382,10 @@ fn gen_accessor_native(
                         __args.rval().set(unsafe { ::js::value::from_object(__p.as_raw()) });
                         ::js::exception::check_fn_return(&scope, true, &#name_str)
                     }
-                    Err(_) => match ::js::Promise::new_rejected_with_pending_error(&scope) {
+                    Err(__e) => match {
+                        ::js::error::ThrowException::throw(__e, &scope);
+                        ::js::Promise::new_rejected_with_pending_error(&scope)
+                    } {
                         Ok(__rejected) => {
                             __args.rval().set(unsafe { ::js::value::from_object(__rejected.as_raw()) });
                             ::js::exception::check_fn_return(&scope, true, &#name_str)
@@ -4453,15 +4352,27 @@ struct ModuleConstExport {
 /// assert_eq!(my_math::add(1.0, my_math::PI), 4.14159);
 /// ```
 ///
-/// // Call from JS:
+/// Call from JS:
+///
 /// ```js
 /// console.log(add(1, PI)); // prints 4.14159
 /// ```
-/// ```
+///
+/// The attribute takes no options.
 #[proc_macro_attribute]
 pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let opts = parse_macro_input!(attr as AttrOpts);
-    let _ = opts; // No options used currently
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::TokenStream::from(attr)
+                .into_iter()
+                .next()
+                .unwrap()
+                .span(),
+            "#[jsglobals] takes no options",
+        )
+        .to_compile_error()
+        .into();
+    }
     let input = parse_macro_input!(item as syn::ItemMod);
 
     let mod_name = &input.ident;
@@ -4542,7 +4453,6 @@ pub fn jsglobals(attr: TokenStream, item: TokenStream) -> TokenStream {
         .collect();
 
     let output = quote! {
-        #[allow(unused_imports)]
         #mod_vis mod #mod_name {
             #(#original_items)*
 
@@ -4713,7 +4623,6 @@ fn process_namespace(opts: AttrOpts, input: syn::ItemMod, config: NamespaceConfi
     let js_ns_name_cstr = proc_macro2::Literal::byte_string(js_ns_name_bytes.as_bytes());
 
     let output = quote! {
-        #[allow(unused_imports)]
         #mod_vis mod #mod_name {
             #(#original_items)*
 

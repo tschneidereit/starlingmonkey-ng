@@ -3,6 +3,7 @@
 //! <https://streams.spec.whatwg.org/>
 use super::byte_stream_controller::ReadableByteStreamControllerImpl;
 use core_runtime::{webidl_interface, webidl_methods};
+use js::conversion::EnforceRange;
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
@@ -49,20 +50,12 @@ impl ReadableStreamBYOBRequest {
 
     /// <https://streams.spec.whatwg.org/#rs-byob-request-respond>
     #[method]
-    fn respond(&self, scope: &Scope<'_>, bytes_written: f64) -> Result<(), ExnThrown> {
-        // WebIDL: `bytesWritten` is `[EnforceRange] unsigned long long`. Apply
-        // `[EnforceRange]` here (the macro converts integer parameters with
-        // wrapping semantics): a non-finite value, or one negative after
-        // truncating toward zero, throws a `TypeError` before any step runs. (The
-        // upper bound 2^64-1 is beyond `f64` precision; a value that large exceeds
-        // the view length and fails the respond steps with a `RangeError` anyway.)
-        if !bytes_written.is_finite() || bytes_written.trunc() < 0.0 {
-            return Err(js::error::throw_type_error(
-                scope,
-                c"respond() bytesWritten is out of range",
-            ));
-        }
-        let bytes_written = bytes_written.trunc() as u64;
+    fn respond(
+        &self,
+        scope: &Scope<'_>,
+        bytes_written: EnforceRange<u64>,
+    ) -> Result<(), ExnThrown> {
+        let bytes_written = bytes_written.0;
         // Step 1: If `this`.`[[controller]]` is undefined, throw a ``TypeError`` exception.
         let controller = match self.data().controller.get(scope) {
             Some(c) => c,

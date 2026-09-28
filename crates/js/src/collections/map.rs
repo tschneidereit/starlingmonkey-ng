@@ -145,3 +145,5 @@ impl<'s> Stack<'s, Map> {
 }
 
 crate::gc::handle::deref_to_object!(Map);
+
+crate::gc::handle::from_jsval_via_cast!(Map, c"Value isn't a Map");

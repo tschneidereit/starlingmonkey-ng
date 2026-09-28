@@ -7,8 +7,8 @@
 
 use core_runtime::jsclass;
 use core_runtime::jsmethods;
-use js::conversion::FromJSVal;
 use js::error::ExnThrown;
+use js::function::cast_payload;
 use js::function::CallbackArgs;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
@@ -88,8 +88,7 @@ fn proxy_cancel(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state =
-        BodyProxySource::from_jsval(scope, payload, ()).expect("payload is a BodyProxySource");
+    let state = cast_payload::<BodyProxySource>(scope, payload);
     let reader = state.data().reader.get(scope);
     let cancelled = native_reader_cancel(scope, reader, args.get(0));
     // Any pull still in flight will never be delivered now; settle it so the stream machinery
@@ -114,8 +113,7 @@ fn proxy_pull(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state =
-        BodyProxySource::from_jsval(scope, payload, ()).expect("payload is a BodyProxySource");
+    let state = cast_payload::<BodyProxySource>(scope, payload);
     let promise = Promise::new_pending(scope)?;
     state.data_mut().current_pull = Some(Heap::from(promise));
     let reader = state.data().reader.get(scope);
@@ -138,7 +136,7 @@ fn settle_pull(scope: &Scope<'_>, state: &BodyProxySource<'_>) {
             // See `proxy_close_step`: a native callback must not return with an exception
             // pending, and there is no caller here to propagate one to.
             // TODO: use promise rejection reporting once available.
-            let _ = js::exception::take_pending(scope);
+            js::exception::clear(scope);
         }
     }
 }
@@ -156,7 +154,7 @@ fn proxy_chunk_step(
     // body — can no longer be enqueued to; the chunk has nowhere to go. See
     // `proxy_close_step` for why the pending exception must be cleared too.
     if controller.enqueue(scope, chunk).is_err() {
-        let _ = js::exception::take_pending(scope);
+        js::exception::clear(scope);
     }
     settle_pull(scope, &state);
     Ok(())
@@ -176,7 +174,7 @@ fn proxy_close_step(scope: &Scope<'_>, payload: Object<'_>) -> Result<(), ExnThr
     if controller.close(scope).is_err() {
         // Clear the exception the failed close left pending: a native callback must not
         // return with one set, and there is no caller here to propagate it to.
-        let _ = js::exception::take_pending(scope);
+        js::exception::clear(scope);
     }
     settle_pull(scope, &state);
     Ok(())
@@ -194,7 +192,7 @@ fn proxy_error_step(
     // Already-closed/cancelled proxy: erroring it is a no-op that fails. Ignore it for the
     // same reason as the close step — these are a read request's `error steps`.
     if controller.error(scope, Some(error)).is_err() {
-        let _ = js::exception::take_pending(scope);
+        js::exception::clear(scope);
     }
     settle_pull(scope, &state);
     Ok(())

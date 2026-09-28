@@ -6,8 +6,6 @@
 //! `JSContext`. For the higher-level error type that wraps these operations,
 //! see [`super::error::ExnThrown`].
 
-use std::hint::cold_path;
-
 use crate::gc::scope::Scope;
 use mozjs::jsapi::ExceptionStackBehavior;
 use mozjs::jsval::UndefinedValue;
@@ -40,29 +38,21 @@ pub fn is_throwing_oom(scope: &Scope<'_>) -> bool {
     unsafe { wrappers2::JS_IsThrowingOutOfMemory(scope.cx()) }
 }
 
-/// Get the pending exception value.
-///
-/// Returns `Err` if no exception is pending or retrieval fails.
-pub fn get_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static str> {
+/// Get the pending exception value, or `None` if no exception is pending or it
+/// can't be retrieved.
+pub fn get_pending<'r>(scope: &'r Scope<'_>) -> Option<HandleValue<'r>> {
     let mut vp = scope.root_value_mut(UndefinedValue());
     let ok = unsafe { wrappers2::JS_GetPendingException(scope.cx_mut(), vp.reborrow()) };
-    if !ok {
-        cold_path();
-        if !is_pending(scope) {
-            return Err("No exception pending");
-        }
-        return Err("Failed to get pending exception");
-    }
-    Ok(vp.handle())
+    ok.then(|| vp.handle())
 }
 
-/// Get and clear the pending exception value.
-///
-/// Returns `Err` if no exception is pending or retrieval fails.
-pub fn take_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'static str> {
+/// Get and clear the pending exception value, or `None` if no exception is
+/// pending or it can't be retrieved. An exception that can't be retrieved stays
+/// pending.
+pub fn take_pending<'r>(scope: &'r Scope<'_>) -> Option<HandleValue<'r>> {
     let result = get_pending(scope)?;
     clear(scope);
-    Ok(result)
+    Some(result)
 }
 
 /// Get and clear the pending exception value, or return `undefined` if there is none.
@@ -70,7 +60,7 @@ pub fn take_pending<'r>(scope: &'r Scope<'_>) -> Result<HandleValue<'r>, &'stati
 /// Can be used in contexts where JS execution failed, but an uncatchable exception
 /// (e.g., OOM) may be pending.
 pub fn take_pending_or_undefined<'r>(scope: &'r Scope<'_>) -> HandleValue<'r> {
-    take_pending(scope).unwrap_or_else(|_| HandleValue::undefined())
+    take_pending(scope).unwrap_or(HandleValue::undefined())
 }
 
 /// Set a pending exception on the context.

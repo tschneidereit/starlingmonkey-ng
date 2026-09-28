@@ -10,7 +10,6 @@ use super::underlying_sink::UnderlyingSink;
 use crate::algorithms::extract_high_water_mark;
 use crate::algorithms::extract_size_algorithm;
 use crate::queuing::QueuingStrategy;
-use crate::support;
 use crate::writable::WritableStreamDefaultController;
 use core_runtime::{webidl_interface, webidl_methods};
 use js::conversion::FromJSVal;
@@ -180,37 +179,8 @@ impl WritableStream {
                 v
             }
         };
-        let underlying_sink_dict = UnderlyingSink::from_jsval(scope, underlying_sink_value, ())
-            .map_err(|_| {
-                if js::exception::get_pending(scope).is_err() {
-                    js::error::throw_type_error(scope, c"Invalid underlying sink");
-                }
-                ExnThrown
-            })?;
-        // Step 2 (continued): converting the dictionary validates that each present
-        // callback member is callable (a `TypeError`), before the step-3 `type`
-        // `RangeError`.
-        support::ensure_callback_members_callable(
-            scope,
-            &[
-                (
-                    underlying_sink_dict.abort.as_ref(),
-                    c"underlying sink abort must be a function",
-                ),
-                (
-                    underlying_sink_dict.close.as_ref(),
-                    c"underlying sink close must be a function",
-                ),
-                (
-                    underlying_sink_dict.start.as_ref(),
-                    c"underlying sink start must be a function",
-                ),
-                (
-                    underlying_sink_dict.write.as_ref(),
-                    c"underlying sink write must be a function",
-                ),
-            ],
-        )?;
+        let underlying_sink_dict =
+            UnderlyingSink::from_jsval_throwing(scope, underlying_sink_value, ())?;
         // Step 3: If _underlyingSinkDict_["``type``"] `exists`, throw a ``RangeError`` exception.
         //         This is to allow us to add new potential types in the future, without
         //         backward-compatibility concerns.

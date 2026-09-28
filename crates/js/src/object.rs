@@ -634,16 +634,6 @@ impl<'s> Stack<'s, Object> {
         Self::from_handle(objp.handle()).ok_or(ExnThrown)
     }
 
-    /// Set an immutable prototype on this object.
-    pub fn set_immutable_prototype(&self, scope: &Scope<'_>) -> Result<bool, ExnThrown> {
-        let mut succeeded = false;
-        let ok = unsafe {
-            wrappers2::JS_SetImmutablePrototype(scope.cx_mut(), self.handle(), &mut succeeded)
-        };
-        ExnThrown::check(ok)?;
-        Ok(succeeded)
-    }
-
     /// Assign all enumerable own properties from `src` to this object.
     pub fn assign(&self, scope: &Scope<'_>, src: Stack<'_, Object>) -> Result<(), ExnThrown> {
         let ok = unsafe { wrappers2::JS_AssignObject(scope.cx_mut(), self.handle(), src.handle()) };

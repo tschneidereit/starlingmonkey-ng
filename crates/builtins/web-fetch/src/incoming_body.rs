@@ -10,6 +10,7 @@ use core_runtime::jsclass;
 use core_runtime::jsmethods;
 use js::conversion::FromJSVal;
 use js::error::{ExnThrown, TypeError};
+use js::function::cast_payload;
 use js::function::CallbackArgs;
 use js::gc::handle::{Heap, OptionHeapExt, RootedHeap};
 use js::gc::scope::Scope;
@@ -276,7 +277,7 @@ fn host_pull(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = HostBodySource::from_jsval_throwing(scope, payload, ())?;
+    let state = cast_payload::<HostBodySource>(scope, payload);
     let promise = Promise::new_pending(scope)?;
     let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, args.get(0), ())?;
     if let Some(demand) = state.deferred_demand(scope) {
@@ -296,7 +297,7 @@ fn host_pull_resume(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = HostBodySource::from_jsval_throwing(scope, payload, ())?;
+    let state = cast_payload::<HostBodySource>(scope, payload);
     let controller = state.data_mut().deferred_controller.take_rooted(scope);
     let pull = state.data_mut().deferred_pull.take_rooted(scope);
     // Already settled: the body was claimed for direct forwarding, cancelled, or aborted while
@@ -387,7 +388,7 @@ fn deliver_chunk(
         // Read failure (host body dropped): error the stream.
         Err(error) => {
             let _ = TypeError(format!("Failed to read response body: {error}")).throw(scope);
-            let reason = js::exception::take_pending(scope).map_err(|_| ExnThrown)?;
+            let reason = js::exception::take_pending(scope).ok_or(ExnThrown)?;
             controller.error(scope, Some(reason))?;
         }
     }
@@ -400,7 +401,7 @@ fn host_cancel(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = HostBodySource::from_jsval_throwing(scope, payload, ())?;
+    let state = cast_payload::<HostBodySource>(scope, payload);
     state.data_mut().host_body = None;
     // The stream is being torn down, so a deferred pull's demand will never arrive.
     state.settle_deferred_pull(scope, CloseStream::No);

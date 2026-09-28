@@ -29,15 +29,12 @@
 
 #![deny(missing_docs)]
 
-use mozjs::jsapi::AssertSameCompartment;
-use mozjs::jsapi::JS_DefineElement;
 use mozjs::jsapi::JS;
 use mozjs::jsapi::JSPROP_ENUMERATE;
 use mozjs::jsapi::{ForOfIterator, ForOfIterator_NonIterableBehavior};
-use mozjs::jsapi::{JSObject, JSString, PropertyDescriptor, RootedObject, RootedValue};
+use mozjs::jsapi::{JSString, PropertyDescriptor, RootedObject, RootedValue};
 use mozjs::jsval::{
-    BooleanValue, DoubleValue, Int32Value, JSVal, ObjectOrNullValue, StringValue, SymbolValue,
-    UInt32Value, UndefinedValue,
+    BooleanValue, DoubleValue, Int32Value, JSVal, StringValue, UInt32Value, UndefinedValue,
 };
 use mozjs::rooted;
 use mozjs::rust::{
@@ -247,6 +244,28 @@ pub enum ConversionBehavior {
     EnforceRange,
     /// Clamp into the integer's range.
     Clamp,
+}
+
+/// A WebIDL `[EnforceRange]` integer.
+///
+/// Converting a value that is not finite, or whose truncation lies outside `T`'s
+/// WebIDL range, throws a `TypeError` instead of wrapping.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EnforceRange<T>(pub T);
+
+impl<'s, 'v, T> FromJSVal<'s, 'v> for EnforceRange<T>
+where
+    T: FromJSVal<'s, 'v, Config = ConversionBehavior>,
+{
+    type Config = ();
+
+    fn from_jsval(
+        scope: &'s Scope<'s>,
+        val: HandleValue<'v>,
+        _: (),
+    ) -> Result<Self, ConversionError> {
+        T::from_jsval(scope, val, ConversionBehavior::EnforceRange).map(EnforceRange)
+    }
 }
 
 /// Try to cast the number to a smaller type, but
@@ -884,17 +903,7 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for [T] {
             //       which we don't currently have an API for.
             let val = obj.to_jsval(scope)?;
 
-            if !unsafe {
-                JS_DefineElement(
-                    scope.cx_mut().raw_cx(),
-                    array.handle().into(),
-                    index as u32,
-                    val.into(),
-                    JSPROP_ENUMERATE as u32,
-                )
-            } {
-                return Err(ConversionError::ExnPending);
-            }
+            array.define_element(scope, index as u32, val, JSPROP_ENUMERATE as u32)?;
         }
 
         Ok(array.as_value())
@@ -927,11 +936,8 @@ impl<'s, T: ToJSVal<'s>> ToJSVal<'s> for Vec<T> {
 /// Returns `Ok(false)` for non-objects. Returns `Err(ExnPending)` if reading
 /// the `@@iterator` property throws.
 pub fn is_iterable_value(scope: &Scope<'_>, val: HandleValue<'_>) -> Result<bool, ConversionError> {
-    if !val.is_object() {
+    let Ok(obj) = crate::Object::from_value(scope, val) else {
         return Ok(false);
-    }
-    let obj = unsafe {
-        crate::Object::from_raw(scope, val.to_object()).ok_or(ConversionError::ExnPending)?
     };
     let iter_key = crate::symbol::get_well_known_key(scope, crate::native::SymbolCode::iterator);
     let iter_id = scope.root_id(iter_key);
@@ -1173,9 +1179,7 @@ where
             ));
         }
 
-        let obj = unsafe {
-            crate::Object::from_raw(scope, val.to_object()).ok_or(ConversionError::ExnPending)?
-        };
+        let obj = crate::Object::from_value(scope, val)?;
 
         // Step 2: Let result be a new empty instance of record<K, V>.
         let mut result = IndexMap::new();
@@ -1347,10 +1351,7 @@ impl FromJSVal<'_, '_> for AsyncSequence {
                 c"Value is not an object (expected async iterable)".into(),
             ));
         }
-
-        let obj = unsafe {
-            crate::Object::from_raw(scope, val.to_object()).ok_or(ConversionError::ExnPending)?
-        };
+        let obj = crate::Object::from_value(scope, val)?;
 
         // GetMethod(V, P): Get the property — no [[HasProperty]] pre-check,
         // and a Get error propagates — treat null/undefined as absent, and
@@ -1391,74 +1392,6 @@ impl FromJSVal<'_, '_> for AsyncSequence {
         Err(ConversionError::Failure(
             c"Object is not iterable (no Symbol.asyncIterator or Symbol.iterator)".into(),
         ))
-    }
-}
-
-// https://heycam.github.io/webidl/#es-object
-impl<'s> ToJSVal<'s> for *mut JSObject {
-    #[inline]
-    fn to_jsval_raw(&self, _scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
-        Ok(ObjectOrNullValue(*self))
-    }
-}
-
-// https://heycam.github.io/webidl/#es-object
-impl<'s> ToJSVal<'s> for ptr::NonNull<JSObject> {
-    #[inline]
-    fn to_jsval_raw(&self, _scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
-        Ok(ObjectOrNullValue(self.as_ptr()))
-    }
-}
-
-// https://heycam.github.io/webidl/#es-object
-impl<'s> ToJSVal<'s> for MozHeap<*mut JSObject> {
-    #[inline]
-    fn to_jsval_raw(&self, _scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
-        Ok(ObjectOrNullValue(self.get()))
-    }
-}
-
-// https://heycam.github.io/webidl/#es-object
-impl FromJSVal<'_, '_> for *mut JSObject {
-    type Config = ();
-    #[inline]
-    fn from_jsval(
-        scope: &Scope<'_>,
-        val: HandleValue,
-        _option: (),
-    ) -> Result<*mut JSObject, ConversionError> {
-        if !val.is_object() {
-            throw_type_error(scope, c"value is not an object");
-            return Err(ConversionError::ExnPending);
-        }
-
-        unsafe { AssertSameCompartment(scope.cx_mut().raw_cx(), val.to_object()) };
-
-        Ok(val.to_object())
-    }
-}
-
-impl<'s> ToJSVal<'s> for *mut JS::Symbol {
-    #[inline]
-    fn to_jsval_raw(&self, _scope: &'s Scope<'_>) -> Result<JS::Value, ConversionError> {
-        Ok(SymbolValue(unsafe { &**self }))
-    }
-}
-
-impl FromJSVal<'_, '_> for *mut JS::Symbol {
-    type Config = ();
-    #[inline]
-    fn from_jsval(
-        scope: &Scope<'_>,
-        val: HandleValue,
-        _option: (),
-    ) -> Result<*mut JS::Symbol, ConversionError> {
-        if !val.is_symbol() {
-            throw_type_error(scope, c"value is not a symbol");
-            return Err(ConversionError::ExnPending);
-        }
-
-        Ok(val.to_symbol())
     }
 }
 

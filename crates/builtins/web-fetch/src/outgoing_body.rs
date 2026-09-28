@@ -224,7 +224,7 @@ pub(crate) fn outgoing_body_from_stream(
             // The pump could not be started, so the exception it left pending has no caller to
             // propagate to. Clear it rather than leaving it to surface at an unrelated point,
             // and let the failing body carry the failure instead.
-            let _ = js::exception::take_pending(scope);
+            js::exception::clear(scope);
             platform::http::failed_body("the request body stream could not be read".to_string())
         }),
     }

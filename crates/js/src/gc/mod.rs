@@ -200,17 +200,15 @@ impl AssociatedMemory {
         self.bytes
     }
 
-    /// Attribute `bytes` to `object`, replacing the previous amount.
-    ///
-    /// # Safety
-    ///
-    /// `object` must be alive, and must be the object whose private data owns this field.
-    pub unsafe fn set(&mut self, object: *mut JSObject, bytes: usize) {
-        // SAFETY: the caller keeps `object` alive.
+    /// Attribute `bytes` to `object`, replacing the previous amount. `object` must be the object
+    /// whose private data owns this field.
+    pub fn set(&mut self, object: crate::Object<'_>, bytes: usize) {
+        let object = object.as_raw();
+        // SAFETY: `object` is rooted, so this is its current address.
         unsafe { self.release(object) };
         self.bytes = bytes;
         if bytes > 0 {
-            // SAFETY: the caller keeps `object` alive.
+            // SAFETY: as above.
             unsafe { JS::AddAssociatedMemory(object, bytes, MemoryUse::Embedding1) };
         }
     }

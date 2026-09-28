@@ -485,8 +485,7 @@ impl Response<'_> {
             }) => bytes.len(),
             _ => 0,
         };
-        // SAFETY: `self` is a rooted handle to the object owning this private data.
-        unsafe { data.accounted.set(self.as_raw(), bytes) };
+        data.accounted.set(self.as_object(), bytes);
     }
 
     /// Whether a host body is still sitting unread on this response.

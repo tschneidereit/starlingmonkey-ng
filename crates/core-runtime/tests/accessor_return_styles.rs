@@ -13,8 +13,10 @@
 
 use core_runtime::jsclass;
 use core_runtime::jsmethods;
-use core_runtime::test_util::{eval_with_setup, throws_with_setup};
+use core_runtime::test_util::{eval_out_with_setup, eval_with_setup, throws_with_setup};
 use js::error::TypeError;
+use js::gc::scope::Scope;
+use js::Promise;
 
 #[jsclass]
 struct Cell {
@@ -40,6 +42,16 @@ impl Cell {
         }
         self.data_mut().value = v;
         Ok(v)
+    }
+
+    #[method]
+    fn fail_async<'r>(&self, _scope: &'r Scope<'_>) -> Result<Promise<'r>, TypeError> {
+        Err(TypeError("method failure".into()))
+    }
+
+    #[getter]
+    fn failing_promise<'r>(&self, _scope: &'r Scope<'_>) -> Result<Promise<'r>, TypeError> {
+        Err(TypeError("getter failure".into()))
     }
 }
 
@@ -73,5 +85,22 @@ fn setter_err_leaves_value_unchanged() {
             "const c = new Cell(); c.value = 9; try { c.value = -1; } catch (e) {} c.value"
         ),
         "9"
+    );
+}
+
+/// A `Result<Promise, E>` operation or attribute turns an `Err` of any
+/// `ThrowException` type into a promise rejected with that error.
+#[test]
+fn result_promise_rejects_with_the_thrown_error() {
+    assert_eq!(
+        eval_out_with_setup(
+            setup,
+            "const c = new Cell();
+             Promise.all([
+                 c.failAsync().catch(e => `${e.constructor.name}:${e.message}`),
+                 c.failingPromise.catch(e => `${e.constructor.name}:${e.message}`),
+             ]).then(v => { globalThis.__out = v.join(','); });"
+        ),
+        "TypeError:method failure,TypeError:getter failure"
     );
 }

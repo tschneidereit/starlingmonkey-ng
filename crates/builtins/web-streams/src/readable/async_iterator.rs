@@ -17,6 +17,7 @@ use super::read_request::ReadRequest;
 use crate::algorithms::{pair_parts, pair_payload};
 use core_runtime::{webidl_interface, webidl_methods};
 use js::error::ExnThrown;
+use js::function::cast_payload;
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::iteration::create_iter_result;
@@ -108,16 +109,6 @@ impl ReadableStreamAsyncIterator {
     }
 }
 
-fn iter_from_value<'r>(
-    scope: &'r Scope<'_>,
-    v: HandleValue<'_>,
-) -> Result<ReadableStreamAsyncIterator<'r>, ExnThrown> {
-    Object::from_value(scope, *v)
-        .map_err(|_| ExnThrown)?
-        .cast::<ReadableStreamAsyncIterator>()
-        .map_err(|_| ExnThrown)
-}
-
 /// The async iterator's `[[ongoingPromise]]` next continuation (payload = the
 /// iterator): run the next steps regardless of how the previous call settled.
 fn after_ongoing_next(
@@ -125,7 +116,7 @@ fn after_ongoing_next(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let iter = iter_from_value(scope, payload)?;
+    let iter = cast_payload::<ReadableStreamAsyncIterator>(scope, payload);
     Ok(run_next_steps(scope, &iter)?.as_value())
 }
 
@@ -137,7 +128,7 @@ fn after_ongoing_return(
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let (iter_v, value) = pair_parts(scope, payload);
-    let iter = iter_from_value(scope, iter_v)?;
+    let iter = cast_payload::<ReadableStreamAsyncIterator>(scope, iter_v);
     Ok(run_return_steps(scope, &iter, value)?.as_value())
 }
 
@@ -158,12 +149,11 @@ fn run_next_steps<'r>(
     if iter.data().next_fulfilled_fn.is_none() {
         // TODO: share the sentinel per-global.
         let sentinel = Object::new_plain(scope)?;
-        iter.data_mut().end_of_iteration = Some(Heap::from(sentinel));
-        let payload = scope.root_value(iter.as_value());
-        let on_f = Function::new_callback(scope, c"", 1, next_fulfilled, payload)?;
-        iter.data_mut().next_fulfilled_fn = Some(Heap::from(on_f));
-        let on_r = Function::new_callback(scope, c"", 1, next_rejected, payload)?;
-        iter.data_mut().next_rejected_fn = Some(Heap::from(on_r));
+        iter.data_mut().end_of_iteration.set(sentinel);
+        let on_f = Function::new_callback(scope, c"", 1, next_fulfilled, iter)?;
+        iter.data_mut().next_fulfilled_fn.set(on_f);
+        let on_r = Function::new_callback(scope, c"", 1, next_rejected, iter)?;
+        iter.data_mut().next_rejected_fn.set(on_r);
     }
     let sentinel = iter
         .data()
@@ -196,7 +186,7 @@ fn next_fulfilled(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let iter = iter_from_value(scope, payload)?;
+    let iter = cast_payload::<ReadableStreamAsyncIterator>(scope, payload);
     let sentinel = iter
         .data()
         .end_of_iteration
@@ -221,7 +211,7 @@ fn next_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let iter = iter_from_value(scope, payload)?;
+    let iter = cast_payload::<ReadableStreamAsyncIterator>(scope, payload);
     iter.data_mut().is_finished = true;
     Err(js::exception::set_pending(
         scope,

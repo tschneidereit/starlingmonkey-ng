@@ -332,7 +332,7 @@ impl<'s> Stack<'s, Function> {
     ///     c"greet",
     ///     1,
     ///     |_scope, _args, _payload| Ok(js::value::from_i32(42)),
-    ///     js::value::undefined(),
+    ///     (),
     /// ).unwrap();
     /// # }
     /// ```
@@ -390,7 +390,7 @@ impl<'s> Stack<'s, Function> {
                 ReservedSlot::Slot0,
                 mozjs::jsval::PrivateValue(cb as *const std::ffi::c_void),
             );
-            fun.set_reserved(ReservedSlot::Slot1, payload.to_jsval_throwing(scope)?.get());
+            fun.set_reserved(ReservedSlot::Slot1, payload.to_jsval_raw_throwing(scope)?);
         }
 
         Ok(fun)
@@ -400,6 +400,40 @@ impl<'s> Stack<'s, Function> {
 crate::gc::handle::deref_to_object!(Function);
 
 crate::gc::handle::from_jsval_via_cast!(Function, c"Value isn't a Function");
+
+/// Marker type for any callable object: a function, a bound function, a
+/// callable proxy, or any other object SpiderMonkey's `IsCallable` accepts.
+///
+/// Used for WebIDL callback function types: the conversion throws a
+/// `TypeError` for a value that is not callable. [`Function`] accepts only
+/// `JSFunction` objects, which excludes bound functions and callable proxies.
+pub struct Callable;
+
+impl JSType for Callable {
+    const JS_NAME: &'static str = "callable object";
+    type Rooted<'s> = Stack<'s, Self>;
+
+    fn js_class() -> *const JSClass {
+        Function::js_class()
+    }
+
+    #[inline]
+    unsafe fn is_instance(obj: *mut mozjs::jsapi::JSObject) -> bool {
+        unsafe { mozjs::jsapi::JS::IsCallable(obj) }
+    }
+}
+
+crate::gc::handle::deref_to_object!(Callable);
+
+crate::gc::handle::from_jsval_via_cast!(Callable, c"Value is not callable");
+
+impl<'s> Stack<'s, Function> {
+    /// This function as a [`Callable`](crate::Callable).
+    pub fn as_callable(self) -> crate::Callable<'s> {
+        // SAFETY: every function is callable.
+        unsafe { Stack::from_handle_unchecked(self.handle()) }
+    }
+}
 
 pub enum ReservedSlot {
     Slot0 = 0,
@@ -417,40 +451,74 @@ impl From<ReservedSlot> for usize {
 // Closure-based callbacks
 // ---------------------------------------------------------------------------
 
-/// Safe wrapper around [`CallArgs`](mozjs::jsapi::CallArgs) for use in
-/// closure-based callbacks.
+/// The arguments of a [`Callback`] invocation: either a JS call's
+/// [`CallArgs`](mozjs::jsapi::CallArgs), or rooted values passed from Rust by a
+/// direct call (see [`from_values`](Self::from_values)).
 ///
 /// Provides indexed access to arguments, the `this` value, and the argument
 /// count.
 pub struct CallbackArgs<'a> {
-    args: &'a mozjs::jsapi::CallArgs,
+    source: ArgsSource<'a>,
+}
+
+enum ArgsSource<'a> {
+    Call(&'a mozjs::jsapi::CallArgs),
+    Values(&'a [HandleValue<'a>]),
 }
 
 impl<'a> CallbackArgs<'a> {
+    /// Arguments for calling a [`Callback`] directly from Rust. `this` is `undefined`, and the
+    /// call is not a constructor call.
+    pub fn from_values(values: &'a [HandleValue<'a>]) -> Self {
+        Self {
+            source: ArgsSource::Values(values),
+        }
+    }
+
     /// Number of arguments passed by the caller.
     #[inline]
     pub fn len(&self) -> u32 {
-        self.args.argc_
+        match self.source {
+            ArgsSource::Call(args) => args.argc_,
+            ArgsSource::Values(values) => values.len() as u32,
+        }
     }
 
     /// Whether no arguments were passed.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.args.argc_ == 0
+        self.len() == 0
     }
 
-    /// Get argument `i` as a raw [`Value`].
+    /// Get argument `i`.
     ///
     /// Returns `undefined` if `i` is out of range.
     #[inline]
     pub fn get(&'a self, i: u32) -> HandleValue<'a> {
-        unsafe { HandleValue::from_raw(self.args.get(i)) }
+        match self.source {
+            ArgsSource::Call(args) => unsafe { HandleValue::from_raw(args.get(i)) },
+            ArgsSource::Values(values) => values
+                .get(i as usize)
+                .copied()
+                .unwrap_or(HandleValue::undefined()),
+        }
+    }
+
+    /// Argument `i` without rooting it, for an immediate type check.
+    #[inline]
+    fn raw(&self, i: u32) -> Value {
+        match self.source {
+            ArgsSource::Call(args) => args.get(i).get(),
+            ArgsSource::Values(values) => values
+                .get(i as usize)
+                .map_or_else(crate::value::undefined, |v| v.get()),
+        }
     }
 
     /// Get argument `i` as an `i32`, or `None` if it isn't an int32.
     #[inline]
     pub fn get_i32(&self, i: u32) -> Option<i32> {
-        let v = self.args.get(i).get();
+        let v = self.raw(i);
         if v.is_int32() {
             Some(v.to_int32())
         } else {
@@ -461,7 +529,7 @@ impl<'a> CallbackArgs<'a> {
     /// Get argument `i` as an `f64`, or `None` if it isn't a number.
     #[inline]
     pub fn get_f64(&self, i: u32) -> Option<f64> {
-        let v = self.args.get(i).get();
+        let v = self.raw(i);
         if v.is_double() {
             Some(v.to_double())
         } else if v.is_int32() {
@@ -474,7 +542,7 @@ impl<'a> CallbackArgs<'a> {
     /// Get argument `i` as a `bool`, or `None` if it isn't a boolean.
     #[inline]
     pub fn get_bool(&self, i: u32) -> Option<bool> {
-        let v = self.args.get(i).get();
+        let v = self.raw(i);
         if v.is_boolean() {
             Some(v.to_boolean())
         } else {
@@ -485,18 +553,40 @@ impl<'a> CallbackArgs<'a> {
     /// Get the `this` value.
     #[inline]
     pub fn this(&self) -> Value {
-        self.args.thisv().get()
+        match self.source {
+            ArgsSource::Call(args) => args.thisv().get(),
+            ArgsSource::Values(_) => crate::value::undefined(),
+        }
     }
 
     /// Whether this is a constructor call (`new`).
     #[inline]
     pub fn is_constructing(&self) -> bool {
-        self.args.is_constructing()
+        match self.source {
+            ArgsSource::Call(args) => args.is_constructing(),
+            ArgsSource::Values(_) => false,
+        }
     }
 }
 
 /// Type-erased callback stored in a helper function's reserved slot.
 pub type Callback = fn(&Scope<'_>, CallbackArgs<'_>, HandleValue) -> Result<Value, ExnThrown>;
+
+/// Recover the class instance `T` a [`Callback`]'s `payload` was created with.
+///
+/// # Panics
+///
+/// Panics if `payload` is not an instance of `T`. The code that creates a
+/// callback also sets its payload, so a mismatch is a bug in that code.
+pub fn cast_payload<'r, T>(scope: &'r Scope<'_>, payload: HandleValue<'_>) -> T
+where
+    T: crate::builtins::CastTarget<'r, Output = T>,
+{
+    Object::from_value(scope, *payload)
+        .expect("callback payload is an object")
+        .cast::<T>()
+        .unwrap_or_else(|e| panic!("callback payload: {e}"))
+}
 
 /// The extern "C" trampoline that bridges JSNative to the stored callback.
 ///
@@ -525,7 +615,9 @@ unsafe extern "C" fn callback_trampoline(
         std::mem::transmute((*mozjs::jsapi::GetFunctionNativeReserved(callee, 0)).to_private());
     let payload = scope.root_value(*mozjs::jsapi::GetFunctionNativeReserved(callee, 1));
 
-    let cb_args = CallbackArgs { args: &args };
+    let cb_args = CallbackArgs {
+        source: ArgsSource::Call(&args),
+    };
 
     // Call the function pointer.
     match cb(&scope, cb_args, payload) {
@@ -535,7 +627,7 @@ unsafe extern "C" fn callback_trampoline(
         }
         Err(_) => {
             // If no exception is already pending, throw a generic one.
-            if !mozjs::jsapi::JS_IsExceptionPending(cx) {
+            if !crate::exception::is_pending(&scope) {
                 report_error_ascii(&scope, c"Native callback returned an error");
             }
             false

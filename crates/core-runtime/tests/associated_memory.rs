@@ -46,8 +46,7 @@ impl Accounted {
     #[method]
     fn account(&self, bytes: i32) {
         let mut data = self.data_mut();
-        // SAFETY: `self` is a rooted handle to the object owning this private data.
-        unsafe { data.accounted.set(self.as_raw(), bytes as usize) };
+        data.accounted.set(self.as_object(), bytes as usize);
     }
 
     #[getter]

@@ -4,6 +4,8 @@
 
 use js::error::ExnThrown;
 use js::exception::take_pending_or_undefined;
+use js::function::cast_payload;
+use js::function::EmptyArgs;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
@@ -14,8 +16,8 @@ use web_globals::events::algorithms::ScriptStackState;
 use web_globals::signals::abort_controller::AbortController;
 
 use crate::algorithms::{
-    cast_payload, dequeue_value, enqueue_value_with_size, is_non_negative_number, make_type_error,
-    pair_parts, pair_payload, reset_queue, resolved_undefined_promise,
+    dequeue_value, enqueue_value_with_size, is_non_negative_number, make_type_error, pair_parts,
+    pair_payload, reset_queue, resolved_undefined_promise,
 };
 use crate::queuing::{QueueWithSizes, ValueWithSize};
 use crate::support;
@@ -147,14 +149,10 @@ fn ws_close_promise_rejected(
 /// cleared).
 fn abort_reaction_payload<'r>(
     scope: &'r Scope<'_>,
-    stream: &WritableStream<'_>,
-    abort_promise: &Promise<'_>,
+    stream: &WritableStream<'r>,
+    abort_promise: &Promise<'r>,
 ) -> Result<HandleValue<'r>, ExnThrown> {
-    pair_payload(
-        scope,
-        scope.root_value(stream.as_value()),
-        scope.root_value(abort_promise.as_value()),
-    )
+    pair_payload(scope, stream, abort_promise)
 }
 
 /// Unpack the `[stream, abortPromise]` abort-reaction payload.
@@ -1257,12 +1255,8 @@ pub(crate) fn set_up_writable_stream_default_controller(
     writable_stream_update_backpressure(scope, stream, backpressure);
     // Step 15: Let _startResult_ be the result of performing _startAlgorithm_. (This may throw an
     //          exception.)
-    let start_result = support::invoke_algorithm(
-        scope,
-        start_algorithm,
-        algorithm_receiver,
-        &[scope.root_value(controller.as_value())],
-    )?;
+    let start_result =
+        support::invoke_algorithm(scope, start_algorithm, algorithm_receiver, &[controller])?;
     // Step 16: Let _startPromise_ be `a promise resolved with` _startResult_.
     //          WebIDL "a promise resolved with" always creates a *new* promise (it
     //          does not return the value as-is the way `Promise.resolve` does for
@@ -1278,12 +1272,11 @@ pub(crate) fn set_up_writable_stream_default_controller(
     //          "`writable`" or "`erroring`". Set _controller_.`[[started]]` to true. Perform !
     //          `WritableStreamDealWithRejection`(_stream_, _r_).
     // (Steps 17 and 18 are implemented by `ws_start_promise_fulfilled` / `ws_start_promise_rejected`.)
-    let payload = scope.root_value(controller.as_value());
     support::react(
         scope,
         &start_promise,
-        Some((ws_start_promise_fulfilled, payload)),
-        Some((ws_start_promise_rejected, payload)),
+        Some((ws_start_promise_fulfilled, controller)),
+        Some((ws_start_promise_rejected, controller)),
     )?;
     Ok(())
 }
@@ -1569,7 +1562,7 @@ pub(crate) fn writable_stream_default_controller_process_close(
     let close_algorithm = controller.data().close_algorithm.get(scope);
     let receiver = controller.data().algorithm_receiver.get(scope);
     let sink_close_promise =
-        support::invoke_promise_algorithm(scope, close_algorithm, receiver, &[]);
+        support::invoke_promise_algorithm(scope, close_algorithm, receiver, EmptyArgs);
     // Step 6: Perform ! `WritableStreamDefaultControllerClearAlgorithms`(_controller_).
     writable_stream_default_controller_clear_algorithms(controller);
     // Step 7: `Upon fulfillment` of _sinkClosePromise_, Perform !
@@ -1577,15 +1570,11 @@ pub(crate) fn writable_stream_default_controller_process_close(
     // Step 8: `Upon rejection` of _sinkClosePromise_ with reason _reason_, Perform !
     //         `WritableStreamFinishInFlightCloseWithError`(_stream_, _reason_).
     // (Steps 7 and 8 are implemented by `ws_close_promise_fulfilled` / `ws_close_promise_rejected`.)
-    let payload = {
-        let stream: &WritableStream<'_> = &stream;
-        scope.root_value(stream.as_value())
-    };
     support::react(
         scope,
         &sink_close_promise,
-        Some((ws_close_promise_fulfilled, payload)),
-        Some((ws_close_promise_rejected, payload)),
+        Some((ws_close_promise_fulfilled, stream)),
+        Some((ws_close_promise_rejected, stream)),
     )
     .expect("attach close reactions");
 }
@@ -1628,13 +1617,13 @@ pub(crate) fn writable_stream_default_controller_process_write(
     // (Steps 4 and 5 are implemented by `ws_write_promise_fulfilled` /
     // `ws_write_promise_rejected`.)
     if controller.data().write_fulfilled_fn.is_none() {
-        let payload = scope.root_value(controller.as_value());
-        let fulfilled = Function::new_callback(scope, c"", 1, ws_write_promise_fulfilled, payload)
+        let fulfilled =
+            Function::new_callback(scope, c"", 1, ws_write_promise_fulfilled, controller)
+                .expect("create write reaction");
+        controller.data_mut().write_fulfilled_fn.set(fulfilled);
+        let rejected = Function::new_callback(scope, c"", 1, ws_write_promise_rejected, controller)
             .expect("create write reaction");
-        controller.data_mut().write_fulfilled_fn = Some(Heap::from(fulfilled));
-        let rejected = Function::new_callback(scope, c"", 1, ws_write_promise_rejected, payload)
-            .expect("create write reaction");
-        controller.data_mut().write_rejected_fn = Some(Heap::from(rejected));
+        controller.data_mut().write_rejected_fn.set(rejected);
     }
     let fulfilled = controller
         .data()

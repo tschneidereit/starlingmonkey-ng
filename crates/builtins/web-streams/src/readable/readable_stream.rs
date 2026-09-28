@@ -131,32 +131,7 @@ impl ReadableStream {
             }
         };
         let underlying_source_dict =
-            UnderlyingSource::from_jsval(scope, underlying_source_value, ()).map_err(|_| {
-                if js::exception::get_pending(scope).is_err() {
-                    js::error::throw_type_error(scope, c"Invalid underlying source");
-                }
-                ExnThrown
-            })?;
-        // Step 2 (continued): converting the dictionary validates that each present
-        // callback member is callable, before the step-4 byte-stream checks.
-        // TODO: consider introducing a `Callable` type that WebIDL type checking can use.
-        crate::support::ensure_callback_members_callable(
-            scope,
-            &[
-                (
-                    underlying_source_dict.cancel.as_ref(),
-                    c"underlying source cancel must be a function",
-                ),
-                (
-                    underlying_source_dict.pull.as_ref(),
-                    c"underlying source pull must be a function",
-                ),
-                (
-                    underlying_source_dict.start.as_ref(),
-                    c"underlying source start must be a function",
-                ),
-            ],
-        )?;
+            UnderlyingSource::from_jsval_throwing(scope, underlying_source_value, ())?;
         // Step 3: Perform ! `InitializeReadableStream`(`this`).
         algorithms::initialize_readable_stream(self);
         // Step 4: If _underlyingSourceDict_["``type``"] is "``bytes``": ...
@@ -168,18 +143,7 @@ impl ReadableStream {
             // _highWaterMark_ be ? `ExtractHighWaterMark`(_strategy_, 0). Perform ?
             // `SetUpByteStreamControllerFromUnderlyingSource`(`this`, _underlyingSource_,
             // _underlyingSourceDict_, _highWaterMark_).
-            if let Some(size) = strategy.as_ref().and_then(|s| s.size.as_ref()) {
-                // `size` is a `QueuingStrategySize` callback: WebIDL converts it when binding the
-                // `strategy` argument and throws a `TypeError` if it is not callable, before this
-                // RangeError. The codebase defers callback callability checks to their use sites,
-                // so replicate the conversion-time `TypeError` here. (TASKLOG: a validating
-                // callback-conversion type would centralize this for all callback members.)
-                if !size.is_callable() {
-                    return Err(js::error::throw_type_error(
-                        scope,
-                        c"queuing strategy size must be a function",
-                    ));
-                }
+            if strategy.as_ref().is_some_and(|s| s.size.is_some()) {
                 return Err(js::error::throw_range_error(
                     scope,
                     c"a byte stream's queuing strategy must not have a size function",

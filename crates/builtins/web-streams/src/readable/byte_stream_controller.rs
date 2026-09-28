@@ -113,7 +113,7 @@ pub struct ReadableByteStreamController {
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-autoallocatechunksize>
     /// A positive integer, when the automatic buffer allocation feature is enabled. In that case,
     /// this value specifies the size of buffer to allocate. It is undefined otherwise.
-    pub(crate) auto_allocate_chunk_size: Option<f64>,
+    pub(crate) auto_allocate_chunk_size: Option<u64>,
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-ReadableStreamBYOBRequest>
     /// A ReadableStreamBYOBRequest instance representing the current BYOB pull request, or null if
     /// there are no pending requests

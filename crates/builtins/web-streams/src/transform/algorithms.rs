@@ -4,6 +4,7 @@
 
 use js::error::ExnThrown;
 use js::exception::take_pending_or_undefined;
+use js::function::cast_payload;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
@@ -15,7 +16,7 @@ use js::{Object, Promise};
 use super::transform_stream::TransformStream;
 use super::transform_stream_default_controller::TransformStreamDefaultController;
 use super::transformer::Transformer;
-use crate::algorithms::{cast_payload, make_type_error, pair_parts, pair_payload};
+use crate::algorithms::{make_type_error, pair_parts, pair_payload};
 use crate::readable::algorithms::{
     create_readable_stream, readable_stream_default_controller_can_close_or_enqueue,
     readable_stream_default_controller_close, readable_stream_default_controller_enqueue,
@@ -746,9 +747,8 @@ pub(crate) fn transform_stream_default_controller_perform_transform<'r>(
     // (The rejection callback's payload — the controller — never changes, so it
     // is created on the first transform and reused for every subsequent chunk.)
     if controller.data().transform_rejected_fn.is_none() {
-        let payload = ts_controller_value(scope, controller);
         let on_rejected =
-            Function::new_callback(scope, c"", 1, ts_perform_transform_rejected, payload)
+            Function::new_callback(scope, c"", 1, ts_perform_transform_rejected, controller)
                 .expect("cb");
         controller.data_mut().transform_rejected_fn = Some(Heap::from(on_rejected));
     }
@@ -815,9 +815,8 @@ pub(crate) fn transform_stream_default_sink_write_algorithm<'r>(
         // so only the returned derived promise is allocated per chunk.
         controller.data().pending_write_chunk.set(*chunk);
         if controller.data().write_after_backpressure_fn.is_none() {
-            let payload = ts_controller_value(scope, &controller);
             let on_fulfilled =
-                Function::new_callback(scope, c"", 1, ts_sink_write_after_backpressure, payload)
+                Function::new_callback(scope, c"", 1, ts_sink_write_after_backpressure, controller)
                     .expect("cb");
             controller.data_mut().write_after_backpressure_fn = Some(Heap::from(on_fulfilled));
         }
@@ -870,8 +869,7 @@ pub(crate) fn transform_stream_default_sink_abort_algorithm<'r>(
     //         _controller_.`[[finishPromise]]` with _r_.
     // (Implemented by `ts_sink_abort_fulfilled` / `ts_sink_abort_rejected`, carrying
     //  [controller, reason].)
-    let controller_value = ts_controller_value(scope, &controller);
-    let payload = pair_payload(scope, controller_value, reason).expect("payload");
+    let payload = pair_payload(scope, controller, reason).expect("payload");
     support::react(
         scope,
         &cancel_promise,
@@ -904,12 +902,8 @@ pub(crate) fn transform_stream_default_sink_close_algorithm<'r>(
     //         The from-transformer flush callback is invoked with « controller ».
     let flush_algorithm = controller.data().flush_algorithm.get(scope);
     let receiver = controller.data().algorithm_receiver.get(scope);
-    let flush_promise = support::invoke_promise_algorithm(
-        scope,
-        flush_algorithm,
-        receiver,
-        &[scope.root_value(controller.as_value())],
-    );
+    let flush_promise =
+        support::invoke_promise_algorithm(scope, flush_algorithm, receiver, &[controller]);
     // Step 6: Perform ! `TransformStreamDefaultControllerClearAlgorithms`(_controller_).
     transform_stream_default_controller_clear_algorithms(&controller);
     // Step 7: `React` to _flushPromise_: If _flushPromise_ was fulfilled, then: If
@@ -921,12 +915,11 @@ pub(crate) fn transform_stream_default_sink_close_algorithm<'r>(
     //         `DefaultControllerError`(_readable_.`[[controller]]`, _r_). `Reject`
     //         _controller_.`[[finishPromise]]` with _r_.
     // (Implemented by `ts_sink_close_fulfilled` / `ts_sink_close_rejected`.)
-    let payload = ts_controller_value(scope, &controller);
     support::react(
         scope,
         &flush_promise,
-        Some((ts_sink_close_fulfilled, payload)),
-        Some((ts_sink_close_rejected, payload)),
+        Some((ts_sink_close_fulfilled, controller)),
+        Some((ts_sink_close_rejected, controller)),
     )
     .expect("react");
     // Step 8: Return _controller_.`[[finishPromise]]`.
@@ -971,8 +964,7 @@ pub(crate) fn transform_stream_default_source_cancel_algorithm<'r>(
     //         _controller_.`[[finishPromise]]` with _r_.
     // (Implemented by `ts_source_cancel_fulfilled` / `ts_source_cancel_rejected`, carrying
     //  [controller, reason].)
-    let controller_value = ts_controller_value(scope, &controller);
-    let payload = pair_payload(scope, controller_value, reason).expect("payload");
+    let payload = pair_payload(scope, controller, reason).expect("payload");
     support::react(
         scope,
         &cancel_promise,

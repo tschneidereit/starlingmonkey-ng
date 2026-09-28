@@ -142,3 +142,5 @@ impl<'s> Stack<'s, RegExp> {
 }
 
 crate::gc::handle::deref_to_object!(RegExp);
+
+crate::gc::handle::from_jsval_via_cast!(RegExp, c"Value isn't a RegExp");

@@ -2,15 +2,15 @@
 
 //! <https://url.spec.whatwg.org/>
 
-use crate::url_search_params_iterator::{
-    IteratorKind, URLSearchParamsIterator, URLSearchParamsIteratorImpl,
-};
+use crate::url_search_params_iterator::URLSearchParamsIterator;
 use core_runtime::{webidl_interface, webidl_methods, webidl_union};
 use js::conversion::{Record, ToJSVal};
-use js::error::{throw_type_error, ExnThrown, TypeError};
+use js::error::{ExnThrown, TypeError};
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
+use js::iteration::IterationKind;
 use js::prelude::HandleValue;
+use js::Callable;
 
 /// WebIDL: `(sequence<sequence<USVString>> or record<USVString, USVString> or USVString)`
 /// — the union accepted by the [`URLSearchParams` constructor].
@@ -228,34 +228,24 @@ impl URLSearchParams<'_> {
         self.update(scope)
     }
 
+    /// <https://webidl.spec.whatwg.org/#js-iterable>: `forEach`.
     #[method]
     fn for_each(
         &self,
         scope: &Scope<'_>,
-        callback: HandleValue,
+        callback: Callable<'_>,
         this_arg: Option<HandleValue>,
     ) -> Result<(), ExnThrown> {
-        if !callback.is_object() {
-            return Err(throw_type_error(scope, c"callback must be a function"));
-        }
-
-        let mut index = 0usize;
-        while index < self.data().list.len() {
-            let (name, value) = self.data().list[index].clone();
-            let value_js = value.as_str().to_jsval_throwing(scope)?;
-            let name_js = name.as_str().to_jsval_throwing(scope)?;
-            let self_js = scope.root_value(self.as_value());
-
-            js::Function::call(
-                scope,
-                this_arg.unwrap_or(HandleValue::undefined()),
-                callback,
-                &[value_js, name_js, self_js],
-            )?;
-            index += 1;
-        }
-
-        Ok(())
+        let this_arg = this_arg.unwrap_or(HandleValue::undefined());
+        js::iteration::for_each_pair(scope, *self, callback, this_arg, |i| {
+            let data = self.data();
+            let Some((name, value)) = data.list.get(i) else {
+                return Ok(None);
+            };
+            let name = name.as_str().to_jsval_throwing(scope)?;
+            let value = value.as_str().to_jsval_throwing(scope)?;
+            Ok(Some((name, value)))
+        })
     }
 
     #[allow(clippy::wrong_self_convention)]
@@ -268,19 +258,28 @@ impl URLSearchParams<'_> {
         Ok(serializer.finish())
     }
 
+    /// <https://webidl.spec.whatwg.org/#js-iterable>: `entries`.
     #[method]
     fn entries<'r>(&self, scope: &'r Scope<'_>) -> Result<URLSearchParamsIterator<'r>, ExnThrown> {
-        self.create_iterator(scope, IteratorKind::Entries)
+        // Return a newly created `default iterator object` for _definition_, with _jsValue_ as
+        // its `target`, "`key+value`" as its `kind`, and `index` set to 0.
+        URLSearchParamsIterator::new(scope, *self, IterationKind::KeyValue)
     }
 
+    /// <https://webidl.spec.whatwg.org/#js-iterable>: `keys`.
     #[method]
     fn keys<'r>(&self, scope: &'r Scope<'_>) -> Result<URLSearchParamsIterator<'r>, ExnThrown> {
-        self.create_iterator(scope, IteratorKind::Keys)
+        // Return a newly created `default iterator object` for _definition_, with _jsValue_ as
+        // its `target`, "`key`" as its `kind`, and `index` set to 0.
+        URLSearchParamsIterator::new(scope, *self, IterationKind::Key)
     }
 
+    /// <https://webidl.spec.whatwg.org/#js-iterable>: `values`.
     #[method]
     fn values<'r>(&self, scope: &'r Scope<'_>) -> Result<URLSearchParamsIterator<'r>, ExnThrown> {
-        self.create_iterator(scope, IteratorKind::Values)
+        // Return a newly created `default iterator object` for _definition_, with _jsValue_ as
+        // its `target`, "`value`" as its `kind`, and `index` set to 0.
+        URLSearchParamsIterator::new(scope, *self, IterationKind::Value)
     }
 }
 
@@ -329,19 +328,5 @@ impl URLSearchParams<'_> {
             url.set_query(serialized_query.as_deref());
         }
         Ok(())
-    }
-
-    fn create_iterator<'r>(
-        &self,
-        scope: &'r Scope<'_>,
-        kind: IteratorKind,
-    ) -> Result<URLSearchParamsIterator<'r>, ExnThrown> {
-        js::class::create_instance_with::<URLSearchParamsIteratorImpl>(scope, |_| {
-            URLSearchParamsIteratorImpl {
-                params: (*self).into(),
-                index: 0,
-                kind,
-            }
-        })
     }
 }

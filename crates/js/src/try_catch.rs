@@ -26,10 +26,9 @@
 use crate::gc::scope::{InnerScope, Scope};
 use mozjs::gc::HandleValue;
 use mozjs::jsapi::ExceptionStackBehavior;
-use mozjs::jsval::UndefinedValue;
-use mozjs::rust::wrappers2;
 
 use super::error::{CapturedError, ExnThrown};
+use crate::exception;
 
 /// A scoped exception handler.
 ///
@@ -52,8 +51,7 @@ impl<'a> TryCatch<'a> {
     /// Records whether an exception is already pending. Operations on the
     /// returned scope's inner will be monitored for new exceptions.
     pub fn new(scope: &'a Scope<'_>) -> Self {
-        // SAFETY: Scope guarantees a valid context pointer.
-        let had_exception = unsafe { wrappers2::JS_IsExceptionPending(scope.cx()) };
+        let had_exception = exception::is_pending(scope);
         TryCatch {
             inner: scope.inner_scope(),
             had_exception,
@@ -68,27 +66,14 @@ impl<'a> TryCatch<'a> {
     /// Returns `true` if an exception was caught (i.e., an exception is pending
     /// that was not pending when this `TryCatch` was created).
     pub fn has_caught(&self) -> bool {
-        // SAFETY: Scope guarantees a valid context pointer.
-        let pending = unsafe { wrappers2::JS_IsExceptionPending(self.inner.cx()) };
-        pending && !self.had_exception
+        exception::is_pending(&self.inner) && !self.had_exception
     }
 
     /// Get the pending exception value, if any.
     ///
     /// Returns `None` if no exception is pending. Does NOT clear the exception.
     pub fn exception(&self) -> Option<HandleValue<'_>> {
-        // SAFETY: Scope guarantees a valid context with an entered realm.
-        unsafe {
-            if !wrappers2::JS_IsExceptionPending(self.inner.cx()) {
-                return None;
-            }
-            let mut exc = self.inner.root_value_mut(UndefinedValue());
-            if wrappers2::JS_GetPendingException(self.inner.cx_mut(), exc.reborrow()) {
-                Some(exc.handle())
-            } else {
-                None
-            }
-        }
+        exception::get_pending(&self.inner)
     }
 
     /// Capture the pending exception as a [`CapturedError`], clearing it.
@@ -102,8 +87,7 @@ impl<'a> TryCatch<'a> {
 
     /// Clear the pending exception without inspecting it.
     pub fn reset(&self) {
-        // SAFETY: Scope guarantees a valid context pointer.
-        unsafe { wrappers2::JS_ClearPendingException(self.inner.cx()) };
+        exception::clear(&self.inner);
     }
 
     /// Re-set the given exception value as pending without capturing the stack.
@@ -111,13 +95,6 @@ impl<'a> TryCatch<'a> {
     /// This is useful when you've inspected an exception and want to let it
     /// propagate. Pass the handle obtained from [`exception()`](Self::exception).
     pub fn rethrow(&self, exc: HandleValue<'_>) {
-        // SAFETY: Scope guarantees a valid context with an entered realm.
-        unsafe {
-            wrappers2::JS_SetPendingException(
-                self.inner.cx_mut(),
-                exc,
-                ExceptionStackBehavior::DoNotCapture,
-            );
-        };
+        exception::set_pending(&self.inner, exc, ExceptionStackBehavior::DoNotCapture);
     }
 }

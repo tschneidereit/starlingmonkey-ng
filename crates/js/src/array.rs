@@ -8,8 +8,6 @@
 //! handle type. It implements `Deref` to [`Stack<Object>`](crate::Object),
 //! so all property and prototype methods are available directly.
 
-use std::os::raw::c_uint;
-
 use crate::builtins::JSType;
 use crate::conversion::ToJSVal;
 use crate::gc::handle::Stack;
@@ -72,20 +70,6 @@ impl<'s> Stack<'s, Array> {
         ExnThrown::check(ok)
     }
 
-    /// Define an element by index with attribute flags.
-    pub fn define_element(
-        &self,
-        scope: &Scope<'_>,
-        index: u32,
-        value: HandleValue,
-        attrs: c_uint,
-    ) -> Result<(), ExnThrown> {
-        let ok = unsafe {
-            wrappers2::JS_DefineElement(scope.cx_mut(), self.handle(), index, value, attrs)
-        };
-        ExnThrown::check(ok)
-    }
-
     /// Check whether an object is an `Array`.
     pub fn is_array(scope: &Scope<'_>, obj: HandleObject) -> Result<bool, ExnThrown> {
         let mut result = false;
@@ -104,3 +88,5 @@ impl<'s> Stack<'s, Array> {
 }
 
 crate::gc::handle::deref_to_object!(Array);
+
+crate::gc::handle::from_jsval_via_cast!(Array, c"Value isn't an Array");

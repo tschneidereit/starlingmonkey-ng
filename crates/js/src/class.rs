@@ -160,6 +160,17 @@ pub fn get_iterator_prototype<'s>(scope: &'s Scope<'_>) -> Result<Object<'s>, Ex
     unsafe { Object::from_mozjs_rval(scope, obj) }
 }
 
+/// Set the `[[Prototype]]` of `T`'s prototype object to `%Iterator.prototype%`, as WebIDL
+/// requires of an iterator prototype object
+/// (<https://webidl.spec.whatwg.org/#dfn-iterator-prototype-object>).
+///
+/// Panics if `T` is not registered in the current global.
+pub fn inherit_from_iterator_prototype<T: ClassDef>(scope: &Scope<'_>) -> Result<(), ExnThrown> {
+    let proto = get_prototype_object_for::<T>(scope).expect("class is registered");
+    let iterator_proto = get_iterator_prototype(scope)?;
+    proto.set_prototype(scope, iterator_proto.handle())
+}
+
 /// Get the prototype for a standard class by `JSProtoKey`.
 pub fn get_class_prototype<'s>(
     scope: &'s Scope<'_>,
@@ -1548,11 +1559,8 @@ pub trait ClassDef: Sized + Trace + 'static {
     /// on the JS object.
     ///
     /// This runs inside `generic_constructor`, after `set_private`, with access
-    /// to the JS object and the original constructor arguments. Use this for
-    /// initialization steps that require the JS object reference (e.g., setting
-    /// up child objects that back-reference the parent).
-    ///
-    /// Use `#[post_init]` in `#[jsmethods]` to define this.
+    /// to the JS object and the original constructor arguments. The class macros
+    /// implement it to run a setup-style constructor's body.
     fn post_init(_scope: &Scope<'_>, _obj: Object<'_>, _args: &CallArgs) -> Result<(), ExnThrown> {
         Ok(())
     }
@@ -2472,8 +2480,8 @@ impl<T: ClassDef> __ConstantRegistrar<T> for &__ConstantReg<T> {
 }
 
 /// Trait for post-construction initialization via autoref specialization.
-/// The blanket impl on `&__PostInitReg<T>` is a no-op; `#[jsmethods]` provides
-/// the real impl on `__PostInitReg<T>` directly when `#[post_init]` is used.
+/// The blanket impl on `&__PostInitReg<T>` is a no-op. The class macros provide
+/// the real impl on `__PostInitReg<T>` for a setup-style constructor.
 #[doc(hidden)]
 pub trait __PostInitRegistrar<T: ClassDef> {
     fn post_init(
@@ -2788,11 +2796,11 @@ pub fn define_to_string_tag(
 /// Used for symbol-keyed method aliases, such as an `async iterable<>`
 /// declaration installing `@@asyncIterator` as an alias of the `values`
 /// method (WebIDL §3.7.10.2).
-pub fn define_well_known_symbol_property(
-    scope: &Scope<'_>,
+pub fn define_well_known_symbol_property<'s>(
+    scope: &'s Scope<'_>,
     obj: Object<'_>,
     which: SymbolCode,
-    value: crate::prelude::HandleValue<'_>,
+    value: impl ToJSVal<'s>,
 ) -> Result<(), ExnThrown> {
     let key = crate::symbol::get_well_known_key(scope, which);
 
@@ -2812,11 +2820,10 @@ pub fn define_well_known_symbol_property(
         ),
         getter_: ptr::null_mut(),
         setter_: ptr::null_mut(),
-        value_: value.get(),
+        value_: value.to_jsval_raw_throwing(scope)?,
     });
 
-    rooted!(in(unsafe { scope.raw_cx_no_gc() }) let id = key);
-    obj.define_property_by_id(scope, id.handle(), desc.handle())
+    obj.define_property_by_id(scope, scope.root_id(key), desc.handle())
 }
 
 /// Adds an alias to the property given by `property` under the symbol `symbol` to the
@@ -2826,5 +2833,6 @@ pub fn add_symbol_alias<T: ClassDef>(scope: &Scope, property: &CStr, symbol: Sym
     let values = proto
         .get_property(scope, property)
         .expect("property not found");
-    let _ = define_well_known_symbol_property(scope, proto, symbol, values);
+    define_well_known_symbol_property(scope, proto, symbol, values)
+        .expect("defining the symbol alias");
 }

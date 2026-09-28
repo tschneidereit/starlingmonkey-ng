@@ -92,3 +92,5 @@ impl<'s> Stack<'s, Date> {
 }
 
 crate::gc::handle::deref_to_object!(Date);
+
+crate::gc::handle::from_jsval_via_cast!(Date, c"Value isn't a Date");

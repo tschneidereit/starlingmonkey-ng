@@ -5,8 +5,8 @@
 use core_runtime::event_loop::{with_active_event_loop, InterestHandle};
 use core_runtime::{jsclass, jsmethods};
 use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods};
-use js::conversion::FromJSVal;
 use js::error::{ExnThrown, ThrowException};
+use js::function::cast_payload;
 use js::function::CallbackArgs;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
@@ -174,7 +174,7 @@ fn lifetime_promise_settled_cb(
     _args: CallbackArgs,
     payload: HandleValue,
 ) -> Result<Value, ExnThrown> {
-    let holder = LifetimePromisePayload::from_jsval(scope, payload, ()).unwrap();
+    let holder = cast_payload::<LifetimePromisePayload>(scope, payload);
     holder
         .data()
         .event

@@ -843,9 +843,7 @@ pub async unsafe fn run_until<S, F>(
 /// allowing the event loop to continue. This is called by [`EventLoop::step`]
 /// when a task or microtask throws.
 fn handle_and_clear_exception(scope: &Scope<'_>) {
-    let e = ExnThrown::capture(scope);
-    eprintln!("[event_loop] Uncaught exception: {e}");
-    js::exception::clear(scope);
+    js::exception::report_and_clear(scope, "event_loop");
 }
 
 impl EventLoop {
@@ -884,7 +882,6 @@ impl EventLoop {
                 continue;
             };
             if entry.task.run(scope, id).is_err() {
-                eprintln!("[event_loop] Task error (id={:?})", id);
                 handle_and_clear_exception(scope);
             }
             ran_any = true;

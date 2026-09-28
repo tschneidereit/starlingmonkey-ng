@@ -291,6 +291,9 @@ pub type WeakMap<'s> = Stack<'s, collections::weak_map::WeakMap>;
 /// A scope-rooted handle to a JavaScript `Function` object.
 pub type Function<'s> = Stack<'s, function::Function>;
 
+/// A scope-rooted handle to any callable JavaScript object.
+pub type Callable<'s> = Stack<'s, function::Callable>;
+
 /// A scope-rooted handle to a JavaScript string.
 ///
 /// Unlike `Object`, `Array`, and `Function`, JS strings are not JS objects —

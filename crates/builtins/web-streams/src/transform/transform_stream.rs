@@ -82,37 +82,7 @@ impl TransformStream {
                 v
             }
         };
-        let transformer_dict =
-            Transformer::from_jsval(scope, transformer_value, ()).map_err(|_| {
-                if js::exception::get_pending(scope).is_err() {
-                    js::error::throw_type_error(scope, c"Invalid transformer");
-                }
-                ExnThrown
-            })?;
-        // Step 2 (continued): converting the dictionary validates that each present
-        // callback member is callable (a `TypeError`), before the step-3/4
-        // `readableType`/`writableType` `RangeError`s.
-        crate::support::ensure_callback_members_callable(
-            scope,
-            &[
-                (
-                    transformer_dict.cancel.as_ref(),
-                    c"transformer cancel must be a function",
-                ),
-                (
-                    transformer_dict.flush.as_ref(),
-                    c"transformer flush must be a function",
-                ),
-                (
-                    transformer_dict.start.as_ref(),
-                    c"transformer start must be a function",
-                ),
-                (
-                    transformer_dict.transform.as_ref(),
-                    c"transformer transform must be a function",
-                ),
-            ],
-        )?;
+        let transformer_dict = Transformer::from_jsval_throwing(scope, transformer_value, ())?;
         // Step 3: If _transformerDict_["``readableType``"] `exists`, throw a ``RangeError``
         //         exception.
         if transformer_dict.readable_type.is_some() {
@@ -165,12 +135,6 @@ impl TransformStream {
         //          the result of `invoking` _transformerDict_["``start``"] with argument list «
         //          `this`.`[[controller]]` » and `callback this value` _transformer_.
         if let Some(start) = transformer_dict.start.as_ref() {
-            if !start.is_callable() {
-                return Err(js::error::throw_type_error(
-                    scope,
-                    c"transformer start must be a function",
-                ));
-            }
             let controller: TransformStreamDefaultController<'_> = self
                 .data()
                 .controller

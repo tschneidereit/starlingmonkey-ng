@@ -1165,8 +1165,7 @@ impl Request<'_> {
             }) => bytes.len(),
             _ => 0,
         };
-        // SAFETY: `self` is a rooted handle to the object owning this private data.
-        unsafe { data.accounted.set(self.as_raw(), bytes) };
+        data.accounted.set(self.as_object(), bytes);
     }
 }
 

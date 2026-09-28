@@ -8,6 +8,7 @@ use core_runtime::{webidl_dictionary, webidl_interface, webidl_methods};
 use js::class::Ref;
 use js::conversion::FromJSVal;
 use js::error::{ExnThrown, ThrowException};
+use js::function::cast_payload;
 use js::function::CallbackArgs;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
@@ -283,7 +284,7 @@ fn on_respond_fulfilled(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let event = FetchEvent::from_jsval(scope, payload, ()).unwrap();
+    let event = cast_payload::<FetchEvent>(scope, payload);
     // Step 10.1: If _response_ is not a `Response` object, then set the `respond-with error
     //     flag`.
     let response =
@@ -331,7 +332,7 @@ fn on_respond_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let event = FetchEvent::from_jsval(scope, payload, ()).unwrap();
+    let event = cast_payload::<FetchEvent>(scope, payload);
     {
         let mut data = event.data_mut();
         // Step 9.1: Set _event_’s `respond-with error flag`.
@@ -358,7 +359,7 @@ fn describe_rejection(scope: &Scope<'_>, reason: HandleValue<'_>) -> String {
     match String::from_jsval(scope, reason, ()) {
         Ok(text) => text,
         Err(_) => {
-            let _ = js::exception::take_pending_or_undefined(scope);
+            js::exception::clear(scope);
             "a value that could not be converted to a string".to_string()
         }
     }

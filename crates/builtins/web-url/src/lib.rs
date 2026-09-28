@@ -13,5 +13,8 @@ pub fn add_to_global(scope: &Scope<'_>, global: Object<'_>) {
     url_search_params::URLSearchParams::add_to_global(scope, global);
     url_search_params_iterator::URLSearchParamsIterator::add_to_global(scope, global);
     url_search_params::install_symbol_iterator(scope);
-    url_search_params_iterator::install_symbol_iterator(scope);
+    js::class::inherit_from_iterator_prototype::<
+        url_search_params_iterator::URLSearchParamsIteratorImpl,
+    >(scope)
+    .expect("setting a class prototype's prototype can only fail due to OOM");
 }

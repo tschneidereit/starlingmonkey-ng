@@ -3,7 +3,7 @@
 //! <https://streams.spec.whatwg.org/>
 
 use core_runtime::webidl_dictionary;
-use js::{prelude::HandleValue, Object};
+use js::{prelude::HandleValue, Callable};
 
 /// <https://streams.spec.whatwg.org/#dictdef-transformer>
 #[webidl_dictionary]
@@ -17,13 +17,13 @@ pub struct Transformer<'a> {
 }
 
 /// WebIDL callback `TransformerStartCallback`: (controller: TransformStreamDefaultController<'_>) -> HandleValue<'_>
-pub type StartCallback<'s> = Object<'s>;
+pub type StartCallback<'s> = Callable<'s>;
 
 /// WebIDL callback `TransformerFlushCallback`: (controller: TransformStreamDefaultController<'_>) -> Promise<'_>
-pub type FlushCallback<'s> = Object<'s>;
+pub type FlushCallback<'s> = Callable<'s>;
 
 /// WebIDL callback `TransformerTransformCallback`: (chunk: HandleValue<'_>, controller: TransformStreamDefaultController<'_>) -> Promise<'_>
-pub type TransformCallback<'s> = Object<'s>;
+pub type TransformCallback<'s> = Callable<'s>;
 
 /// WebIDL callback `TransformerCancelCallback`: (reason: HandleValue<'_>) -> Promise<'_>
-pub type CancelCallback<'s> = Object<'s>;
+pub type CancelCallback<'s> = Callable<'s>;

@@ -60,20 +60,7 @@ impl BYOBReader {
         view: ArrayBufferView<'_>,
         options: Option<BYOBReaderReadOptions>,
     ) -> Result<Promise<'r>, ExnThrown> {
-        // WebIDL: `min` is `[EnforceRange] unsigned long long`, defaulting to 1 when
-        // the `options` dictionary or member is absent. Apply `[EnforceRange]` here:
-        // a non-finite value, or one that is negative after truncating toward zero,
-        // rejects with a `TypeError`. (The upper bound 2^64-1 is not enforced — it is
-        // beyond `f64` precision and a value that large fails the length checks below
-        // with a `RangeError` regardless.) A conversion failure surfaces as a rejected
-        // promise rather than a synchronous throw, per WebIDL §3.7.7 ("Operations")
-        // for a promise-returning operation.
-        let min_f64 = options.map(|o| o.min).unwrap_or(1.0);
-        if !min_f64.is_finite() || min_f64.trunc() < 0.0 {
-            js::error::throw_type_error(scope, c"read() option min is out of range");
-            return Promise::new_rejected_with_pending_error(scope);
-        }
-        let min = min_f64.trunc() as usize;
+        let min = options.map_or(1, |o| o.min.0) as usize;
         // Step 1: If _view_.[[ByteLength]] is 0, return `a promise rejected with` a ``TypeError``
         //         exception.
         if view.byte_length() == 0 {

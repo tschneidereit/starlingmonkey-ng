@@ -7,7 +7,7 @@ use js::{
     gc::{handle::Heap, scope::Scope},
     heap::RootedTraceableBox,
     native::Value,
-    prelude::{CallbackArgs, HandleValue},
+    prelude::{CallbackArgs, HandleValue, ToJSVal},
     value, Array, Function, Object, Promise,
 };
 
@@ -25,8 +25,8 @@ pub fn make_type_error<'r>(scope: &'r Scope<'_>, message: &std::ffi::CStr) -> Ha
 /// Pack two values into a JS object for a two-state reaction payload.
 pub(crate) fn pair_payload<'r>(
     scope: &'r Scope<'_>,
-    a: HandleValue<'_>,
-    b: HandleValue<'_>,
+    a: impl ToJSVal<'r>,
+    b: impl ToJSVal<'r>,
 ) -> Result<HandleValue<'r>, ExnThrown> {
     let attrs = js::class_spec::JSPROP_ENUMERATE as std::ffi::c_uint;
     let obj = Object::new_plain(scope)?;
@@ -42,11 +42,7 @@ pub(crate) fn composite_reason<'r>(
     a: HandleValue<'_>,
     b: HandleValue<'_>,
 ) -> Result<HandleValue<'r>, ExnThrown> {
-    let attrs = js::class_spec::JSPROP_ENUMERATE as std::ffi::c_uint;
-    let arr = Array::new(scope, 2)?;
-    arr.define_element(scope, 0, a, attrs)?;
-    arr.define_element(scope, 1, b, attrs)?;
-    Ok(scope.root_value(arr.as_value()))
+    Ok(scope.root_value(Array::with_contents(scope, &[a, b])?.as_value()))
 }
 
 /// Unpack a two-value reaction payload.
@@ -59,20 +55,6 @@ pub(crate) fn pair_parts<'r>(
         arr.get_element(scope, 0).expect("element 0"),
         arr.get_element(scope, 1).expect("element 1"),
     )
-}
-
-/// Recover a rooted stream/reader/controller newtype `T` from a reaction payload
-/// value. Reaction payloads are wired internally by this crate, so the value is
-/// always a JS object of the expected class — a mismatch is a wiring bug, hence
-/// the panics.
-pub(crate) fn cast_payload<'r, T>(scope: &'r Scope<'_>, payload: HandleValue<'_>) -> T
-where
-    T: js::builtins::CastTarget<'r, Output = T>,
-{
-    Object::from_value(scope, *payload)
-        .expect("reaction payload is an object")
-        .cast::<T>()
-        .expect("reaction payload has the expected class")
 }
 
 /// <https://streams.spec.whatwg.org/#validate-and-normalize-high-water-mark>
@@ -116,10 +98,6 @@ pub(crate) fn extract_size_algorithm(
     // Step 2: Return an algorithm that performs the following steps, taking a _chunk_ argument:
     //         Return the result of `invoking` _strategy_["``size``"] with argument list « _chunk_
     //         ».
-    // `size` is a `QueuingStrategySize` callback type: held as an `Object`, so its callability —
-    // checked by the WebIDL conversion of callback function types — is enforced here. Both branches
-    // return a callable value; the controllers store and invoke it uniformly, so `[[strategySizeAlgorithm]]`
-    // is never undefined while the stream is in use.
     match strategy.as_ref().and_then(|s| s.size.as_ref()) {
         Some(size_fn) if size_fn.is_callable() => Ok(size_fn.as_value()),
         Some(_) => Err(js::error::throw_type_error(

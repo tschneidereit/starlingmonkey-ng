@@ -195,11 +195,6 @@ impl RuntimeConfig {
         Ok(())
     }
 
-    /// The effective content script source — either from --eval or from the file path.
-    pub fn content_script(&self) -> Option<&str> {
-        self.eval_script.as_deref()
-    }
-
     /// The base directory for resolving module imports.
     ///
     /// For `--eval` scripts this is the current working directory. Otherwise,

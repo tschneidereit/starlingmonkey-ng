@@ -6,7 +6,6 @@ use core_runtime::jsglobals;
 
 #[jsglobals]
 pub mod globals {
-    use crate::abort::AbortFetchState;
     use crate::request::{Request, RequestInfo, RequestInit};
     use crate::response::response_from_platform;
     use js::conversion::ToJSVal;
@@ -14,9 +13,8 @@ pub mod globals {
     use js::error::ExnThrown;
     use js::gc::handle::RootedHeap;
     use js::gc::scope::Scope;
-    use js::prelude::HandleValue;
     use js::promise::{PromiseFuture, PromiseOutcome};
-    use js::{Function, Object, Promise};
+    use js::Promise;
 
     /// <https://fetch.spec.whatwg.org/#dom-global-fetch>
     ///

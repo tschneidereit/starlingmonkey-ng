@@ -20,7 +20,7 @@
 use crate::class::{get_or_init_shared_function, get_prototype_for};
 use crate::conversion::{FromJSVal, ToJSVal};
 use crate::error::ExnThrown;
-use crate::function::EmptyArgs;
+use crate::function::{cast_payload, EmptyArgs};
 use crate::gc::handle::Heap;
 use crate::gc::scope::Scope;
 use crate::macros::{jsclass, jsmethods};
@@ -110,8 +110,7 @@ impl AsyncIteratorRecord<'_> {
                 self.data_mut().sync_next = Some(Heap::from(sync_next));
                 // `CreateAsyncFromSyncIterator`: the next method becomes a native
                 // function that calls the sync `next` and awaits the yielded value.
-                let record_v = scope.root_value(self.as_value());
-                let afs = Function::new_callback(scope, c"", 1, afs_next, record_v)?;
+                let afs = Function::new_callback(scope, c"", 1, afs_next, self)?;
                 self.data_mut().next_method.set(*afs);
             }
         }
@@ -168,9 +167,7 @@ impl<'s> AsyncIteratorRecord<'s> {
         let cb = get_or_init_shared_function(
             scope,
             return_result_check as *const () as usize,
-            |scope| {
-                Function::new_callback(scope, c"", 1, return_result_check, HandleValue::undefined())
-            },
+            |scope| Function::new_callback(scope, c"", 1, return_result_check, ()),
         )?;
         return_promise.then(scope, Some(*cb), None)
     }
@@ -249,7 +246,7 @@ fn afs_next(
 }
 
 fn afs_next_sync<'s>(scope: &'s Scope<'_>, payload: HandleValue) -> Result<Promise<'s>, ExnThrown> {
-    let record = AsyncIteratorRecord::from_jsval(scope, payload, ()).unwrap();
+    let record = cast_payload::<AsyncIteratorRecord>(scope, payload);
     let sync_iter = record.data().iterator.get(scope);
     let sync_next = record
         .data()
@@ -294,29 +291,13 @@ fn afs_next_sync<'s>(scope: &'s Scope<'_>, payload: HandleValue) -> Result<Promi
         get_or_init_shared_function(
             scope,
             afs_value_fulfilled_done as *const () as usize,
-            |scope| {
-                Function::new_callback(
-                    scope,
-                    c"",
-                    1,
-                    afs_value_fulfilled_done,
-                    HandleValue::undefined(),
-                )
-            },
+            |scope| Function::new_callback(scope, c"", 1, afs_value_fulfilled_done, ()),
         )?
     } else {
         get_or_init_shared_function(
             scope,
             afs_value_fulfilled_not_done as *const () as usize,
-            |scope| {
-                Function::new_callback(
-                    scope,
-                    c"",
-                    1,
-                    afs_value_fulfilled_not_done,
-                    HandleValue::undefined(),
-                )
-            },
+            |scope| Function::new_callback(scope, c"", 1, afs_value_fulfilled_not_done, ()),
         )?
     };
 
@@ -352,7 +333,7 @@ fn afs_value_rejected(
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let record = AsyncIteratorRecord::from_jsval(scope, payload, ()).unwrap();
+    let record = cast_payload::<AsyncIteratorRecord>(scope, payload);
     let error = args.get(0);
     let sync_iter = record.data().iterator.get(scope);
     // `IteratorClose`: call the iterator's `return` (a missing `return` is a no-op).
@@ -380,7 +361,7 @@ fn afs_wrap_parked(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let record = AsyncIteratorRecord::from_jsval(scope, payload, ()).unwrap();
+    let record = cast_payload::<AsyncIteratorRecord>(scope, payload);
     // Take the parked value: root it, then clear the slot so it is not kept
     // alive past this iteration.
     let value = record.data().pending_value.get(scope);
@@ -432,6 +413,97 @@ pub fn create_iter_result<'r>(
     let done_id = crate::class::get_or_init_property_id(scope, c"done")?;
     obj.define_value_by_id(scope, done_id, done, attrs)?;
     Ok(obj)
+}
+
+/// A WebIDL default iterator object's kind.
+///
+/// <https://webidl.spec.whatwg.org/#default-iterator-object-kind>
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IterationKind {
+    /// "`key`"
+    Key,
+    /// "`value`"
+    Value,
+    /// "`key+value`"
+    #[default]
+    KeyValue,
+}
+
+/// <https://webidl.spec.whatwg.org/#iterator-result>
+/// The iterator result for a value pair (`key`, `value`) and a kind `kind`.
+pub fn pair_iterator_result<'r>(
+    scope: &'r Scope<'_>,
+    key: impl ToJSVal<'r>,
+    value: impl ToJSVal<'r>,
+    kind: IterationKind,
+) -> Result<Object<'r>, ExnThrown> {
+    // Step 1: Let _result_ be a value determined by the value of _kind_:
+    let result = match kind {
+        // "`key`":
+        // Let _idlKey_ be _pair_'s `key`.
+        // Let _key_ be the result of `converting` _idlKey_ to a JavaScript value.
+        // _result_ is _key_.
+        IterationKind::Key => key.to_jsval_throwing(scope)?,
+        // "`value`":
+        // Let _idlValue_ be _pair_'s `value`.
+        // Let _value_ be the result of `converting` _idlValue_ to a JavaScript value.
+        // _result_ is _value_.
+        IterationKind::Value => value.to_jsval_throwing(scope)?,
+        // "`key+value`":
+        // Let _idlKey_ be _pair_'s `key`.
+        // Let _idlValue_ be _pair_'s `value`.
+        // Let _key_ be the result of `converting` _idlKey_ to a JavaScript value.
+        // Let _value_ be the result of `converting` _idlValue_ to a JavaScript value.
+        // Let _array_ be ! ArrayCreate(2).
+        // Perform ! CreateDataPropertyOrThrow(_array_, "`0`", _key_).
+        // Perform ! CreateDataPropertyOrThrow(_array_, "`1`", _value_).
+        // _result_ is _array_.
+        IterationKind::KeyValue => {
+            let key = key.to_jsval_throwing(scope)?;
+            let value = value.to_jsval_throwing(scope)?;
+            crate::Array::with_contents(scope, &[key, value])?.to_jsval_throwing(scope)?
+        }
+    };
+    // Step 2: Return CreateIteratorResultObject(_result_, false).
+    create_iter_result(scope, result, false)
+}
+
+/// <https://webidl.spec.whatwg.org/#js-iterable>
+/// The `forEach` method steps of an interface with a pair iterator, from the step that converts
+/// `callback` onwards. `target` is the `this` value, already checked to implement the interface.
+///
+/// `pair_at(i)` returns the `i`th entry of `target`'s current list of value pairs to iterate over,
+/// converted to JS values, or `None` if the list has fewer entries. It is called again after every
+/// callback invocation, since the callback can change the list.
+pub fn for_each_pair<'r>(
+    scope: &'r Scope<'_>,
+    target: impl ToJSVal<'r>,
+    callback: crate::Callable<'_>,
+    this_arg: HandleValue<'_>,
+    mut pair_at: impl FnMut(usize) -> Result<Option<(HandleValue<'r>, HandleValue<'r>)>, ExnThrown>,
+) -> Result<(), ExnThrown> {
+    // Step 4: Let _idlCallback_ be _callback_, `converted` to a ``Function``.
+    //         (Done by the caller's argument conversion.)
+    // Step 5: Let _idlObject_ be the IDL `interface type` value that represents a reference to
+    //         _jsValue_.
+    let idl_object = target.to_jsval_throwing(scope)?;
+    // Step 6: Let _pairs_ be _idlObject_'s list of `value pairs to iterate over`.
+    //         (`pair_at` reads the current list.)
+    // Step 7: Let _i_ be 0.
+    let mut i = 0;
+    // Step 8: While _i_ < _pairs_'s `size`:
+    // Step 8.1: Let _pair_ be _pairs_[_i_].
+    while let Some((key, value)) = pair_at(i)? {
+        // Step 8.2: `Invoke` _idlCallback_ with « _pair_'s `value`, _pair_'s `key`, _idlObject_ »
+        //           and with _thisArg_ as the `callback this value`.
+        Function::call(scope, this_arg, callback, &[value, key, idl_object])?;
+        // Step 8.3: Set _pairs_ to _idlObject_'s current list of `value pairs to iterate over`.
+        //           (It might have changed.)
+        //           (The next `pair_at` call reads the current list.)
+        // Step 8.4: Set _i_ to _i_ + 1.
+        i += 1;
+    }
+    Ok(())
 }
 
 /// The iterator-result Object requirement shared by every result consumer: a
