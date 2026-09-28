@@ -572,7 +572,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1613,7 +1613,7 @@ dependencies = [
 [[package]]
 name = "mozjs"
 version = "0.26.1"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "bindgen",
  "cc",
@@ -1627,7 +1627,7 @@ dependencies = [
 [[package]]
 name = "mozjs_collator_glue"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "arraystring",
  "arrayvec",
@@ -1643,7 +1643,7 @@ dependencies = [
 [[package]]
 name = "mozjs_icu_collator"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
@@ -1662,7 +1662,7 @@ dependencies = [
 [[package]]
 name = "mozjs_icu_collections"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "displaydoc",
  "icu_casemap",
@@ -1676,7 +1676,7 @@ dependencies = [
 [[package]]
 name = "mozjs_icu_normalizer"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "displaydoc",
  "icu_properties",
@@ -1692,16 +1692,18 @@ dependencies = [
 [[package]]
 name = "mozjs_icu_provider_glue"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
+ "icu_locale",
  "icu_provider",
+ "icu_provider_adapters",
  "icu_provider_blob",
 ]
 
 [[package]]
 name = "mozjs_locale_glue"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "cbindgen",
  "icu_locale",
@@ -1711,7 +1713,7 @@ dependencies = [
 [[package]]
 name = "mozjs_normalizer_glue"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "cbindgen",
  "encoding_rs",
@@ -1724,7 +1726,7 @@ dependencies = [
 [[package]]
 name = "mozjs_properties_glue"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "cbindgen",
  "icu_casemap",
@@ -1736,7 +1738,7 @@ dependencies = [
 [[package]]
 name = "mozjs_sys"
 version = "153.0.0-2"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "bindgen",
  "cc",
@@ -1759,7 +1761,7 @@ dependencies = [
 [[package]]
 name = "mozjs_unicode_bidi_ffi"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "cbindgen",
  "icu_properties",
@@ -1771,7 +1773,7 @@ dependencies = [
 [[package]]
 name = "mozjs_utf16_iter"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "mozjs_icu_collections",
 ]
@@ -1779,7 +1781,7 @@ dependencies = [
 [[package]]
 name = "mozjs_utf8_iter"
 version = "153.0.0"
-source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#9ebf0195f42b3fb80586784fa8ee56bab9e7a23a"
+source = "git+https://github.com/tschneidereit/mozjs.git?branch=main#65f8c50cdac8bf14339e88ca0ea1123c9eec6069"
 dependencies = [
  "mozjs_icu_collections",
 ]
@@ -2058,7 +2060,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2237,7 +2239,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2294,7 +2296,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2632,7 +2634,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3126,7 +3128,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

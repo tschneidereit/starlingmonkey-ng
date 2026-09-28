@@ -20,19 +20,16 @@
 /// not be called more than once".
 #[unsafe(no_mangle)]
 pub extern "C" fn __wrap___wasm_call_ctors() {
-    static mut RAN: bool = false;
-    // SAFETY: wasm32 is single-threaded, and the constructors this guards run
-    // before any code that could call it reentrantly.
-    unsafe {
-        if RAN {
-            return;
-        }
-        RAN = true;
-        unsafe extern "C" {
-            fn __real___wasm_call_ctors();
-        }
-        __real___wasm_call_ctors();
+    static RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RAN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
     }
+    unsafe extern "C" {
+        fn __real___wasm_call_ctors();
+    }
+    // SAFETY: `__real___wasm_call_ctors` is the linker's constructor entry point, which takes no
+    // arguments. The guard above runs it at most once.
+    unsafe { __real___wasm_call_ctors() };
 }
 
 /// The wasm component exports both `wasi:cli/run` and `wasi:http/handler`, so one build serves

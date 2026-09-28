@@ -113,6 +113,13 @@ fn main() {
             .flag("-mthread-model")
             .flag("single")
             .flag("-m32");
+
+        // `cc` does not pass the target features rustc is given on to clang, so the C++ code is
+        // compiled with the wasm features enabled for the Rust code here.
+        let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        if features.split(',').any(|enabled| enabled == "simd128") {
+            build.flag("-msimd128");
+        }
     }
 
     // Single unity file instead of individual sources.
