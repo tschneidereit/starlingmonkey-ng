@@ -3084,6 +3084,7 @@ dependencies = [
  "core-runtime",
  "js",
  "libstarling",
+ "smallvec",
  "web-globals",
 ]
 

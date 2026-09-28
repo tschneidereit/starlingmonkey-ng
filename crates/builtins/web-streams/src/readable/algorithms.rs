@@ -10,27 +10,32 @@ use js::function::cast_payload;
 use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
-use js::native::{Handle, Value};
-use js::prelude::{CallbackArgs, HandleObject, HandleValue};
+use js::native::Value;
+use js::prelude::{CallbackArgs, HandleObject, HandleValue, ToJSVal};
 use js::{value, Function, Object, Promise};
 use web_globals::signals::{AbortSignal, AbortSignalImpl};
 
 use super::byob_reader::BYOBReader;
 use super::byob_request::ReadableStreamBYOBRequest;
 use super::byte_stream_controller::{
-    ByteQueueEntry, PullIntoDescriptor, ReadableByteStreamController, ReaderType,
+    ByteQueueEntry, PullIntoDescriptor, ReadableByteStreamController,
+    ReadableByteStreamControllerImpl, ReaderType,
 };
-use super::default_controller::ReadableStreamDefaultController;
+use super::default_controller::{
+    ReadableStreamDefaultController, ReadableStreamDefaultControllerImpl,
+};
 use super::default_reader::DefaultReader;
 use super::read_request::{ReadIntoRequest, ReadRequest};
 use super::readable_stream::{ReadableStream, ReadableStreamImpl, ReadableStreamState};
 use super::underlying_source::UnderlyingSource;
+use super::unions::{HeapReadableStreamController, HeapReadableStreamReader, ReadableStreamReader};
 use crate::algorithms::{
     composite_reason, dequeue_value, enqueue_value_with_size, is_non_negative_number,
     make_type_error, pair_parts, pair_payload, reset_queue, resolved_undefined_promise,
 };
 use crate::readable::default_reader::DefaultReaderImpl;
 use crate::support;
+use crate::support::{Algorithm, AlgorithmArg};
 use crate::writable::algorithms::{
     acquire_writable_stream_default_writer, is_writable_stream_locked, writable_stream_abort,
     writable_stream_close_queued_or_in_flight,
@@ -44,9 +49,17 @@ use crate::writable::writable_stream::{WritableStream, WritableStreamImpl, Writa
 use web_globals::events::algorithms::ScriptStackState;
 
 // ---------------------------------------------------------------------------
-// Private accessors bridging the polymorphic `[[controller]]`/`[[reader]]`
-// object slots to the concrete default-stream newtypes.
+// Private accessors for the stream's `[[reader]]` slot.
 // ---------------------------------------------------------------------------
+
+/// The stream's `[[reader]]`, or `None` if the stream is unlocked.
+fn stream_reader<'r>(
+    scope: &'r Scope<'_>,
+    stream: &ReadableStream<'_>,
+) -> Option<ReadableStreamReader<'r>> {
+    let reader = stream.data().reader.as_ref()?.get(scope);
+    Some(reader)
+}
 
 /// The stream's `[[reader]]` as a default reader, or `None` if unlocked or
 /// locked to a BYOB reader.
@@ -54,8 +67,10 @@ fn stream_default_reader<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
 ) -> Option<DefaultReader<'r>> {
-    let obj: Object<'r> = stream.data().reader.get(scope)?;
-    obj.cast::<DefaultReader>().ok()
+    match stream_reader(scope, stream)? {
+        ReadableStreamReader::Default(reader) => Some(reader),
+        ReadableStreamReader::Byob(_) => None,
+    }
 }
 
 /// The stream's `[[reader]]` as a BYOB reader, or `None` if unlocked or locked
@@ -64,8 +79,10 @@ fn stream_byob_reader<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
 ) -> Option<BYOBReader<'r>> {
-    let obj: Object<'r> = stream.data().reader.get(scope)?;
-    obj.cast::<BYOBReader>().ok()
+    match stream_reader(scope, stream)? {
+        ReadableStreamReader::Byob(reader) => Some(reader),
+        ReadableStreamReader::Default(_) => None,
+    }
 }
 
 /// The `[[closedPromise]]` of the stream's reader, whichever reader type it is
@@ -74,20 +91,9 @@ fn stream_reader_closed_promise<'r>(
     scope: &'r Scope<'_>,
     stream: &ReadableStream<'_>,
 ) -> Promise<'r> {
-    let reader = stream.reader(scope).expect("a locked stream has a reader");
-    reader_closed_promise_for(scope, &reader)
-}
-
-/// The `[[closedPromise]]` of a specific reader object (default or BYOB).
-fn reader_closed_promise_for<'r>(scope: &'r Scope<'_>, reader_obj: &Object<'_>) -> Promise<'r> {
-    if let Ok(reader) = reader_obj.cast::<DefaultReader>() {
-        reader.generic_closed_promise(scope)
-    } else {
-        reader_obj
-            .cast::<BYOBReader>()
-            .expect("a default or BYOB reader")
-            .generic_closed_promise(scope)
-    }
+    stream_reader(scope, stream)
+        .expect("a locked stream has a reader")
+        .generic_closed_promise(scope)
 }
 
 /// The `ReadableStreamGenericReader` mixin (WHATWG Streams §4.8), shared by the
@@ -105,8 +111,8 @@ pub(crate) trait GenericReader {
     fn generic_closed_promise<'r>(&self, scope: &'r Scope<'_>) -> Promise<'r>;
     /// Set `[[closedPromise]]`.
     fn set_generic_closed_promise(&self, promise: Promise<'_>);
-    /// The reader's own JS value (for wiring `stream.[[reader]]`).
-    fn as_reader_value(&self) -> Value;
+    /// The reader as a `ReadableStreamReader` union value.
+    fn as_generic(&self) -> ReadableStreamReader<'_>;
 }
 
 impl GenericReader for DefaultReader<'_> {
@@ -114,7 +120,7 @@ impl GenericReader for DefaultReader<'_> {
         self.data().stream.get(scope)
     }
     fn set_generic_stream(&self, stream: &ReadableStream<'_>) {
-        self.data_mut().stream = Some(Heap::from(*stream));
+        self.data_mut().stream.set(*stream);
     }
     fn clear_generic_stream(&self) {
         self.data_mut().stream = None;
@@ -125,8 +131,8 @@ impl GenericReader for DefaultReader<'_> {
     fn set_generic_closed_promise(&self, promise: Promise<'_>) {
         self.data_mut().closed_promise.set(promise);
     }
-    fn as_reader_value(&self) -> Value {
-        self.as_value()
+    fn as_generic(&self) -> ReadableStreamReader<'_> {
+        ReadableStreamReader::Default(*self)
     }
 }
 
@@ -135,7 +141,7 @@ impl GenericReader for BYOBReader<'_> {
         self.data().stream.get(scope)
     }
     fn set_generic_stream(&self, stream: &ReadableStream<'_>) {
-        self.data_mut().stream = Some(Heap::from(*stream));
+        self.data_mut().stream.set(*stream);
     }
     fn clear_generic_stream(&self) {
         self.data_mut().stream = None;
@@ -146,8 +152,8 @@ impl GenericReader for BYOBReader<'_> {
     fn set_generic_closed_promise(&self, promise: Promise<'_>) {
         self.data_mut().closed_promise.set(promise);
     }
-    fn as_reader_value(&self) -> Value {
-        self.as_value()
+    fn as_generic(&self) -> ReadableStreamReader<'_> {
+        ReadableStreamReader::Byob(*self)
     }
 }
 
@@ -181,8 +187,7 @@ fn error_controller_with_pending(
         scope,
         value,
         js::native::ExceptionStackBehavior::DoNotCapture,
-    );
-    ExnThrown
+    )
 }
 
 /// A native fulfillment reaction that ignores its argument and returns
@@ -384,7 +389,7 @@ fn tee_cancel(
         let stream = state.data().stream.get(scope);
         let cancel_result = readable_stream_cancel(scope, &stream, composite);
         cancel_promise
-            .resolve(scope, scope.root_value(cancel_result.as_value()))
+            .resolve(scope, cancel_result)
             .expect("resolve cancel");
     }
     // Return _cancelPromise_.
@@ -419,22 +424,10 @@ fn tee_closed_rejected(
 ) -> Result<Value, ExnThrown> {
     let state = cast_payload::<TeeState>(scope, payload);
     let r = args.get(0);
-    let branch1 = state.data().branch1.get(scope);
-    let branch2 = state.data().branch2.get(scope);
-    readable_stream_default_controller_error(
-        scope,
-        &branch1
-            .default_controller(scope)
-            .expect("branch1 controller"),
-        r,
-    );
-    readable_stream_default_controller_error(
-        scope,
-        &branch2
-            .default_controller(scope)
-            .expect("branch2 controller"),
-        r,
-    );
+    let branch1_controller = state.data().branch1_controller.get(scope);
+    let branch2_controller = state.data().branch2_controller.get(scope);
+    readable_stream_default_controller_error(scope, &branch1_controller, r);
+    readable_stream_default_controller_error(scope, &branch2_controller, r);
     if !state.data().canceled1 || !state.data().canceled2 {
         state
             .data()
@@ -481,24 +474,12 @@ fn tee_chunk_microtask(
                 let clone_err = take_pending_or_undefined(scope);
                 // Perform ! `ReadableStreamDefaultControllerError`(branch1.`[[controller]]`,
                 //          _cloneResult_.`[[Value]]`).
-                let branch1 = state.data().branch1.get(scope);
-                readable_stream_default_controller_error(
-                    scope,
-                    &branch1
-                        .default_controller(scope)
-                        .expect("branch1 controller"),
-                    clone_err,
-                );
+                let branch1_controller = state.data().branch1_controller.get(scope);
+                readable_stream_default_controller_error(scope, &branch1_controller, clone_err);
                 // Perform ! `ReadableStreamDefaultControllerError`(branch2.`[[controller]]`,
                 //          _cloneResult_.`[[Value]]`).
-                let branch2 = state.data().branch2.get(scope);
-                readable_stream_default_controller_error(
-                    scope,
-                    &branch2
-                        .default_controller(scope)
-                        .expect("branch2 controller"),
-                    clone_err,
-                );
+                let branch2_controller = state.data().branch2_controller.get(scope);
+                readable_stream_default_controller_error(scope, &branch2_controller, clone_err);
                 // `Resolve` _cancelPromise_ with ! `ReadableStreamCancel`(_stream_,
                 //          _cloneResult_.`[[Value]]`).
                 let stream = state.data().stream.get(scope);
@@ -516,27 +497,15 @@ fn tee_chunk_microtask(
     }
     // If _canceled1_ is false, perform ! `ReadableStreamDefaultControllerEnqueue`(branch1, chunk1).
     if !state.data().canceled1 {
-        let branch1 = state.data().branch1.get(scope);
-        readable_stream_default_controller_enqueue(
-            scope,
-            &branch1
-                .default_controller(scope)
-                .expect("branch1 controller"),
-            chunk,
-        )
-        .expect(TEE_ENQUEUE_INFALLIBLE);
+        let branch1_controller = state.data().branch1_controller.get(scope);
+        readable_stream_default_controller_enqueue(scope, &branch1_controller, chunk)
+            .expect(TEE_ENQUEUE_INFALLIBLE);
     }
     // If _canceled2_ is false, perform ! `ReadableStreamDefaultControllerEnqueue`(branch2, chunk2).
     if !state.data().canceled2 {
-        let branch2 = state.data().branch2.get(scope);
-        readable_stream_default_controller_enqueue(
-            scope,
-            &branch2
-                .default_controller(scope)
-                .expect("branch2 controller"),
-            chunk2,
-        )
-        .expect(TEE_ENQUEUE_INFALLIBLE);
+        let branch2_controller = state.data().branch2_controller.get(scope);
+        readable_stream_default_controller_enqueue(scope, &branch2_controller, chunk2)
+            .expect(TEE_ENQUEUE_INFALLIBLE);
     }
     // Set _reading_ to false. If _readAgain_ is true, perform _pullAlgorithm_.
     state.data_mut().reading = false;
@@ -568,23 +537,13 @@ pub(crate) fn tee_read_request_close_steps(
     state.data_mut().reading = false;
     // If _canceled1_ is false, close branch1.
     if !state.data().canceled1 {
-        let branch1 = state.data().branch1.get(scope);
-        readable_stream_default_controller_close(
-            scope,
-            &branch1
-                .default_controller(scope)
-                .expect("branch1 controller"),
-        );
+        let branch1_controller = state.data().branch1_controller.get(scope);
+        readable_stream_default_controller_close(scope, &branch1_controller);
     }
     // If _canceled2_ is false, close branch2.
     if !state.data().canceled2 {
-        let branch2 = state.data().branch2.get(scope);
-        readable_stream_default_controller_close(
-            scope,
-            &branch2
-                .default_controller(scope)
-                .expect("branch2 controller"),
-        );
+        let branch2_controller = state.data().branch2_controller.get(scope);
+        readable_stream_default_controller_close(scope, &branch2_controller);
     }
     // If _canceled1_ is false or _canceled2_ is false, resolve _cancelPromise_ with undefined.
     if !state.data().canceled1 || !state.data().canceled2 {
@@ -656,8 +615,7 @@ pub(crate) fn pull_steps(
             .take()
             .unwrap()
             .root(scope)
-            .chunk_steps(scope, chunk)
-            .expect("read request chunk steps");
+            .chunk_steps(scope, chunk);
     } else {
         // Step 3: Otherwise, Perform ! `ReadableStreamAddReadRequest`(_stream_, _readRequest_).
         //         Perform ! `DefaultControllerCallPullIfNeeded`(`this`).
@@ -739,8 +697,7 @@ pub(crate) fn byte_pull_steps(
                     .take()
                     .unwrap()
                     .root(scope)
-                    .error_steps(scope, error)
-                    .expect("read request error steps");
+                    .error_steps(scope, error);
                 return;
             }
         };
@@ -748,7 +705,7 @@ pub(crate) fn byte_pull_steps(
             .data_mut()
             .pending_pull_intos
             .push_back(PullIntoDescriptor {
-                buffer: Heap::from(*buffer),
+                buffer: Heap::from(buffer),
                 buffer_byte_length: size,
                 byte_offset: 0,
                 byte_length: size,
@@ -814,11 +771,11 @@ pub(crate) fn acquire_readable_stream_default_reader<'r>(
 /// CreateReadableStream(startAlgorithm, pullAlgorithm, cancelAlgorithm[, highWaterMark, [, sizeAlgorithm]]) performs the following steps:
 pub(crate) fn create_readable_stream<'r>(
     scope: &'r Scope<'_>,
-    start_algorithm: HandleValue<'_>,
-    pull_algorithm: HandleValue<'_>,
-    cancel_algorithm: HandleValue<'_>,
+    start_algorithm: AlgorithmArg<'r>,
+    pull_algorithm: AlgorithmArg<'r>,
+    cancel_algorithm: AlgorithmArg<'r>,
     high_water_mark: f64,
-    size_algorithm: HandleValue<'_>,
+    size_algorithm: impl ToJSVal<'r>,
 ) -> Result<ReadableStream<'r>, ExnThrown> {
     // Step 1: If _highWaterMark_ was not passed, set it to 1. (Passed by the caller.)
     // Step 2: If _sizeAlgorithm_ was not passed, set it to an algorithm that returns 1. (Passed.)
@@ -831,7 +788,7 @@ pub(crate) fn create_readable_stream<'r>(
     // Step 5: Perform ! `InitializeReadableStream`(_stream_).
     initialize_readable_stream(&stream);
     // Step 6: Let _controller_ be a `new` ``ReadableStreamDefaultController``.
-    let controller = ReadableStreamDefaultController::new(scope)?;
+    let controller = ReadableStreamDefaultController::new(scope, stream)?;
     // Step 7: Perform ? `SetUpDefaultController`(_stream_, _controller_,
     //         _startAlgorithm_, _pullAlgorithm_, _cancelAlgorithm_, _highWaterMark_,
     //         _sizeAlgorithm_).
@@ -846,7 +803,7 @@ pub(crate) fn create_readable_stream<'r>(
         cancel_algorithm,
         receiver,
         high_water_mark,
-        size_algorithm,
+        size_algorithm.to_jsval_throwing(scope)?,
     )?;
     // Step 8: Return _stream_.
     Ok(stream)
@@ -856,9 +813,9 @@ pub(crate) fn create_readable_stream<'r>(
 /// CreateReadableByteStream(startAlgorithm, pullAlgorithm, cancelAlgorithm) performs the following steps:
 pub(crate) fn create_readable_byte_stream<'r>(
     scope: &'r Scope<'_>,
-    start_algorithm: HandleValue<'_>,
-    pull_algorithm: HandleValue<'_>,
-    cancel_algorithm: HandleValue<'_>,
+    start_algorithm: AlgorithmArg<'r>,
+    pull_algorithm: AlgorithmArg<'r>,
+    cancel_algorithm: AlgorithmArg<'r>,
 ) -> Result<ReadableStream<'r>, ExnThrown> {
     // Step 1: Let _stream_ be a `new` ``ReadableStream``.
     let stream = js::class::create_instance_with::<ReadableStreamImpl>(scope, |_| {
@@ -867,7 +824,7 @@ pub(crate) fn create_readable_byte_stream<'r>(
     // Step 2: Perform ! `InitializeReadableStream`(_stream_).
     initialize_readable_stream(&stream);
     // Step 3: Let _controller_ be a `new` ``ReadableByteStreamController``.
-    let controller = ReadableByteStreamController::new(scope)?;
+    let controller = ReadableByteStreamController::new(scope, stream)?;
     // Step 4: Perform ? `SetUpByteStreamController`(_stream_, _controller_,
     //         _startAlgorithm_, _pullAlgorithm_, _cancelAlgorithm_, 0, undefined).
     //         The algorithms are native (no JS receiver), so `algorithm_receiver` is undefined.
@@ -943,13 +900,13 @@ pub(crate) fn readable_stream_from_iterable<'r>(
     //         (Step 3's start algorithm is the default undefined; steps 4 and 5's pull/cancel
     //         algorithms are the native `from_pull_native` / `from_cancel_native`, carrying the
     //         iterator state as their payload.)
-    let pull = Function::new_callback(scope, c"", 1, from_pull_native, state)?;
-    let cancel = Function::new_callback(scope, c"", 1, from_cancel_native, state)?;
+    let pull = AlgorithmArg::native(scope, from_pull_native, state)?;
+    let cancel = AlgorithmArg::native(scope, from_cancel_native, state)?;
     let stream = create_readable_stream(
         scope,
-        HandleValue::undefined(),
-        scope.root_value(pull.as_value()),
-        scope.root_value(cancel.as_value()),
+        AlgorithmArg::None,
+        pull,
+        cancel,
         0.0,
         HandleValue::undefined(),
     )?;
@@ -994,29 +951,24 @@ fn from_pull_native(
     let next_result = match record.call_next(scope) {
         Ok(r) => r,
         Err(_) => {
-            return Ok(Promise::new_rejected_with_pending_error(scope)
-                .map_err(|_| ExnThrown)?
-                .as_value());
+            return Ok(Promise::new_rejected_with_pending_error(scope)?.as_value());
         }
     };
     // Let _nextPromise_ be a promise resolved with _nextResult_.
-    let next_promise = Promise::call_original_resolve(scope, next_result).map_err(|_| ExnThrown)?;
+    let next_promise = Promise::call_original_resolve(scope, next_result)?;
     // React to _nextPromise_ with the fulfillment steps (`from_pull_fulfilled`).
     // The callback's payload — the stream's controller — is the same for every
     // pull, so it is created once and reused for every subsequent iteration.
     if state.data().pull_fulfilled_fn.is_none() {
         let cb = Function::new_callback(scope, c"", 1, from_pull_fulfilled, controller)?;
-        state.data_mut().pull_fulfilled_fn = Some(Heap::from(cb));
+        state.data_mut().pull_fulfilled_fn.set(cb);
     }
     let cb = state
         .data()
         .pull_fulfilled_fn
         .get(scope)
         .expect("created above");
-    let p = next_promise
-        .then(scope, Some(*cb), None)
-        .map_err(|_| ExnThrown)?;
-    Ok(p.as_value())
+    Ok(next_promise.then(scope, Some(*cb), None)?.as_value())
 }
 
 /// The pull algorithm's fulfillment steps (payload = the controller, arg 0 = the
@@ -1089,7 +1041,8 @@ pub(crate) fn readable_stream_pipe_to<'r>(
     // Step 8: If _source_.`[[controller]]` `implements` ``ReadableByteStreamController``, let
     //         _reader_ be either ! `AcquireBYOBReader`(_source_) or !
     //         `AcquireDefaultReader`(_source_), at the user agent’s discretion.
-    // TODO: implement this, now that byte streams are implemented.
+    //         (We use the default reader for byte streams too: the pipe loop reads chunks and
+    //         never supplies a view.)
     // Step 9: Otherwise, let _reader_ be ! `AcquireDefaultReader`(_source_).
     let reader = acquire_readable_stream_default_reader(scope, source)?;
 
@@ -1109,7 +1062,8 @@ pub(crate) fn readable_stream_pipe_to<'r>(
     // one allows native sources to detect that a `pull` is triggered by a TransformStream,
     // and defer acting on it until there's actual demand.
     if let Some(host_source) = source.native_source(scope) {
-        if let Some(transform) = dest.data().identity_transform.get(scope) {
+        let transform = dest.data().identity_transform.get(scope);
+        if let Some(transform) = transform {
             // Only when this pipe will close the destination behind it. Handing the native source
             // on says "the whole of what comes out of this transform is that one body", and a sink
             // that takes it up bypasses the transform entirely — so anything written into the
@@ -1124,7 +1078,7 @@ pub(crate) fn readable_stream_pipe_to<'r>(
                     .get(scope)
                     .set_native_source(&host_source);
             }
-            source.data_mut().piped_to_identity_transform = Some(Heap::from(transform));
+            source.data_mut().piped_to_identity_transform.set(transform);
         }
     }
 
@@ -1148,7 +1102,7 @@ pub(crate) fn readable_stream_pipe_to<'r>(
     // Step 14.2: If _signal_ is `aborted`, perform _abortAlgorithm_ and return _promise_.
     if let Some(signal) = signal {
         if signal.aborted() {
-            return Ok(state.data_mut().promise.get(scope));
+            return Ok(state.data().promise.get(scope));
         }
     }
 
@@ -1235,10 +1189,10 @@ pub(crate) fn readable_stream_pipe_to<'r>(
 // every reaction receives the state object as its payload.
 // ---------------------------------------------------------------------------
 
-// The deferred shutdown action recorded in the pipe state's `action_kind` field.
-#[derive(Default)]
+/// The action a pipe shutdown performs once pending writes finish.
+#[derive(Clone, Copy)]
 enum PipeAction {
-    #[default]
+    /// `Shutdown` without an action.
     None,
     AbortDest,
     CancelSource,
@@ -1246,12 +1200,22 @@ enum PipeAction {
     AbortAlgorithm,
 }
 
-// `PipeAction` holds no GC pointers, so tracing it is a no-op. The `Traceable`
-// derive rejects enums, so `Trace` is implemented by hand here (`PipeState`'s
-// derive calls `action_kind.trace()`).
-unsafe impl js::heap::Trace for PipeAction {
-    #[inline]
-    unsafe fn trace(&self, _trc: *mut js::native::JSTracer) {}
+/// A pipe shutdown in progress: the spec's _shuttingDown_ is true exactly while
+/// the pipe state holds one.
+#[js::must_root]
+#[derive(core_runtime::Traceable)]
+struct PipeShutdown {
+    #[no_trace]
+    action: PipeAction,
+    /// The error passed to `action`. Unused for `PipeAction::None` and
+    /// `PipeAction::CloseWriter`.
+    action_error: Heap<Value>,
+    /// The error the pipe finalizes with, if any.
+    original_error: Option<Heap<Value>>,
+    /// Waiting for `pending_writes` to reach zero. The settle reaction that
+    /// drains the count proceeds with the shutdown.
+    #[no_trace]
+    waiting_for_writes: bool,
 }
 
 /// The pipe's shutdown actions never run on an empty stack: they are reached either from a promise
@@ -1366,7 +1330,7 @@ fn pipe_setup_propagation_and_start(
 /// has cleared), read a chunk and write it. Stops once `shuttingDown` is set.
 fn pipe_step(scope: &Scope<'_>, state: PipeState<'_>) {
     // Shutdown must stop activity: do not initiate further reads.
-    if state.data().shutting_down {
+    if state.data().shutdown.is_some() {
         return;
     }
 
@@ -1390,7 +1354,7 @@ fn pipe_ready_fulfilled(
     let state = cast_payload::<PipeState>(scope, payload);
     // Re-check before reading: shutdown may have begun (and released the reader)
     // while we waited for the writer.
-    if state.data().shutting_down {
+    if state.data().shutdown.is_some() {
         return Ok(value::undefined());
     }
 
@@ -1462,7 +1426,7 @@ fn pipe_deferred_write(
     // which happens only after this write runs, so the writer is still attached here.
     if writer_stream(scope, &writer).is_none() {
         // Nothing consults the count after finalize, but keep it exact.
-        debug_assert!(state.data_mut().pending_writes > 0);
+        debug_assert!(state.data().pending_writes > 0);
         state.data_mut().pending_writes -= 1;
         return Ok(value::undefined());
     }
@@ -1493,8 +1457,7 @@ fn pipe_write_settled(
     let state = cast_payload::<PipeState>(scope, payload);
     debug_assert!(state.data().pending_writes > 0);
     state.data_mut().pending_writes -= 1;
-    if state.data().pending_writes == 0 && state.data().shutdown_waiting {
-        state.data_mut().shutdown_waiting = false;
+    if state.data().pending_writes == 0 && pipe_stop_waiting_for_writes(state) {
         pipe_shutdown_do_proceed(scope, state);
     }
     Ok(value::undefined())
@@ -1571,47 +1534,64 @@ fn pipe_fwd_close_fulfilled(
 
 // --- Shutdown / finalize ----------------------------------------------------
 
-/// Begin a shutdown that, after pending writes finish, performs `action` (given
-/// by `kind` + `action_error`) and finalizes with `original_error` (if any).
+/// Begin a shutdown that, after pending writes finish, performs `action` with
+/// `action_error` and finalizes with `original_error` (if any).
 fn pipe_begin_shutdown_with_action(
     scope: &Scope<'_>,
     state: PipeState<'_>,
-    kind: PipeAction,
+    action: PipeAction,
     action_error: HandleValue<'_>,
     original_error: Option<HandleValue<'_>>,
 ) {
-    if state.data().shutting_down {
+    if state.data().shutdown.is_some() {
         return;
     }
-    state.data_mut().shutting_down = true;
-    state.data_mut().action_kind = kind;
-    state.data_mut().action_error.set(*action_error);
-    match original_error {
-        Some(e) => {
-            state.data_mut().has_original = true;
-            state.data_mut().original_error.set(*e);
-        }
-        None => state.data_mut().has_original = false,
-    }
+    state.data_mut().shutdown = Some(PipeShutdown {
+        action,
+        action_error: Heap::from(action_error.get()),
+        original_error: original_error.map(|e| Heap::from(e.get())),
+        waiting_for_writes: false,
+    });
     pipe_shutdown_wait_then_proceed(scope, state);
 }
 
 /// Begin a shutdown that, after pending writes finish, finalizes directly (with
 /// `error` if one was given).
 fn pipe_shutdown(scope: &Scope<'_>, state: PipeState<'_>, error: Option<HandleValue<'_>>) {
-    if state.data().shutting_down {
-        return;
+    let undefined = HandleValue::undefined();
+    pipe_begin_shutdown_with_action(scope, state, PipeAction::None, undefined, error);
+}
+
+/// The shutdown's action and the error passed to it. Panics if the pipe is not
+/// shutting down.
+fn pipe_action<'r>(scope: &'r Scope<'_>, state: PipeState<'_>) -> (PipeAction, HandleValue<'r>) {
+    let data = state.data();
+    let shutdown = data.shutdown.as_ref().expect("the pipe is shutting down");
+    (shutdown.action, shutdown.action_error.get(scope))
+}
+
+/// Set the shutdown's `waiting_for_writes` flag. Panics if the pipe is not
+/// shutting down.
+fn pipe_wait_for_writes(state: PipeState<'_>) {
+    let mut data = state.data_mut();
+    let shutdown = data.shutdown.as_mut().expect("the pipe is shutting down");
+    shutdown.waiting_for_writes = true;
+}
+
+/// Clear the shutdown's `waiting_for_writes` flag, returning whether it was set.
+fn pipe_stop_waiting_for_writes(state: PipeState<'_>) -> bool {
+    let mut data = state.data_mut();
+    match data.shutdown.as_mut() {
+        Some(shutdown) => std::mem::replace(&mut shutdown.waiting_for_writes, false),
+        None => false,
     }
-    state.data_mut().shutting_down = true;
-    // No action: `action_kind` stays `PipeAction::None` (its default).
-    match error {
-        Some(e) => {
-            state.data_mut().has_original = true;
-            state.data_mut().original_error.set(*e);
-        }
-        None => state.data_mut().has_original = false,
-    }
-    pipe_shutdown_wait_then_proceed(scope, state);
+}
+
+/// The error the shutdown finalizes with, if any.
+fn pipe_original_error<'r>(scope: &'r Scope<'_>, state: PipeState<'_>) -> Option<HandleValue<'r>> {
+    let data = state.data();
+    let shutdown = data.shutdown.as_ref().expect("the pipe is shutting down");
+    shutdown.original_error.as_ref().map(|e| e.get(scope))
 }
 
 /// If the destination can still accept writes, wait for the in-flight writes to
@@ -1630,14 +1610,12 @@ fn pipe_shutdown_wait_then_proceed(scope: &Scope<'_>, state: PipeState<'_>) {
         && !writable_stream_close_queued_or_in_flight(&dest)
     {
         if state.data().pending_writes > 0 {
-            state.data_mut().shutdown_waiting = true;
+            pipe_wait_for_writes(state);
         } else {
-            let Ok(cb) =
+            let result =
                 Function::new_callback(scope, c"", 0, pipe_shutdown_proceed_deferred, state)
-            else {
-                return;
-            };
-            let _ = js::jobs::queue_microtask(scope, &cb);
+                    .and_then(|cb| js::jobs::queue_microtask(scope, &cb));
+            support::report_failure(scope, result, "pipeTo");
         }
     } else {
         pipe_shutdown_do_proceed(scope, state);
@@ -1654,7 +1632,7 @@ fn pipe_shutdown_proceed_deferred(
 ) -> Result<Value, ExnThrown> {
     let state = cast_payload::<PipeState>(scope, payload);
     if state.data().pending_writes > 0 {
-        state.data_mut().shutdown_waiting = true;
+        pipe_wait_for_writes(state);
     } else {
         pipe_shutdown_do_proceed(scope, state);
     }
@@ -1663,56 +1641,57 @@ fn pipe_shutdown_proceed_deferred(
 
 /// Perform the recorded shutdown action (if any) and then finalize.
 fn pipe_shutdown_do_proceed(scope: &Scope<'_>, state: PipeState<'_>) {
-    if matches!(state.data().action_kind, PipeAction::None) {
-        let error = if state.data().has_original {
-            Some(state.data().original_error.get(scope))
-        } else {
-            None
-        };
+    if matches!(pipe_action(scope, state).0, PipeAction::None) {
+        let error = pipe_original_error(scope, state);
         pipe_finalize(scope, state, error);
         return;
     }
     let action_promise = pipe_run_action(scope, state);
-    let _ = support::react(
+    let result = support::react(
         scope,
         &action_promise,
         Some((pipe_action_fulfilled, state)),
         Some((pipe_action_rejected, state)),
     );
+    support::report_failure(scope, result, "pipeTo");
 }
 
 fn pipe_run_action<'r>(scope: &'r Scope<'_>, state: PipeState<'_>) -> Promise<'r> {
-    match state.data().action_kind {
+    // The actions run author code (abort listeners, sink `abort()`), which can re-enter the
+    // pipe's read request and borrow `state` mutably, so no borrow is held across them.
+    let (action, error) = pipe_action(scope, state);
+    match action {
         PipeAction::AbortDest => {
             let dest = pipe_dest(scope, state);
-            let e: Handle<'_, Value> = state.data().action_error.get(scope);
-            writable_stream_abort(scope, &dest, e, PIPE_SCRIPT_STACK_STATE)
+            writable_stream_abort(scope, &dest, error, PIPE_SCRIPT_STACK_STATE)
         }
         PipeAction::CancelSource => {
             let source = pipe_source(scope, state);
-            let e: Handle<'_, Value> = state.data().action_error.get(scope);
-            readable_stream_cancel(scope, &source, e)
+            readable_stream_cancel(scope, &source, error)
         }
         PipeAction::CloseWriter => {
             let writer = pipe_writer(scope, state);
             writable_stream_default_writer_close_with_error_propagation(scope, &writer)
         }
-        PipeAction::AbortAlgorithm => pipe_build_abort_actions_promise(scope, state),
+        PipeAction::AbortAlgorithm => pipe_build_abort_actions_promise(scope, state, error),
         PipeAction::None => unreachable!(),
     }
 }
 
 /// The abort algorithm's action: get a promise to wait for all of (conditionally)
 /// aborting the destination and cancelling the source, using the abort reason.
-fn pipe_build_abort_actions_promise<'r>(scope: &'r Scope<'_>, state: PipeState<'_>) -> Promise<'r> {
-    let error = state.data().action_error.get(scope);
+fn pipe_build_abort_actions_promise<'r>(
+    scope: &'r Scope<'_>,
+    state: PipeState<'_>,
+    error: HandleValue<'r>,
+) -> Promise<'r> {
     let mut promises: Vec<Promise<'r>> = Vec::new();
     if !state.data().prevent_abort {
         let dest = pipe_dest(scope, state);
         let p = if dest.data().state == WritableStreamState::Writable {
             writable_stream_abort(scope, &dest, error, PIPE_SCRIPT_STACK_STATE)
         } else {
-            resolved_undefined_promise(scope)
+            Promise::shared_resolved_undefined(scope).expect("shared resolved promise")
         };
         promises.push(p);
     }
@@ -1721,7 +1700,7 @@ fn pipe_build_abort_actions_promise<'r>(scope: &'r Scope<'_>, state: PipeState<'
         let p = if source.data().state == ReadableStreamState::Readable {
             readable_stream_cancel(scope, &source, error)
         } else {
-            resolved_undefined_promise(scope)
+            Promise::shared_resolved_undefined(scope).expect("shared resolved promise")
         };
         promises.push(p);
     }
@@ -1734,12 +1713,8 @@ fn pipe_action_fulfilled(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = PipeState::from_jsval(scope, payload, ()).unwrap();
-    let error = if state.data().has_original {
-        Some(state.data().original_error.get(scope))
-    } else {
-        None
-    };
+    let state = cast_payload::<PipeState>(scope, payload);
+    let error = pipe_original_error(scope, state);
     pipe_finalize(scope, state, error);
     Ok(value::undefined())
 }
@@ -1760,25 +1735,25 @@ fn pipe_finalize(scope: &Scope<'_>, state: PipeState<'_>, error: Option<HandleVa
     let writer = pipe_writer(scope, state);
     writable_stream_default_writer_release(scope, &writer);
     let reader = pipe_reader(scope, state);
-    let _ = readable_stream_default_reader_release(scope, &reader);
-    if let Some(signal) = state.data().signal.get(scope) {
+    let result = readable_stream_default_reader_release(scope, &reader);
+    support::report_failure(scope, result, "pipeTo");
+    let signal = state.data().signal.get(scope);
+    if let Some(signal) = signal {
         // Detach the abort algorithm registered in `PipeState::new`, so a later
         // abort of a still-live signal does not run it after the pipe has
         // finished. (Harmless if it did since shutdown is idempotent, but this avoids
         // keeping the finished pipe reachable from the signal.)
-        if let Some(abort_fn) = state.data().abort_algorithm.get(scope) {
+        let abort_fn = state.data().abort_algorithm.get(scope);
+        if let Some(abort_fn) = abort_fn {
             web_globals::signals::algorithms::remove_abort_algorithm(&signal, &abort_fn);
         }
     }
     let promise = pipe_promise(scope, state);
-    match error {
-        Some(e) => {
-            let _ = promise.reject(scope, e);
-        }
-        None => {
-            let _ = promise.resolve(scope, HandleValue::undefined());
-        }
-    }
+    let result = match error {
+        Some(e) => promise.reject(scope, e),
+        None => promise.resolve(scope, HandleValue::undefined()),
+    };
+    support::report_failure(scope, result, "pipeTo");
 }
 
 /// The abort algorithm registered on the pipe's signal: shut down with an action
@@ -1811,8 +1786,8 @@ pub(crate) struct TeeState {
     canceled2: bool,
     reason1: Heap<Value>,
     reason2: Heap<Value>,
-    branch1: Heap<ReadableStreamImpl>,
-    branch2: Heap<ReadableStreamImpl>,
+    branch1_controller: Heap<ReadableStreamDefaultControllerImpl>,
+    branch2_controller: Heap<ReadableStreamDefaultControllerImpl>,
     /// The chunk delivered by the current read, parked until the chunk-steps
     /// microtask consumes it.
     pending_chunk: Heap<Value>,
@@ -1832,7 +1807,6 @@ impl TeeState<'_> {
         clone_for_branch2: bool,
     ) -> Result<(), ExnThrown> {
         self.data_mut().clone_for_branch2 = clone_for_branch2;
-        let state_value = scope.root_value(self.as_value());
 
         // Step 4: Let _reading_ be false.
         // Step 5: Let _readAgain_ be false.
@@ -1856,42 +1830,33 @@ impl TeeState<'_> {
         self.data_mut().chunk_microtask_fn.set(microtask);
 
         // Step 13: Let _pullAlgorithm_ be the following steps: (steps implemented in `tee_pull_native` and its callees)
-        let pull = Function::new_callback(scope, c"", 0, tee_pull_native, state_value)?;
-        let pull = scope.root_value(pull.as_value());
+        let pull = AlgorithmArg::native(scope, tee_pull_native, *self)?;
 
         // Step 14: Let _cancel1Algorithm_ be the following steps: (steps implemented in `tee_cancel1_native` and its callees)
-        let cancel1 = Function::new_callback(scope, c"", 1, tee_cancel1_native, state_value)?;
+        let cancel1 = AlgorithmArg::native(scope, tee_cancel1_native, *self)?;
 
         // Step 15: Let _cancel2Algorithm_ be the following steps: (steps implemented in `tee_cancel2_native` and its callees)
-        let cancel2 = Function::new_callback(scope, c"", 1, tee_cancel2_native, state_value)?;
+        let cancel2 = AlgorithmArg::native(scope, tee_cancel2_native, *self)?;
 
         // Step 16: Let _startAlgorithm_ be an algorithm that returns undefined.
-        let start = HandleValue::undefined();
+        let start = AlgorithmArg::None;
         let hwm = HandleValue::undefined();
 
         // Step 17: Set _branch1_ to ! `CreateReadableStream`(_startAlgorithm_, _pullAlgorithm_,
         //          _cancel1Algorithm_).
-        let branch1 = create_readable_stream(
-            scope,
-            start,
-            pull,
-            scope.root_value(cancel1.as_value()),
-            1.0,
-            hwm,
-        )?;
-        self.data_mut().branch1.set(branch1);
+        let branch1 = create_readable_stream(scope, start, pull, cancel1, 1.0, hwm)?;
+        let controller = branch1
+            .default_controller(scope)
+            .expect("a default controller");
+        self.data_mut().branch1_controller.set(controller);
 
         // Step 18: Set _branch2_ to ! `CreateReadableStream`(_startAlgorithm_, _pullAlgorithm_,
         //          _cancel2Algorithm_).
-        let branch2 = create_readable_stream(
-            scope,
-            start,
-            pull,
-            scope.root_value(cancel2.as_value()),
-            1.0,
-            hwm,
-        )?;
-        self.data_mut().branch2.set(branch2);
+        let branch2 = create_readable_stream(scope, start, pull, cancel2, 1.0, hwm)?;
+        let controller = branch2
+            .default_controller(scope)
+            .expect("a default controller");
+        self.data_mut().branch2_controller.set(controller);
 
         Ok(())
     }
@@ -1906,15 +1871,8 @@ pub(crate) struct PipeState {
     prevent_close: bool,
     prevent_abort: bool,
     prevent_cancel: bool,
-    has_original: bool,
-    shutting_down: bool,
-    /// A shutdown has begun and is waiting for `pending_writes` to reach zero;
-    /// the settle reaction that drains the count proceeds with the shutdown.
-    shutdown_waiting: bool,
+    shutdown: Option<PipeShutdown>,
     signal: Option<Heap<AbortSignalImpl>>,
-    action_kind: PipeAction,
-    action_error: Heap<Value>,
-    original_error: Heap<Value>,
     /// The chunk read by the current loop turn, parked until the deferred write
     /// consumes it. Single-occupancy: the next read is only issued after
     /// `pipe_deferred_write` has taken the value out (see
@@ -2026,8 +1984,8 @@ pub(crate) fn readable_stream_default_tee<'r>(
         .add_reactions(scope, None, Some(*on_rejected))?;
 
     // Step 20: Return « _branch1_, _branch2_ ».
-    let branch1 = state.data().branch1.get(scope);
-    let branch2 = state.data().branch2.get(scope);
+    let branch1 = state.data().branch1_controller.get(scope).stream(scope);
+    let branch2 = state.data().branch2_controller.get(scope).stream(scope);
     Ok((branch1, branch2))
 }
 
@@ -2178,8 +2136,8 @@ pub(crate) fn readable_byte_stream_tee<'r>(
     // (Steps 3-24 implemented in `ByteTeeState::new` and the `byte_tee_*` helpers.)
     let state = ByteTeeState::new(scope, *stream)?;
     // Step 25: Return « _branch1_, _branch2_ ».
-    let branch1 = state.data().branch1.get(scope);
-    let branch2 = state.data().branch2.get(scope);
+    let branch1 = state.data().branch1_controller.get(scope).stream(scope);
+    let branch2 = state.data().branch2_controller.get(scope).stream(scope);
     Ok((branch1, branch2))
 }
 
@@ -2190,7 +2148,7 @@ pub(crate) fn readable_byte_stream_tee<'r>(
 #[jsclass(hidden)]
 pub(crate) struct ByteTeeState {
     stream: Heap<ReadableStreamImpl>,
-    reader: Heap<js::object::Object>,
+    reader: HeapReadableStreamReader,
     reading: bool,
     read_again_for_branch1: bool,
     read_again_for_branch2: bool,
@@ -2198,8 +2156,8 @@ pub(crate) struct ByteTeeState {
     canceled2: bool,
     reason1: Heap<Value>,
     reason2: Heap<Value>,
-    branch1: Heap<ReadableStreamImpl>,
-    branch2: Heap<ReadableStreamImpl>,
+    branch1_controller: Heap<ReadableByteStreamControllerImpl>,
+    branch2_controller: Heap<ReadableByteStreamControllerImpl>,
     cancel_promise: Heap<js::promise::Promise>,
     /// The chunk (and, for a BYOB read, its target branch) delivered by the
     /// current read, parked until the chunk-steps microtask consumes it.
@@ -2216,9 +2174,9 @@ impl ByteTeeState<'_> {
     fn new(&self, scope: &Scope<'_>, stream: ReadableStream<'_>) -> Result<(), ExnThrown> {
         self.data_mut().stream.set(stream);
         // Step 3: _reader_ = `AcquireDefaultReader`(_stream_).
-        let reader = acquire_readable_stream_default_reader(scope, &stream)?;
-        let reader_obj = Object::from_value(scope, reader.as_value()).map_err(|_| ExnThrown)?;
-        self.data_mut().reader.set(reader_obj);
+        let reader =
+            ReadableStreamReader::Default(acquire_readable_stream_default_reader(scope, &stream)?);
+        self.data_mut().reader = HeapReadableStreamReader::from(reader);
         // Steps 4-12: _reading_, _readAgainForBranchN_, _canceledN_ are false;
         // _reasonN_ and _branchN_ are undefined (the field defaults; branches set below).
         // Step 13: _cancelPromise_ = `a new promise`.
@@ -2232,29 +2190,21 @@ impl ByteTeeState<'_> {
         let byob_mt = Function::new_callback(scope, c"", 0, byte_tee_byob_microtask, self)?;
         self.data_mut().byob_microtask_fn.set(byob_mt);
 
-        let undef = HandleValue::undefined();
+        let start = AlgorithmArg::None;
         // Step 22: _branch1_ = `CreateReadableByteStream`(start, _pull1Algorithm_, _cancel1Algorithm_).
-        let pull1 = Function::new_callback(scope, c"", 1, byte_tee_pull1, self)?;
-        let cancel1 = Function::new_callback(scope, c"", 1, byte_tee_cancel1, self)?;
-        let branch1 = create_readable_byte_stream(
-            scope,
-            undef,
-            scope.root_value(pull1.as_value()),
-            scope.root_value(cancel1.as_value()),
-        )?;
-        self.data_mut().branch1.set(branch1);
+        let pull1 = AlgorithmArg::native(scope, byte_tee_pull1, *self)?;
+        let cancel1 = AlgorithmArg::native(scope, byte_tee_cancel1, *self)?;
+        let branch1 = create_readable_byte_stream(scope, start, pull1, cancel1)?;
+        let controller = branch1.byte_controller(scope).expect("a byte controller");
+        self.data_mut().branch1_controller.set(controller);
         // Step 23: _branch2_ = `CreateReadableByteStream`(start, _pull2Algorithm_, _cancel2Algorithm_).
-        let pull2 = Function::new_callback(scope, c"", 1, byte_tee_pull2, self)?;
-        let cancel2 = Function::new_callback(scope, c"", 1, byte_tee_cancel2, self)?;
-        let branch2 = create_readable_byte_stream(
-            scope,
-            undef,
-            scope.root_value(pull2.as_value()),
-            scope.root_value(cancel2.as_value()),
-        )?;
-        self.data_mut().branch2.set(branch2);
+        let pull2 = AlgorithmArg::native(scope, byte_tee_pull2, *self)?;
+        let cancel2 = AlgorithmArg::native(scope, byte_tee_cancel2, *self)?;
+        let branch2 = create_readable_byte_stream(scope, start, pull2, cancel2)?;
+        let controller = branch2.byte_controller(scope).expect("a byte controller");
+        self.data_mut().branch2_controller.set(controller);
         // Step 24: Perform _forwardReaderError_, given _reader_.
-        byte_tee_forward_reader_error(scope, *self, &reader_obj)?;
+        byte_tee_forward_reader_error(scope, *self, reader)?;
         Ok(())
     }
 }
@@ -2270,31 +2220,21 @@ fn byte_tee_stream<'r>(scope: &'r Scope<'_>, state: ByteTeeState<'_>) -> Readabl
     state.data().stream.get(scope)
 }
 
-fn byte_tee_reader_obj<'r>(scope: &'r Scope<'_>, state: ByteTeeState<'_>) -> Object<'r> {
+fn byte_tee_reader<'r>(scope: &'r Scope<'_>, state: ByteTeeState<'_>) -> ReadableStreamReader<'r> {
     state.data().reader.get(scope)
 }
 
 /// Branch 1 or branch 2 of the byte tee.
-fn byte_tee_branch<'r>(
-    scope: &'r Scope<'_>,
-    state: ByteTeeState<'_>,
-    for_branch2: bool,
-) -> ReadableStream<'r> {
-    if for_branch2 {
-        state.data().branch2.get(scope)
-    } else {
-        state.data().branch1.get(scope)
-    }
-}
-
 fn byte_tee_branch_controller<'r>(
     scope: &'r Scope<'_>,
     state: ByteTeeState<'_>,
     for_branch2: bool,
 ) -> ReadableByteStreamController<'r> {
-    byte_tee_branch(scope, state, for_branch2)
-        .byte_controller(scope)
-        .expect("branch has a byte controller")
+    if for_branch2 {
+        state.data().branch2_controller.get(scope)
+    } else {
+        state.data().branch1_controller.get(scope)
+    }
 }
 
 fn byte_tee_cancel_promise<'r>(scope: &'r Scope<'_>, state: ByteTeeState<'_>) -> Promise<'r> {
@@ -2308,10 +2248,7 @@ pub(crate) fn byte_tee_set_not_reading(_scope: &Scope<'_>, state: ByteTeeState<'
 
 /// A chunk value as an `ArrayBufferView` (byte-tee chunks are always views).
 fn byte_tee_view<'r>(scope: &'r Scope<'_>, v: HandleValue<'_>) -> js::ArrayBufferView<'r> {
-    Object::from_value(scope, *v)
-        .ok()
-        .and_then(js::ArrayBufferView::from_object)
-        .expect("byte-tee chunk is an ArrayBufferView")
+    js::ArrayBufferView::from_jsval(scope, v, ()).expect("byte-tee chunk is an ArrayBufferView")
 }
 
 /// `CloneAsUint8Array`(_O_): clone the view's region into a fresh `Uint8Array`.
@@ -2319,10 +2256,7 @@ fn byte_tee_clone_as_uint8array<'r>(
     scope: &'r Scope<'_>,
     chunk: HandleValue<'_>,
 ) -> Result<HandleValue<'r>, ExnThrown> {
-    let view = Object::from_value(scope, *chunk)
-        .ok()
-        .and_then(js::ArrayBufferView::from_object)
-        .ok_or(ExnThrown)?;
+    let view = js::ArrayBufferView::from_jsval_throwing(scope, chunk, ())?;
     let length = view.byte_length();
     let byte_offset = view.byte_offset();
     let buffer = view.viewed_buffer(scope)?;
@@ -2336,14 +2270,10 @@ fn byte_tee_clone_as_uint8array<'r>(
 fn byte_tee_forward_reader_error(
     scope: &Scope<'_>,
     state: ByteTeeState<'_>,
-    this_reader: &Object<'_>,
+    this_reader: ReadableStreamReader<'_>,
 ) -> Result<(), ExnThrown> {
-    let closed = reader_closed_promise_for(scope, this_reader);
-    let payload = pair_payload(
-        scope,
-        scope.root_value(state.as_value()),
-        scope.root_value(this_reader.as_value()),
-    )?;
+    let closed = this_reader.generic_closed_promise(scope);
+    let payload = pair_payload(scope, state, this_reader.as_object())?;
     support::react(
         scope,
         &closed,
@@ -2361,8 +2291,9 @@ fn byte_tee_forward_rejected(
     let state = cast_payload::<ByteTeeState>(scope, state_v);
     let r = args.get(0);
     // If _thisReader_ is not _reader_ (the current reader), return.
-    let this_reader = Object::from_value(scope, *this_reader_v).map_err(|_| ExnThrown)?;
-    let current = byte_tee_reader_obj(scope, state);
+    let this_reader =
+        Object::from_value(scope, *this_reader_v).expect("payload reader is an object");
+    let current = byte_tee_reader(scope, state).as_object();
     if this_reader.as_raw() != current.as_raw() {
         return Ok(value::undefined());
     }
@@ -2379,20 +2310,28 @@ fn byte_tee_forward_rejected(
 /// Step 15 `pullWithDefaultReader`: switch to a default reader if needed, then
 /// issue a default read driving both branches.
 fn byte_tee_pull_with_default_reader(scope: &Scope<'_>, state: ByteTeeState<'_>) {
-    let reader_obj = byte_tee_reader_obj(scope, state);
-    if let Ok(byob) = reader_obj.cast::<BYOBReader>() {
-        debug_assert!(byob.data().read_into_requests.is_empty());
-        let _ = readable_stream_byob_reader_release(scope, &byob);
-        let stream = byte_tee_stream(scope, state);
-        let new_reader =
-            acquire_readable_stream_default_reader(scope, &stream).expect("acquire default reader");
-        let new_obj = Object::from_value(scope, new_reader.as_value()).expect("reader object");
-        state.data_mut().reader.set(new_obj);
-        let _ = byte_tee_forward_reader_error(scope, state, &new_obj);
-    }
-    let reader = byte_tee_reader_obj(scope, state)
-        .cast::<DefaultReader>()
-        .expect("default reader");
+    let reader = match byte_tee_reader(scope, state) {
+        ReadableStreamReader::Default(reader) => reader,
+        ReadableStreamReader::Byob(byob) => {
+            debug_assert!(byob.data().read_into_requests.is_empty());
+            support::report_failure(
+                scope,
+                readable_stream_byob_reader_release(scope, &byob),
+                "ReadableByteStreamTee",
+            );
+            let stream = byte_tee_stream(scope, state);
+            let new_reader = acquire_readable_stream_default_reader(scope, &stream)
+                .expect("acquire default reader");
+            let new_generic = new_reader.as_generic();
+            state.data_mut().reader = HeapReadableStreamReader::from(new_generic);
+            support::report_failure(
+                scope,
+                byte_tee_forward_reader_error(scope, state, new_generic),
+                "ReadableByteStreamTee",
+            );
+            new_reader
+        }
+    };
     readable_stream_default_reader_read(
         scope,
         reader,
@@ -2407,30 +2346,34 @@ fn byte_tee_pull_with_default_reader(scope: &Scope<'_>, state: ByteTeeState<'_>)
 fn byte_tee_pull_with_byob_reader(
     scope: &Scope<'_>,
     state: ByteTeeState<'_>,
-    view: HandleValue<'_>,
+    view: Option<js::ArrayBufferView<'_>>,
     for_branch2: bool,
 ) {
-    let reader_obj = byte_tee_reader_obj(scope, state);
-    if let Ok(default) = reader_obj.cast::<DefaultReader>() {
-        debug_assert!(default.data().read_requests.is_empty());
-        let _ = readable_stream_default_reader_release(scope, &default);
-        let stream = byte_tee_stream(scope, state);
-        let new_reader =
-            acquire_readable_stream_byob_reader(scope, &stream).expect("acquire BYOB reader");
-        let new_obj = Object::from_value(scope, new_reader.as_value()).expect("reader object");
-        state.data_mut().reader.set(new_obj);
-        let _ = byte_tee_forward_reader_error(scope, state, &new_obj);
-    }
-    let view = match Object::from_value(scope, *view)
-        .ok()
-        .and_then(js::ArrayBufferView::from_object)
-    {
-        Some(v) => v,
-        None => return,
+    let reader = match byte_tee_reader(scope, state) {
+        ReadableStreamReader::Byob(reader) => reader,
+        ReadableStreamReader::Default(default) => {
+            debug_assert!(default.data().read_requests.is_empty());
+            support::report_failure(
+                scope,
+                readable_stream_default_reader_release(scope, &default),
+                "ReadableByteStreamTee",
+            );
+            let stream = byte_tee_stream(scope, state);
+            let new_reader =
+                acquire_readable_stream_byob_reader(scope, &stream).expect("acquire BYOB reader");
+            let new_generic = new_reader.as_generic();
+            state.data_mut().reader = HeapReadableStreamReader::from(new_generic);
+            support::report_failure(
+                scope,
+                byte_tee_forward_reader_error(scope, state, new_generic),
+                "ReadableByteStreamTee",
+            );
+            new_reader
+        }
     };
-    let reader = byte_tee_reader_obj(scope, state)
-        .cast::<BYOBReader>()
-        .expect("BYOB reader");
+    let Some(view) = view else {
+        return;
+    };
     readable_stream_byob_reader_read(
         scope,
         &reader,
@@ -2895,8 +2838,7 @@ pub(crate) fn readable_stream_cancel<'r>(
     match state {
         // Step 2: If _stream_.`[[state]]` is "`closed`", return `a promise resolved with` undefined.
         ReadableStreamState::Closed => {
-            return Promise::new_resolved_with_value(scope, HandleValue::undefined())
-                .expect("resolved promise");
+            return resolved_undefined_promise(scope);
         }
         // Step 3: If _stream_.`[[state]]` is "`errored`", return `a promise rejected with`
         //         _stream_.`[[storedError]]`.
@@ -2923,10 +2865,7 @@ pub(crate) fn readable_stream_cancel<'r>(
                 std::mem::take(&mut data.read_into_requests)
             },
             |read_into_request| {
-                read_into_request
-                    .root(scope)
-                    .close_steps(scope, undef)
-                    .expect("read-into request close steps");
+                read_into_request.root(scope).close_steps(scope, undef);
             },
         );
     }
@@ -3001,10 +2940,7 @@ pub(crate) fn readable_stream_close(scope: &Scope<'_>, stream: &ReadableStream<'
                 std::mem::take(&mut data.read_requests)
             },
             |read_request| {
-                read_request
-                    .root(scope)
-                    .close_steps(scope)
-                    .expect("read request close steps");
+                read_request.root(scope).close_steps(scope);
             },
         );
     }
@@ -3076,14 +3012,10 @@ pub(crate) fn readable_stream_fulfill_read_into_request(
         .root(scope);
     if done {
         // Step 6: If _done_ is true, perform _readIntoRequest_’s `close steps`, given _chunk_.
-        read_into_request
-            .close_steps(scope, chunk)
-            .expect("read-into request close steps");
+        read_into_request.close_steps(scope, chunk);
     } else {
         // Step 7: Otherwise, perform _readIntoRequest_’s `chunk steps`, given _chunk_.
-        read_into_request
-            .chunk_steps(scope, chunk)
-            .expect("read-into request chunk steps");
+        read_into_request.chunk_steps(scope, chunk);
     }
 }
 
@@ -3116,14 +3048,10 @@ pub(crate) fn readable_stream_fulfill_read_request(
         .root(scope);
     if done {
         // Step 6: If _done_ is true, perform _readRequest_’s `close steps`.
-        read_request
-            .close_steps(scope)
-            .expect("read request close steps");
+        read_request.close_steps(scope);
     } else {
         // Step 7: Otherwise, perform _readRequest_’s `chunk steps`, given _chunk_.
-        read_request
-            .chunk_steps(scope, chunk)
-            .expect("read request chunk steps");
+        read_request.chunk_steps(scope, chunk);
     }
 }
 
@@ -3210,8 +3138,7 @@ pub(crate) fn readable_stream_reader_generic_initialize(
     // Step 1: Set _reader_.`[[stream]]` to _stream_.
     reader.set_generic_stream(stream);
     // Step 2: Set _stream_.`[[reader]]` to _reader_.
-    let reader_obj = Object::from_value(scope, reader.as_reader_value()).map_err(|_| ExnThrown)?;
-    stream.data_mut().reader = Some(Heap::from(reader_obj));
+    stream.data_mut().reader = Some(HeapReadableStreamReader::from(reader.as_generic()));
     let state = stream.data().state;
     let closed_promise = match state {
         // Step 3: If _stream_.`[[state]]` is "`readable`", Set _reader_.`[[closedPromise]]` to `a
@@ -3300,10 +3227,7 @@ pub(crate) fn readable_stream_byob_reader_error_read_into_requests(
             std::mem::take(&mut data.read_into_requests)
         },
         |read_into_request| {
-            read_into_request
-                .root(scope)
-                .error_steps(scope, e)
-                .expect("read-into request error steps");
+            read_into_request.root(scope).error_steps(scope, e);
         },
     );
 }
@@ -3350,8 +3274,7 @@ pub(crate) fn readable_stream_byob_reader_read(
             .take()
             .unwrap()
             .root(scope)
-            .error_steps(scope, stored_error)
-            .expect("read-into request error steps");
+            .error_steps(scope, stored_error);
     } else {
         let controller = stream
             .byte_controller(scope)
@@ -3393,10 +3316,7 @@ pub(crate) fn readable_stream_default_reader_error_read_requests(
             std::mem::take(&mut data.read_requests)
         },
         |read_request| {
-            read_request
-                .root(scope)
-                .error_steps(scope, e)
-                .expect("read request error steps");
+            read_request.root(scope).error_steps(scope, e);
         },
     );
 }
@@ -3432,12 +3352,7 @@ pub(crate) fn readable_stream_default_reader_read(
     match state {
         // Step 4: If _stream_.`[[state]]` is "`closed`", perform _readRequest_’s `close steps`.
         ReadableStreamState::Closed => {
-            read_request
-                .take()
-                .unwrap()
-                .root(scope)
-                .close_steps(scope)
-                .expect("read request close steps");
+            read_request.take().unwrap().root(scope).close_steps(scope);
         }
         // Step 5: Otherwise, if _stream_.`[[state]]` is "`errored`", perform _readRequest_’s `error
         //         steps` given _stream_.`[[storedError]]`.
@@ -3447,8 +3362,7 @@ pub(crate) fn readable_stream_default_reader_read(
                 .take()
                 .unwrap()
                 .root(scope)
-                .error_steps(scope, stored_error)
-                .expect("read request error steps");
+                .error_steps(scope, stored_error);
         }
         // Step 6: Otherwise, Assert: _stream_.`[[state]]` is "`readable`". Perform !
         //         _stream_.`[[controller]]`.`[[PullSteps]]`(_readRequest_).
@@ -3572,7 +3486,7 @@ pub(crate) fn readable_stream_default_controller_call_pull_if_needed(
         controller.data_mut().pull_fulfilled_fn.set(fulfilled);
         let rejected = Function::new_callback(scope, c"", 1, pull_promise_rejected, controller)
             .expect("create pull reaction");
-        controller.data_mut().pull_rejected_fn = Some(Heap::from(rejected));
+        controller.data_mut().pull_rejected_fn.set(rejected);
     }
     let fulfilled = controller
         .data()
@@ -3626,12 +3540,9 @@ pub(crate) fn readable_stream_default_controller_clear_algorithms(
     controller: &ReadableStreamDefaultController<'_>,
 ) {
     // Step 1: Set _controller_.`[[pullAlgorithm]]` to undefined.
-    controller.data_mut().pull_algorithm.set(value::undefined());
+    controller.data_mut().pull_algorithm = Algorithm::None;
     // Step 2: Set _controller_.`[[cancelAlgorithm]]` to undefined.
-    controller
-        .data_mut()
-        .cancel_algorithm
-        .set(value::undefined());
+    controller.data_mut().cancel_algorithm = Algorithm::None;
     // Step 3: Set _controller_.`[[strategySizeAlgorithm]]` to undefined.
     controller
         .data_mut()
@@ -3697,9 +3608,15 @@ pub(crate) fn readable_stream_default_controller_enqueue(
             // Absent size algorithm: the constant-1 algorithm.
             Ok(1.0)
         } else {
-            support::invoke_algorithm(scope, size_algorithm, undef, &[chunk]).and_then(|v| {
+            support::invoke_algorithm(
+                scope,
+                support::AlgorithmArg::Js(size_algorithm),
+                undef,
+                &[chunk],
+            )
+            .and_then(|v| {
                 use js::conversion::FromJSVal;
-                f64::from_jsval(scope, v, ()).map_err(|_| ExnThrown)
+                f64::from_jsval_throwing(scope, v, ())
             })
         };
         let chunk_size = match chunk_size {
@@ -3794,9 +3711,9 @@ pub(crate) fn set_up_readable_stream_default_controller(
     scope: &Scope<'_>,
     stream: &ReadableStream<'_>,
     controller: &ReadableStreamDefaultController<'_>,
-    start_algorithm: HandleValue<'_>,
-    pull_algorithm: HandleValue<'_>,
-    cancel_algorithm: HandleValue<'_>,
+    start_algorithm: AlgorithmArg<'_>,
+    pull_algorithm: AlgorithmArg<'_>,
+    cancel_algorithm: AlgorithmArg<'_>,
     algorithm_receiver: HandleValue<'_>,
     high_water_mark: f64,
     size_algorithm: HandleValue<'_>,
@@ -3804,7 +3721,8 @@ pub(crate) fn set_up_readable_stream_default_controller(
     // Step 1: Assert: _stream_.`[[controller]]` is undefined.
     debug_assert!(stream.data().controller.is_none());
     // Step 2: Set _controller_.`[[stream]]` to _stream_.
-    controller.data_mut().stream = Some(Heap::from(*stream));
+    //         (Already done by `ReadableStreamDefaultController::new`.)
+    debug_assert!(stream.eq_heap(&controller.data().stream));
     // Step 3: Perform ! `ResetQueue`(_controller_).
     reset_queue(&mut *controller.data_mut());
     // Step 4: Set _controller_.`[[started]]`, _controller_.`[[closeRequested]]`,
@@ -3824,15 +3742,9 @@ pub(crate) fn set_up_readable_stream_default_controller(
         .set(size_algorithm.get());
     controller.data_mut().strategy_hwm = high_water_mark;
     // Step 6: Set _controller_.`[[pullAlgorithm]]` to _pullAlgorithm_.
-    controller
-        .data_mut()
-        .pull_algorithm
-        .set(pull_algorithm.get());
+    controller.data_mut().pull_algorithm = Algorithm::from(pull_algorithm);
     // Step 7: Set _controller_.`[[cancelAlgorithm]]` to _cancelAlgorithm_.
-    controller
-        .data_mut()
-        .cancel_algorithm
-        .set(cancel_algorithm.get());
+    controller.data_mut().cancel_algorithm = Algorithm::from(cancel_algorithm);
     // (The algorithms close over `algorithm_receiver` — the underlying source — as their
     // `this` value; see the `algorithm_receiver` field.)
     controller
@@ -3840,8 +3752,7 @@ pub(crate) fn set_up_readable_stream_default_controller(
         .algorithm_receiver
         .set(algorithm_receiver.get());
     // Step 8: Set _stream_.`[[controller]]` to _controller_.
-    let controller_obj = Object::from_value(scope, controller.as_value()).map_err(|_| ExnThrown)?;
-    stream.data_mut().controller = Some(Heap::from(controller_obj));
+    stream.data_mut().controller = Some(HeapReadableStreamController::from(*controller));
     // Step 9: Let _startResult_ be the result of performing _startAlgorithm_. (This might throw an
     //         exception.)
     let start_result =
@@ -3877,40 +3788,27 @@ pub(crate) fn set_up_readable_stream_default_controller_from_underlying_source(
     size_algorithm: HandleValue<'_>,
 ) -> Result<(), ExnThrown> {
     // Step 1: Let _controller_ be a `new` ``ReadableStreamDefaultController``.
-    let controller = ReadableStreamDefaultController::new(scope)?;
-    // The start/pull/cancel algorithms are the raw callbacks, invoked with `this` =
-    // _underlyingSource_ (passed below as the algorithm receiver). An absent callback is
-    // represented as `undefined`, which the invoker treats as the resolved-undefined /
-    // constant algorithm.
+    let controller = ReadableStreamDefaultController::new(scope, *stream)?;
+    // The start/pull/cancel algorithms are the source's callbacks, invoked with `this` =
+    // _underlyingSource_ (passed below as the algorithm receiver). An absent callback is no
+    // algorithm, which the invoker treats as the resolved-undefined / constant algorithm.
     // Step 2: Let _startAlgorithm_ be an algorithm that returns undefined.
     // Step 5: If _underlyingSourceDict_["``start``"] `exists`, then set _startAlgorithm_ to an
     //         algorithm which returns the result of `invoking` _underlyingSourceDict_["``start``"]
     //         with argument list « _controller_ » and `callback this value` _underlyingSource_.
-    let start_algorithm = support::callback_member(
-        scope,
-        underlying_source_dict.start.as_ref(),
-        c"underlying source start must be a function",
-    )?;
+    let start_algorithm = AlgorithmArg::from_member(scope, underlying_source_dict.start.as_ref());
     // Step 3: Let _pullAlgorithm_ be an algorithm that returns `a promise resolved with` undefined.
     // Step 6: If _underlyingSourceDict_["``pull``"] `exists`, then set _pullAlgorithm_ to an
     //         algorithm which returns the result of `invoking` _underlyingSourceDict_["``pull``"]
     //         with argument list « _controller_ » and `callback this value` _underlyingSource_.
-    let pull_algorithm = support::callback_member(
-        scope,
-        underlying_source_dict.pull.as_ref(),
-        c"underlying source pull must be a function",
-    )?;
+    let pull_algorithm = AlgorithmArg::from_member(scope, underlying_source_dict.pull.as_ref());
     // Step 4: Let _cancelAlgorithm_ be an algorithm that returns `a promise resolved with`
     //         undefined.
     // Step 7: If _underlyingSourceDict_["``cancel``"] `exists`, then set _cancelAlgorithm_ to an
     //         algorithm which takes an argument _reason_ and returns the result of `invoking`
     //         _underlyingSourceDict_["``cancel``"] with argument list « _reason_ » and `callback
     //         this value` _underlyingSource_.
-    let cancel_algorithm = support::callback_member(
-        scope,
-        underlying_source_dict.cancel.as_ref(),
-        c"underlying source cancel must be a function",
-    )?;
+    let cancel_algorithm = AlgorithmArg::from_member(scope, underlying_source_dict.cancel.as_ref());
     // Step 8: Perform ? `SetUpDefaultController`(_stream_, _controller_,
     //         _startAlgorithm_, _pullAlgorithm_, _cancelAlgorithm_, _highWaterMark_,
     //         _sizeAlgorithm_).
@@ -3993,12 +3891,9 @@ pub(crate) fn readable_byte_stream_controller_clear_algorithms(
     controller: &ReadableByteStreamController<'_>,
 ) {
     // Step 1: Set _controller_.`[[pullAlgorithm]]` to undefined.
-    controller.data_mut().pull_algorithm.set(value::undefined());
+    controller.data_mut().pull_algorithm = Algorithm::None;
     // Step 2: Set _controller_.`[[cancelAlgorithm]]` to undefined.
-    controller
-        .data_mut()
-        .cancel_algorithm
-        .set(value::undefined());
+    controller.data_mut().cancel_algorithm = Algorithm::None;
 }
 
 /// <https://streams.spec.whatwg.org/#readable-byte-stream-controller-clear-pending-pull-intos>
@@ -4046,8 +3941,11 @@ pub(crate) fn readable_byte_stream_controller_close(
         if bytes_filled % element_size != 0 {
             let e = make_type_error(scope, c"Insufficient bytes to fill the pending pull-into");
             readable_byte_stream_controller_error(scope, controller, e);
-            js::exception::set_pending(scope, e, js::native::ExceptionStackBehavior::DoNotCapture);
-            return Err(ExnThrown);
+            return Err(js::exception::set_pending(
+                scope,
+                e,
+                js::native::ExceptionStackBehavior::DoNotCapture,
+            ));
         }
     }
     // Step 5: Perform ! `ByteStreamControllerClearAlgorithms`(_controller_).
@@ -4165,13 +4063,7 @@ pub(crate) fn readable_byte_stream_controller_enqueue(
     //         `ByteStreamControllerEnqueueDetachedPullIntoToQueue`(_controller_,
     //         _firstPendingPullInto_).
     if !controller.data().pending_pull_intos.is_empty() {
-        let first_buffer = {
-            let data = controller.data();
-            data.pending_pull_intos[0].buffer.get(scope)
-        };
-        let first_buffer = first_buffer
-            .cast::<js::ArrayBuffer>()
-            .expect("pull-into descriptor buffer is an ArrayBuffer");
+        let first_buffer = controller.data().pending_pull_intos[0].buffer.get(scope);
         if first_buffer.is_detached() {
             return Err(js::error::throw_type_error(
                 scope,
@@ -4182,7 +4074,7 @@ pub(crate) fn readable_byte_stream_controller_enqueue(
         let transferred = first_buffer.transfer(scope)?;
         controller.data_mut().pending_pull_intos[0]
             .buffer
-            .set(*transferred);
+            .set(transferred);
         if controller.data().pending_pull_intos[0].reader_type == ReaderType::None {
             readable_byte_stream_controller_enqueue_detached_pull_into_to_queue(scope, controller)?;
         }
@@ -4277,7 +4169,7 @@ pub(crate) fn readable_byte_stream_controller_enqueue_chunk_to_queue(
     // Step 1: `Append` a new `readable byte stream queue entry` with `buffer` _buffer_, `byte
     //         offset` _byteOffset_, and `byte length` _byteLength_ to _controller_.`[[queue]]`.
     controller.data_mut().queue.push_back(ByteQueueEntry {
-        buffer: Heap::from(*buffer),
+        buffer: Heap::from(buffer),
         byte_offset,
         byte_length,
     });
@@ -4306,12 +4198,11 @@ fn readable_byte_stream_controller_enqueue_cloned_chunk_to_queue(
         Err(_) => {
             let error = take_pending_or_undefined(scope);
             readable_byte_stream_controller_error(scope, controller, error);
-            js::exception::set_pending(
+            return Err(js::exception::set_pending(
                 scope,
                 error,
                 js::native::ExceptionStackBehavior::DoNotCapture,
-            );
-            return Err(ExnThrown);
+            ));
         }
     };
     // Step 3: Perform ! `ByteStreamControllerEnqueueChunkToQueue`(_controller_,
@@ -4328,7 +4219,7 @@ fn readable_byte_stream_controller_enqueue_detached_pull_into_to_queue(
     scope: &Scope<'_>,
     controller: &ReadableByteStreamController<'_>,
 ) -> Result<(), ExnThrown> {
-    let (reader_type, byte_offset, bytes_filled, buffer_obj) = {
+    let (reader_type, byte_offset, bytes_filled, buffer) = {
         let data = controller.data();
         let head = &data.pending_pull_intos[0];
         (
@@ -4345,9 +4236,6 @@ fn readable_byte_stream_controller_enqueue_detached_pull_into_to_queue(
     //         _pullIntoDescriptor_’s `buffer`, _pullIntoDescriptor_’s `byte offset`,
     //         _pullIntoDescriptor_’s `bytes filled`).
     if bytes_filled > 0 {
-        let buffer = buffer_obj
-            .cast::<js::ArrayBuffer>()
-            .expect("pull-into descriptor buffer is an ArrayBuffer");
         readable_byte_stream_controller_enqueue_cloned_chunk_to_queue(
             scope,
             controller,
@@ -4442,11 +4330,7 @@ fn descriptor_buffer<'r>(
     scope: &'r Scope<'_>,
     descriptor: &PullIntoDescriptor,
 ) -> js::ArrayBuffer<'r> {
-    descriptor
-        .buffer
-        .get(scope)
-        .cast::<js::ArrayBuffer>()
-        .expect("pull-into descriptor buffer is an ArrayBuffer")
+    descriptor.buffer.get(scope)
 }
 
 /// <https://streams.spec.whatwg.org/#readable-byte-stream-controller-fill-pull-into-descriptor-from-queue>
@@ -4518,9 +4402,6 @@ fn readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(
         };
         let bytes_to_copy = total_bytes_to_copy_remaining.min(head_byte_length);
         let dest_start = pull_into_descriptor.byte_offset + pull_into_descriptor.bytes_filled;
-        let queue_buffer = queue_buffer
-            .cast::<js::ArrayBuffer>()
-            .expect("queue entry buffer is an ArrayBuffer");
         copy_data_block_bytes(
             descriptor_buffer,
             dest_start,
@@ -4570,7 +4451,7 @@ pub(crate) fn readable_byte_stream_controller_fill_read_request_from_queue(
     // Consume the head entry: `into_parts` roots its buffer to the scope (and
     // drops the now-untraced `Heap` on its still-live pointer) before
     // `HandleQueueDrain` below can compact, so no stale pointer is left behind.
-    let (buffer_obj, byte_offset, byte_length) = controller
+    let (buffer, byte_offset, byte_length) = controller
         .data_mut()
         .queue
         .pop_front()
@@ -4584,9 +4465,6 @@ pub(crate) fn readable_byte_stream_controller_fill_read_request_from_queue(
     readable_byte_stream_controller_handle_queue_drain(scope, controller);
     // Step 6: Let _view_ be ! `Construct`(``%Uint8Array%``, « _entry_’s `buffer`, _entry_’s
     //         `byte offset`, _entry_’s `byte length` »).
-    let buffer = buffer_obj
-        .cast::<js::ArrayBuffer>()
-        .expect("queue entry buffer is an ArrayBuffer");
     let view = js::Uint8Array::with_buffer(scope, buffer, byte_offset, byte_length)?;
     // Step 7: Perform _readRequest_’s `chunk steps`, given _view_.
     let view_value = scope.root_value(view.as_value());
@@ -4594,7 +4472,8 @@ pub(crate) fn readable_byte_stream_controller_fill_read_request_from_queue(
         .take()
         .unwrap()
         .root(scope)
-        .chunk_steps(scope, view_value)
+        .chunk_steps(scope, view_value);
+    Ok(())
 }
 
 /// <https://streams.spec.whatwg.org/#abstract-opdef-ByteStreamControllergetbyobrequest>
@@ -4613,7 +4492,7 @@ pub(crate) fn readable_byte_stream_controller_get_byob_request<'r>(
     //         _view_. Set _controller_.`[[ReadableStreamBYOBRequest]]` to _byobRequest_.
     if controller.data().byob_request.is_none() && !controller.data().pending_pull_intos.is_empty()
     {
-        let (buffer_obj, byte_offset, bytes_filled, byte_length) = {
+        let (buffer, byte_offset, bytes_filled, byte_length) = {
             let data = controller.data();
             let first = &data.pending_pull_intos[0];
             (
@@ -4623,9 +4502,6 @@ pub(crate) fn readable_byte_stream_controller_get_byob_request<'r>(
                 first.byte_length,
             )
         };
-        let buffer = buffer_obj
-            .cast::<js::ArrayBuffer>()
-            .expect("pull-into descriptor buffer is an ArrayBuffer");
         let view = js::Uint8Array::with_buffer(
             scope,
             buffer,
@@ -4635,9 +4511,12 @@ pub(crate) fn readable_byte_stream_controller_get_byob_request<'r>(
         .expect("constructing a Uint8Array over the pending pull-into");
         let byob_request =
             ReadableStreamBYOBRequest::new(scope).expect("creating a ReadableStreamBYOBRequest");
-        byob_request.data_mut().controller = Some(Heap::from(*controller));
-        byob_request.data_mut().view.set(view.as_value());
-        controller.data_mut().byob_request = Some(Heap::from(byob_request));
+        byob_request.data_mut().controller.set(*controller);
+        byob_request
+            .data_mut()
+            .view
+            .set(view.as_array_buffer_view());
+        controller.data_mut().byob_request.set(byob_request);
     }
     // Step 2: Return _controller_.`[[ReadableStreamBYOBRequest]]`.
     controller.data().byob_request.get(scope)
@@ -4701,7 +4580,7 @@ pub(crate) fn readable_byte_stream_controller_invalidate_byob_request(
     // Step 2: Set _controller_.`[[ReadableStreamBYOBRequest]]`.`[[controller]]` to undefined.
     byob_request.data_mut().controller = None;
     // Step 3: Set _controller_.`[[ReadableStreamBYOBRequest]]`.`[[view]]` to null.
-    byob_request.data_mut().view.set(value::null());
+    byob_request.data_mut().view = None;
     // Step 4: Set _controller_.`[[ReadableStreamBYOBRequest]]` to null.
     controller.data_mut().byob_request = None;
 }
@@ -4832,8 +4711,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
                 .take()
                 .unwrap()
                 .root(scope)
-                .error_steps(scope, error)
-                .expect("read-into request error steps");
+                .error_steps(scope, error);
             return;
         }
     };
@@ -4848,8 +4726,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
                 .take()
                 .unwrap()
                 .root(scope)
-                .error_steps(scope, error)
-                .expect("read-into request error steps");
+                .error_steps(scope, error);
             return;
         }
     };
@@ -4865,7 +4742,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
     // must stay current (and never drop stale). `take()` hands it back when a
     // branch appends it to the (traced) `[[pendingPullIntos]]`.
     let mut pull_into_descriptor = RootedTraceableBox::new(Some(PullIntoDescriptor {
-        buffer: Heap::from(*buffer),
+        buffer: Heap::from(buffer),
         buffer_byte_length,
         byte_offset,
         byte_length,
@@ -4899,8 +4776,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
             .take()
             .unwrap()
             .root(scope)
-            .close_steps(scope, empty_view)
-            .expect("read-into request close steps");
+            .close_steps(scope, empty_view);
         return;
     }
     // Step 16: If _controller_.`[[queueTotalSize]]` > 0, If !
@@ -4929,8 +4805,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
                 .take()
                 .unwrap()
                 .root(scope)
-                .chunk_steps(scope, filled_view)
-                .expect("read-into request chunk steps");
+                .chunk_steps(scope, filled_view);
             return;
         }
         if controller.data().close_requested {
@@ -4940,8 +4815,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
                 .take()
                 .unwrap()
                 .root(scope)
-                .error_steps(scope, e)
-                .expect("read-into request error steps");
+                .error_steps(scope, e);
             return;
         }
     }
@@ -5014,7 +4888,7 @@ pub(crate) fn readable_byte_stream_controller_respond(
         descriptor_buffer(scope, &controller.data().pending_pull_intos[0]).transfer(scope)?;
     controller.data_mut().pending_pull_intos[0]
         .buffer
-        .set(*transferred);
+        .set(transferred);
     readable_byte_stream_controller_respond_internal(scope, controller, bytes_written)
 }
 
@@ -5314,7 +5188,7 @@ pub(crate) fn readable_byte_stream_controller_respond_with_new_view(
     let transferred = view_buffer.transfer(scope)?;
     controller.data_mut().pending_pull_intos[0]
         .buffer
-        .set(*transferred);
+        .set(transferred);
     readable_byte_stream_controller_respond_internal(scope, controller, view_byte_length)
 }
 
@@ -5391,9 +5265,9 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     scope: &Scope<'_>,
     stream: &ReadableStream<'_>,
     controller: &ReadableByteStreamController<'_>,
-    start_algorithm: HandleValue<'_>,
-    pull_algorithm: HandleValue<'_>,
-    cancel_algorithm: HandleValue<'_>,
+    start_algorithm: AlgorithmArg<'_>,
+    pull_algorithm: AlgorithmArg<'_>,
+    cancel_algorithm: AlgorithmArg<'_>,
     algorithm_receiver: HandleValue<'_>,
     high_water_mark: f64,
     auto_allocate_chunk_size: Option<u64>,
@@ -5407,7 +5281,8 @@ pub(crate) fn set_up_readable_byte_stream_controller(
         debug_assert!(size > 0);
     }
     // Step 3: Set _controller_.`[[stream]]` to _stream_.
-    controller.data_mut().stream = Some(Heap::from(*stream));
+    //         (Already done by `ReadableByteStreamController::new`.)
+    debug_assert!(stream.eq_heap(&controller.data().stream));
     // Step 4: Set _controller_.`[[pullAgain]]` and _controller_.`[[pulling]]` to false.
     {
         let mut data = controller.data_mut();
@@ -5427,15 +5302,9 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     // Step 8: Set _controller_.`[[strategyHWM]]` to _highWaterMark_.
     controller.data_mut().strategy_hwm = high_water_mark;
     // Step 9: Set _controller_.`[[pullAlgorithm]]` to _pullAlgorithm_.
-    controller
-        .data_mut()
-        .pull_algorithm
-        .set(pull_algorithm.get());
+    controller.data_mut().pull_algorithm = Algorithm::from(pull_algorithm);
     // Step 10: Set _controller_.`[[cancelAlgorithm]]` to _cancelAlgorithm_.
-    controller
-        .data_mut()
-        .cancel_algorithm
-        .set(cancel_algorithm.get());
+    controller.data_mut().cancel_algorithm = Algorithm::from(cancel_algorithm);
     // (The algorithms close over `algorithm_receiver` — the underlying byte source — as their
     // `this` value; see the `algorithm_receiver` field.)
     controller
@@ -5447,8 +5316,7 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     // Step 12: Set _controller_.`[[pendingPullIntos]]` to a new empty `list`.
     controller.data_mut().pending_pull_intos.clear();
     // Step 13: Set _stream_.`[[controller]]` to _controller_.
-    let controller_obj = Object::from_value(scope, controller.as_value()).map_err(|_| ExnThrown)?;
-    stream.data_mut().controller = Some(Heap::from(controller_obj));
+    stream.data_mut().controller = Some(HeapReadableStreamController::from(*controller));
     // Step 14: Let _startResult_ be the result of performing _startAlgorithm_.
     let start_result =
         support::invoke_algorithm(scope, start_algorithm, algorithm_receiver, &[controller])?;
@@ -5482,40 +5350,27 @@ pub(crate) fn set_up_readable_byte_stream_controller_from_underlying_source(
     high_water_mark: f64,
 ) -> Result<(), ExnThrown> {
     // Step 1: Let _controller_ be a `new` ``ReadableByteStreamController``.
-    let controller = ReadableByteStreamController::new(scope)?;
-    // The start/pull/cancel algorithms are the raw callbacks, invoked with `this` =
-    // _underlyingSource_ (passed below as the algorithm receiver). An absent callback is
-    // represented as `undefined`, which the invoker treats as the resolved-undefined /
-    // constant algorithm.
+    let controller = ReadableByteStreamController::new(scope, *stream)?;
+    // The start/pull/cancel algorithms are the source's callbacks, invoked with `this` =
+    // _underlyingSource_ (passed below as the algorithm receiver). An absent callback is no
+    // algorithm, which the invoker treats as the resolved-undefined / constant algorithm.
     // Step 2: Let _startAlgorithm_ be an algorithm that returns undefined.
     // Step 5: If _underlyingSourceDict_["``start``"] `exists`, then set _startAlgorithm_ to an
     //         algorithm which returns the result of `invoking` _underlyingSourceDict_["``start``"]
     //         with argument list « _controller_ » and `callback this value` _underlyingSource_.
-    let start_algorithm = support::callback_member(
-        scope,
-        underlying_source_dict.start.as_ref(),
-        c"underlying source start must be a function",
-    )?;
+    let start_algorithm = AlgorithmArg::from_member(scope, underlying_source_dict.start.as_ref());
     // Step 3: Let _pullAlgorithm_ be an algorithm that returns `a promise resolved with` undefined.
     // Step 6: If _underlyingSourceDict_["``pull``"] `exists`, then set _pullAlgorithm_ to an
     //         algorithm which returns the result of `invoking` _underlyingSourceDict_["``pull``"]
     //         with argument list « _controller_ » and `callback this value` _underlyingSource_.
-    let pull_algorithm = support::callback_member(
-        scope,
-        underlying_source_dict.pull.as_ref(),
-        c"underlying source pull must be a function",
-    )?;
+    let pull_algorithm = AlgorithmArg::from_member(scope, underlying_source_dict.pull.as_ref());
     // Step 4: Let _cancelAlgorithm_ be an algorithm that returns `a promise resolved with`
     //         undefined.
     // Step 7: If _underlyingSourceDict_["``cancel``"] `exists`, then set _cancelAlgorithm_ to an
     //         algorithm which takes an argument _reason_ and returns the result of `invoking`
     //         _underlyingSourceDict_["``cancel``"] with argument list « _reason_ » and `callback
     //         this value` _underlyingSource_.
-    let cancel_algorithm = support::callback_member(
-        scope,
-        underlying_source_dict.cancel.as_ref(),
-        c"underlying source cancel must be a function",
-    )?;
+    let cancel_algorithm = AlgorithmArg::from_member(scope, underlying_source_dict.cancel.as_ref());
     // Step 8: Let _autoAllocateChunkSize_ be _underlyingSourceDict_["``autoAllocateChunkSize``"],
     //         if it `exists`, or undefined otherwise.
     let auto_allocate_chunk_size = underlying_source_dict

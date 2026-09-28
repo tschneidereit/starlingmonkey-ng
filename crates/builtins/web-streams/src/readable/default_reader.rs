@@ -55,11 +55,10 @@ impl DefaultReader {
         // Step 1: If `this`.`[[stream]]` is undefined, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if self.data().stream.is_none() {
-            js::error::throw_type_error(
+            return Err(js::error::throw_type_error(
                 scope,
                 c"Cannot read from a reader that does not have an owner stream",
-            );
-            return Promise::new_rejected_with_pending_error(scope);
+            ));
         }
         // Step 2: Let _promise_ be `a new promise`.
         let promise = Promise::new_pending(scope)?;
@@ -101,11 +100,10 @@ impl DefaultReader {
         // Step 1: If `this`.`[[stream]]` is undefined, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if self.data().stream.is_none() {
-            js::error::throw_type_error(
+            return Err(js::error::throw_type_error(
                 scope,
                 c"Cannot cancel a reader that does not have an owner stream",
-            );
-            return Promise::new_rejected_with_pending_error(scope);
+            ));
         }
         // Step 2: Return ! `ReadableStreamReaderGenericCancel`(`this`, _reason_).
         let reason = reason.unwrap_or(HandleValue::undefined());

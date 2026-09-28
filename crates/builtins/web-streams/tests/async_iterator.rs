@@ -141,3 +141,32 @@ fn iterator_prototype_shape() {
         "#);
     assert_eq!(out, "true,next,return,true");
 }
+
+/// `next()` clears the ongoing promise when the previous call settles, so a call
+/// made after that runs the next steps directly instead of chaining behind the
+/// settled promise. Both calls then settle after the same number of ticks.
+#[test]
+fn settled_next_does_not_delay_the_following_call() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        const rs = new ReadableStream({ start(c) { c.enqueue(1); c.enqueue(2); } });
+        const it = rs.values();
+        function ticksUntil(p) {
+            let done = false;
+            p.then(() => { done = true; });
+            return new Promise(resolve => {
+                let n = 0;
+                (function spin() {
+                    if (done) { resolve(n); } else { n++; Promise.resolve().then(spin); }
+                })();
+            });
+        }
+        (async () => {
+            const first = await ticksUntil(it.next());
+            const second = await ticksUntil(it.next());
+            globalThis.__out = `${first},${second}`;
+        })();
+    "#);
+    let (first, second) = out.split_once(',').expect("two tick counts");
+    assert_eq!(first, second, "ticks: {out}");
+}

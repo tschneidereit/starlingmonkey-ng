@@ -23,14 +23,14 @@ pub struct WritableStreamDefaultController {
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-abortalgorithm>
     /// A promise-returning algorithm, taking one argument (the abort reason), which communicates a
     /// requested abort to the underlying sink
-    pub(crate) abort_algorithm: Heap<Value>,
+    pub(crate) abort_algorithm: crate::support::Algorithm,
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-abortcontroller>
     /// An AbortController that can be used to abort the pending write or close operation when the
     /// stream is aborted.
     pub(crate) abort_controller: Heap<AbortControllerImpl>,
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-closealgorithm>
     /// A promise-returning algorithm which communicates a requested close to the underlying sink
-    pub(crate) close_algorithm: Heap<Value>,
+    pub(crate) close_algorithm: crate::support::Algorithm,
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-queue>
     /// A list representing the stream’s internal queue of chunks
     pub(crate) queue: VecDeque<ValueWithSize>,
@@ -49,19 +49,17 @@ pub struct WritableStreamDefaultController {
     /// An algorithm to calculate the size of enqueued chunks, as part of the stream’s queuing
     /// strategy
     pub(crate) strategy_size_algorithm: Heap<Value>,
-    /// The `this` value the write/close/abort algorithms are invoked with (the
-    /// underlying sink, or `undefined` for native algorithms). Not a spec slot;
-    /// see the readable controller's `algorithm_receiver`.
+    /// The `this` value JS write/close/abort algorithms are invoked with: the
+    /// underlying sink. Not a spec slot, see the readable controller's
+    /// `algorithm_receiver`.
     pub(crate) algorithm_receiver: Heap<Value>,
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-stream>
     /// The WritableStream instance controlled
-    ///
-    /// `Option`: set by `SetUp...Controller` after the controller is created.
-    pub(crate) stream: Option<Heap<WritableStreamImpl>>,
+    pub(crate) stream: Heap<WritableStreamImpl>,
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-writealgorithm>
     /// A promise-returning algorithm, taking one argument (the chunk to write), which writes data to
     /// the underlying sink
-    pub(crate) write_algorithm: Heap<Value>,
+    pub(crate) write_algorithm: crate::support::Algorithm,
     /// The sink-write-reaction callbacks (`WritableStreamDefaultControllerProcessWrite`
     /// steps 4-5; payload = this controller), created on the first write and
     /// reused for every subsequent chunk. `None` until the first write.
@@ -71,9 +69,10 @@ pub struct WritableStreamDefaultController {
 
 #[webidl_methods]
 impl WritableStreamDefaultController {
-    fn new(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
-        self.data_mut()
-            .abort_controller
+    fn new(&self, scope: &Scope<'_>, stream: WritableStream<'_>) -> Result<(), ExnThrown> {
+        let data = self.data_mut();
+        data.stream.set(stream);
+        data.abort_controller
             .set(AbortController::new(scope).expect("AbortController can only fail due to OOM"));
         Ok(())
     }
@@ -98,17 +97,13 @@ impl WritableStreamDefaultController {
             return Ok(());
         }
         // Step 3: Perform ! `WritableStreamDefaultControllerError`(`this`, _e_).
-        let e = e.unwrap_or_else(|| scope.root_value(js::value::undefined()));
+        let e = e.unwrap_or(HandleValue::undefined());
         algorithms::writable_stream_default_controller_error(scope, self, e);
         Ok(())
     }
 
-    pub(crate) fn stream<'r>(&'r self, scope: &'r Scope<'_>) -> WritableStream<'r> {
-        self.data()
-            .stream
-            .as_ref()
-            .expect("controller has a stream")
-            .get(scope)
+    pub(crate) fn stream<'r>(&self, scope: &'r Scope<'_>) -> WritableStream<'r> {
+        self.data().stream.get(scope)
     }
 }
 

@@ -28,12 +28,13 @@ use crate::readable::DefaultReader;
 use core_runtime::{jsclass, jsmethods};
 use js::conversion::FromJSVal;
 use js::error::ExnThrown;
+use js::function::cast_payload;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
 use js::prelude::{CallbackArgs, HandleValue, OptionHeapExt};
 use js::value;
-use js::{Function, Object, Promise, Uint8Array};
+use js::{Function, Promise, Uint8Array};
 
 /// The completion of a read-all-bytes drain (the caller's `successSteps`):
 /// receives the payload value given to [`read_all_bytes`] and the assembled
@@ -111,7 +112,7 @@ pub fn read_all_bytes<'r>(
     // The deferred-read callback, reused for every chunk. Created here (not in
     // the closure above) because its payload is the state object.
     let read_next_fn = Function::new_callback(scope, c"", 0, read_next_microtask, state)?;
-    state.data_mut().read_next_fn = Some(Heap::from(read_next_fn));
+    state.data_mut().read_next_fn.set(read_next_fn);
     read_next(scope, state);
     Ok(promise)
 }
@@ -150,13 +151,10 @@ pub(crate) fn read_all_bytes_chunk_steps(
 ) -> Result<(), ExnThrown> {
     // Step 1: If chunk is not a Uint8Array object, call failureSteps with a
     //         TypeError and abort these steps.
-    let chunk_array = Object::from_value(scope, *chunk)
-        .ok()
-        .and_then(|object| object.cast::<Uint8Array<'_>>().ok());
-    let Some(array) = chunk_array else {
+    let Ok(array) = Uint8Array::from_jsval(scope, chunk, ()) else {
         js::error::throw_type_error(scope, c"a body stream chunk must be a Uint8Array");
         let promise = state.data().promise.get(scope);
-        return reject_with_pending(scope, &promise);
+        return promise.reject_with_pending(scope);
     };
     // Step 2: Append the bytes represented by chunk to bytes.
     // SAFETY: the slice is consumed immediately; appending to the Rust-side
@@ -180,8 +178,7 @@ fn read_next_microtask(
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let state = ReadAllBytesState::from_jsval(scope, payload, ())
-        .expect("read-next payload is the ReadAllBytesState");
+    let state = cast_payload::<ReadAllBytesState>(scope, payload);
     read_next(scope, state);
     Ok(value::undefined())
 }
@@ -202,7 +199,7 @@ pub(crate) fn read_all_bytes_close_steps(
     let payload = state.data().payload.get(scope);
     match on_complete(scope, payload, bytes) {
         Ok(value) => promise.resolve(scope, value),
-        Err(_) => reject_with_pending(scope, &promise),
+        Err(_) => promise.reject_with_pending(scope),
     }
 }
 
@@ -215,12 +212,4 @@ pub(crate) fn read_all_bytes_error_steps(
 ) -> Result<(), ExnThrown> {
     let promise = state.data().promise.get(scope);
     promise.reject(scope, e)
-}
-
-/// Reject `promise` with the current pending exception (an error a step or the
-/// success callback has thrown), clearing it so it does not leak as an unhandled
-/// engine exception.
-fn reject_with_pending(scope: &Scope<'_>, promise: &Promise<'_>) -> Result<(), ExnThrown> {
-    let error = js::exception::take_pending_or_undefined(scope);
-    promise.reject(scope, error)
 }

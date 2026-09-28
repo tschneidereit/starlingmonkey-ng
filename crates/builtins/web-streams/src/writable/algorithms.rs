@@ -10,7 +10,7 @@ use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::RootedTraceableBox;
 use js::native::Value;
-use js::prelude::{CallbackArgs, HandleValue, OptionHeapExt};
+use js::prelude::{CallbackArgs, HandleValue, OptionHeapExt, ToJSVal};
 use js::{value, Function, Promise};
 use web_globals::events::algorithms::ScriptStackState;
 use web_globals::signals::abort_controller::AbortController;
@@ -21,6 +21,7 @@ use crate::algorithms::{
 };
 use crate::queuing::{QueueWithSizes, ValueWithSize};
 use crate::support;
+use crate::support::{Algorithm, AlgorithmArg};
 use crate::writable::underlying_sink::UnderlyingSink;
 use crate::writable::writable_stream::{
     PendingAbortRequest, PromiseSlot, WritableStream, WritableStreamImpl, WritableStreamState,
@@ -37,7 +38,7 @@ fn writable_stream_writer<'r>(
     scope: &'r Scope<'_>,
     stream: &WritableStream<'_>,
 ) -> Option<WritableStreamDefaultWriter<'r>> {
-    Some(stream.data().writer.as_ref()?.get(scope))
+    stream.data().writer.get(scope)
 }
 
 /// The writer's `[[stream]]`, or `None` once released.
@@ -45,7 +46,7 @@ pub(crate) fn writer_stream<'r>(
     scope: &'r Scope<'_>,
     writer: &WritableStreamDefaultWriter<'_>,
 ) -> Option<WritableStream<'r>> {
-    Some(writer.data().stream.as_ref()?.get(scope))
+    writer.data().stream.get(scope)
 }
 
 /// `SetUpWritableStreamDefaultController` step 17.
@@ -192,7 +193,7 @@ fn ws_abort_promise_rejected(
 }
 
 // ---------------------------------------------------------------------------
-// Transform-stream accessors, native algorithm callbacks, and reactions.
+// Controller internal methods, native algorithm callbacks, and reactions.
 // ---------------------------------------------------------------------------
 
 /// <https://streams.spec.whatwg.org/#ws-default-controller-private-abort>
@@ -240,12 +241,12 @@ pub(crate) fn acquire_writable_stream_default_writer<'r>(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_writable_stream<'r>(
     scope: &'r Scope<'_>,
-    start_algorithm: HandleValue<'_>,
-    write_algorithm: HandleValue<'_>,
-    close_algorithm: HandleValue<'_>,
-    abort_algorithm: HandleValue<'_>,
+    start_algorithm: AlgorithmArg<'r>,
+    write_algorithm: AlgorithmArg<'r>,
+    close_algorithm: AlgorithmArg<'r>,
+    abort_algorithm: AlgorithmArg<'r>,
     high_water_mark: f64,
-    size_algorithm: HandleValue<'_>,
+    size_algorithm: impl ToJSVal<'r>,
 ) -> Result<WritableStream<'r>, ExnThrown> {
     // Step 1: Assert: ! `IsNonNegativeNumber`(_highWaterMark_) is true.
     debug_assert!(is_non_negative_number(high_water_mark));
@@ -256,7 +257,7 @@ pub(crate) fn create_writable_stream<'r>(
     // Step 3: Perform ! `InitializeWritableStream`(_stream_).
     initialize_writable_stream(&stream);
     // Step 4: Let _controller_ be a `new` ``WritableStreamDefaultController``.
-    let controller = WritableStreamDefaultController::new(scope)?;
+    let controller = WritableStreamDefaultController::new(scope, stream)?;
     // Step 5: Perform ? `SetUpWritableStreamDefaultController`(_stream_, _controller_,
     //         _startAlgorithm_, _writeAlgorithm_, _closeAlgorithm_, _abortAlgorithm_,
     //         _highWaterMark_, _sizeAlgorithm_).
@@ -272,7 +273,7 @@ pub(crate) fn create_writable_stream<'r>(
         abort_algorithm,
         receiver,
         high_water_mark,
-        size_algorithm,
+        size_algorithm.to_jsval_throwing(scope)?,
     )?;
     // Step 6: Return _stream_.
     Ok(stream)
@@ -324,9 +325,9 @@ pub(crate) fn set_up_writable_stream_default_writer(
         ));
     }
     // Step 2: Set _writer_.`[[stream]]` to _stream_.
-    writer.data_mut().stream = Some(Heap::from(*stream));
+    writer.data_mut().stream.set(*stream);
     // Step 3: Set _stream_.`[[writer]]` to _writer_.
-    stream.data_mut().writer = Some(Heap::from(*writer));
+    stream.data_mut().writer.set(*writer);
     // Step 4: Let _state_ be _stream_.`[[state]]`.
     let state = stream.data().state;
     match state {
@@ -1146,13 +1147,11 @@ pub(crate) fn writable_stream_default_writer_write<'r>(
     let chunk_size = writable_stream_default_controller_get_chunk_size(scope, &controller, chunk);
     // Step 5: If _stream_ is not equal to _writer_.`[[stream]]`, return `a promise rejected with` a
     //         ``TypeError`` exception.
-    // SAFETY: `as_ptr` is read only to compare object identity against the just-fetched, rooted
-    // `stream`; no allocation happens between reading it and the comparison.
     let still_owned = writer
         .data()
         .stream
         .as_ref()
-        .is_some_and(|s| unsafe { s.as_ptr() == stream.as_raw() });
+        .is_some_and(|s| stream.eq_heap(s));
     if !still_owned {
         js::error::throw_type_error(scope, c"Cannot write to a stream using a released writer");
         return Promise::new_rejected_with_pending_error(scope).expect("rejected promise");
@@ -1199,10 +1198,10 @@ pub(crate) fn set_up_writable_stream_default_controller(
     scope: &Scope<'_>,
     stream: &WritableStream<'_>,
     controller: &WritableStreamDefaultController<'_>,
-    start_algorithm: HandleValue<'_>,
-    write_algorithm: HandleValue<'_>,
-    close_algorithm: HandleValue<'_>,
-    abort_algorithm: HandleValue<'_>,
+    start_algorithm: AlgorithmArg<'_>,
+    write_algorithm: AlgorithmArg<'_>,
+    close_algorithm: AlgorithmArg<'_>,
+    abort_algorithm: AlgorithmArg<'_>,
     algorithm_receiver: HandleValue<'_>,
     high_water_mark: f64,
     size_algorithm: HandleValue<'_>,
@@ -1211,9 +1210,10 @@ pub(crate) fn set_up_writable_stream_default_controller(
     // Step 2: Assert: _stream_.`[[controller]]` is undefined.
     debug_assert!(stream.data().controller.is_none());
     // Step 3: Set _controller_.`[[stream]]` to _stream_.
-    controller.data_mut().stream = Some(Heap::from(*stream));
+    //         (Already done by `WritableStreamDefaultController::new`.)
+    debug_assert!(stream.eq_heap(&controller.data().stream));
     // Step 4: Set _stream_.`[[controller]]` to _controller_.
-    stream.data_mut().controller = Some(Heap::from(*controller));
+    stream.data_mut().controller.set(*controller);
     // Step 5: Perform ! `ResetQueue`(_controller_).
     reset_queue(&mut *controller.data_mut());
     // Step 6: Set _controller_.`[[abortController]]` to a new ``AbortController``.
@@ -1229,20 +1229,11 @@ pub(crate) fn set_up_writable_stream_default_controller(
     // Step 9: Set _controller_.`[[strategyHWM]]` to _highWaterMark_.
     controller.data_mut().strategy_hwm = high_water_mark;
     // Step 10: Set _controller_.`[[writeAlgorithm]]` to _writeAlgorithm_.
-    controller
-        .data_mut()
-        .write_algorithm
-        .set(write_algorithm.get());
+    controller.data_mut().write_algorithm = Algorithm::from(write_algorithm);
     // Step 11: Set _controller_.`[[closeAlgorithm]]` to _closeAlgorithm_.
-    controller
-        .data_mut()
-        .close_algorithm
-        .set(close_algorithm.get());
+    controller.data_mut().close_algorithm = Algorithm::from(close_algorithm);
     // Step 12: Set _controller_.`[[abortAlgorithm]]` to _abortAlgorithm_.
-    controller
-        .data_mut()
-        .abort_algorithm
-        .set(abort_algorithm.get());
+    controller.data_mut().abort_algorithm = Algorithm::from(abort_algorithm);
     // (The algorithms close over `algorithm_receiver` — the underlying sink — as their `this`.)
     controller
         .data_mut()
@@ -1292,52 +1283,36 @@ pub(crate) fn set_up_writable_stream_default_controller_from_underlying_sink(
     size_algorithm: HandleValue<'_>,
 ) -> Result<(), ExnThrown> {
     // Step 1: Let _controller_ be a `new` ``WritableStreamDefaultController``.
-    let controller = WritableStreamDefaultController::new(scope)?;
-    // The write/close/abort/start algorithms are the raw callbacks, invoked with `this` =
-    // _underlyingSink_ (passed below as the algorithm receiver); an absent callback is
-    // `undefined`, which the invoker treats as the resolved-undefined algorithm.
+    let controller = WritableStreamDefaultController::new(scope, *stream)?;
+    // The write/close/abort/start algorithms are the sink's callbacks, invoked with `this` =
+    // _underlyingSink_ (passed below as the algorithm receiver). An absent callback is no
+    // algorithm, which the invoker treats as the resolved-undefined algorithm.
     // Step 2: Let _startAlgorithm_ be an algorithm that returns undefined.
     // Step 6: If _underlyingSinkDict_["``start``"] `exists`, then set _startAlgorithm_ to an
     //         algorithm which returns the result of `invoking` _underlyingSinkDict_["``start``"]
     //         with argument list « _controller_ », exception behavior "`rethrow`", and `callback
     //         this value` _underlyingSink_.
-    let start_algorithm = support::callback_member(
-        scope,
-        underlying_sink_dict.start.as_ref(),
-        c"underlying sink start must be a function",
-    )?;
+    let start_algorithm = AlgorithmArg::from_member(scope, underlying_sink_dict.start.as_ref());
     // Step 3: Let _writeAlgorithm_ be an algorithm that returns `a promise resolved with`
     //         undefined.
     // Step 7: If _underlyingSinkDict_["``write``"] `exists`, then set _writeAlgorithm_ to an
     //         algorithm which takes an argument _chunk_ and returns the result of `invoking`
     //         _underlyingSinkDict_["``write``"] with argument list « _chunk_, _controller_ » and
     //         `callback this value` _underlyingSink_.
-    let write_algorithm = support::callback_member(
-        scope,
-        underlying_sink_dict.write.as_ref(),
-        c"underlying sink write must be a function",
-    )?;
+    let write_algorithm = AlgorithmArg::from_member(scope, underlying_sink_dict.write.as_ref());
     // Step 4: Let _closeAlgorithm_ be an algorithm that returns `a promise resolved with`
     //         undefined.
     // Step 8: If _underlyingSinkDict_["``close``"] `exists`, then set _closeAlgorithm_ to an
     //         algorithm which returns the result of `invoking` _underlyingSinkDict_["``close``"]
     //         with argument list «» and `callback this value` _underlyingSink_.
-    let close_algorithm = support::callback_member(
-        scope,
-        underlying_sink_dict.close.as_ref(),
-        c"underlying sink close must be a function",
-    )?;
+    let close_algorithm = AlgorithmArg::from_member(scope, underlying_sink_dict.close.as_ref());
     // Step 5: Let _abortAlgorithm_ be an algorithm that returns `a promise resolved with`
     //         undefined.
     // Step 9: If _underlyingSinkDict_["``abort``"] `exists`, then set _abortAlgorithm_ to an
     //         algorithm which takes an argument _reason_ and returns the result of `invoking`
     //         _underlyingSinkDict_["``abort``"] with argument list « _reason_ » and `callback
     //         this value` _underlyingSink_.
-    let abort_algorithm = support::callback_member(
-        scope,
-        underlying_sink_dict.abort.as_ref(),
-        c"underlying sink abort must be a function",
-    )?;
+    let abort_algorithm = AlgorithmArg::from_member(scope, underlying_sink_dict.abort.as_ref());
     // Step 10: Perform ? `SetUpWritableStreamDefaultController`(_stream_, _controller_,
     //          _startAlgorithm_, _writeAlgorithm_, _closeAlgorithm_, _abortAlgorithm_,
     //          _highWaterMark_, _sizeAlgorithm_).
@@ -1391,12 +1366,10 @@ pub(crate) fn writable_stream_default_controller_advance_queue_if_needed(
     // Step 8: Let _value_ be ! `PeekQueueValue`(_controller_).
     // Step 9: If _value_ is the `close sentinel`, perform !
     //         `WritableStreamDefaultControllerProcessClose`(_controller_).
-    let is_close_sentinel = controller
-        .data()
-        .queue
-        .front()
-        .map(|entry| entry.is_close_sentinel)
-        .unwrap_or(false);
+    let is_close_sentinel = matches!(
+        controller.data().queue.front(),
+        Some(ValueWithSize::CloseSentinel)
+    );
     if is_close_sentinel {
         writable_stream_default_controller_process_close(scope, controller);
     } else {
@@ -1413,20 +1386,11 @@ pub(crate) fn writable_stream_default_controller_clear_algorithms(
     controller: &WritableStreamDefaultController<'_>,
 ) {
     // Step 1: Set _controller_.`[[writeAlgorithm]]` to undefined.
-    controller
-        .data_mut()
-        .write_algorithm
-        .set(value::undefined());
+    controller.data_mut().write_algorithm = Algorithm::None;
     // Step 2: Set _controller_.`[[closeAlgorithm]]` to undefined.
-    controller
-        .data_mut()
-        .close_algorithm
-        .set(value::undefined());
+    controller.data_mut().close_algorithm = Algorithm::None;
     // Step 3: Set _controller_.`[[abortAlgorithm]]` to undefined.
-    controller
-        .data_mut()
-        .abort_algorithm
-        .set(value::undefined());
+    controller.data_mut().abort_algorithm = Algorithm::None;
     // Step 4: Set _controller_.`[[strategySizeAlgorithm]]` to undefined.
     controller
         .data_mut()
@@ -1441,13 +1405,11 @@ pub(crate) fn writable_stream_default_controller_close(
     controller: &WritableStreamDefaultController<'_>,
 ) {
     // Step 1: Perform ! `EnqueueValueWithSize`(_controller_, `close sentinel`, 0).
-    //         The close sentinel is represented by the `is_close_sentinel` flag on the queue
-    //         entry; size 0 leaves the total queue size unchanged.
-    controller.data_mut().queue.push_back(ValueWithSize {
-        value: Heap::default(),
-        size: 0.0,
-        is_close_sentinel: true,
-    });
+    //         Size 0 leaves the total queue size unchanged.
+    controller
+        .data_mut()
+        .queue
+        .push_back(ValueWithSize::CloseSentinel);
     // Step 2: Perform ! `WritableStreamDefaultControllerAdvanceQueueIfNeeded`(_controller_).
     writable_stream_default_controller_advance_queue_if_needed(scope, controller);
 }
@@ -1505,22 +1467,24 @@ pub(crate) fn writable_stream_default_controller_get_chunk_size(
     // Step 1: If _controller_.`[[strategySizeAlgorithm]]` is undefined, then:
     if size_algorithm.is_undefined() {
         // Step 1.1: Assert: _controller_.`[[stream]]`.`[[state]]` is not "`writable`".
-        //           `[[strategySizeAlgorithm]]` is only set to undefined by
-        //           `…ClearAlgorithms`, which runs once the stream leaves "writable"
-        //           (`ExtractSizeAlgorithm` always installs a callable, never undefined).
-        debug_assert!(controller.stream(scope).data().state != WritableStreamState::Writable);
+        //           (`undefined` also stands for `ExtractSizeAlgorithm`'s "algorithm that
+        //           returns 1" here, so the assertion only holds for a cleared algorithm.)
         // Step 1.2: Return 1.
         return 1.0;
     }
     // Step 2: Let _returnValue_ be the result of performing
     //         _controller_.`[[strategySizeAlgorithm]]`, passing in _chunk_, and interpreting the
     //         result as a `completion record`.
-    let return_value =
-        support::invoke_algorithm(scope, size_algorithm, HandleValue::undefined(), &[chunk])
-            .and_then(|v| {
-                use js::conversion::FromJSVal;
-                f64::from_jsval_throwing(scope, v, ())
-            });
+    let return_value = support::invoke_algorithm(
+        scope,
+        support::AlgorithmArg::Js(size_algorithm),
+        HandleValue::undefined(),
+        &[chunk],
+    )
+    .and_then(|v| {
+        use js::conversion::FromJSVal;
+        f64::from_jsval_throwing(scope, v, ())
+    });
     match return_value {
         // Step 4: Return _returnValue_.[[Value]].
         Ok(size) => size,
@@ -1686,5 +1650,9 @@ pub(crate) fn peek_queue_value<'r>(
     // Step 3: Let _valueWithSize_ be _container_.[[queue]][0].
     let value_with_size = container.queue().front().unwrap();
     // Step 4: Return _valueWithSize_’s `value`.
-    value_with_size.value.get(scope)
+    //         (The close sentinel's value is never read, so it peeks as undefined.)
+    match value_with_size {
+        ValueWithSize::Chunk { value, .. } => value.get(scope),
+        ValueWithSize::CloseSentinel => HandleValue::undefined(),
+    }
 }

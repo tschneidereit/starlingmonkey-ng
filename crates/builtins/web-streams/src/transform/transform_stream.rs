@@ -16,7 +16,7 @@ use crate::writable::WritableStream;
 use core_runtime::{webidl_interface, webidl_methods};
 use js::conversion::FromJSVal;
 use js::error::ExnThrown;
-use js::gc::handle::Heap;
+use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::prelude::HandleValue;
 use js::Promise;
@@ -41,9 +41,6 @@ pub struct TransformStream {
     /// `Option`: `InitializeTransformStream` sets it to undefined, then
     /// `SetUpTransformStreamDefaultController` populates it.
     pub(crate) controller: Option<Heap<TransformStreamDefaultControllerImpl>>,
-    /// <https://streams.spec.whatwg.org/#transformstream-detached>
-    /// A boolean flag set to true when the stream is transferred
-    pub(crate) detached: bool,
     /// <https://streams.spec.whatwg.org/#transformstream-readable>
     /// The ReadableStream instance controlled by this object
     pub(crate) readable: Heap<ReadableStreamImpl>,
@@ -102,13 +99,11 @@ impl TransformStream {
         // Step 5: Let _readableHighWaterMark_ be ? `ExtractHighWaterMark`(_readableStrategy_, 0).
         let readable_high_water_mark = extract_high_water_mark(scope, &readable_strategy, 0.0)?;
         // Step 6: Let _readableSizeAlgorithm_ be ! `ExtractSizeAlgorithm`(_readableStrategy_).
-        let readable_size_algorithm =
-            scope.root_value(extract_size_algorithm(scope, &readable_strategy)?);
+        let readable_size_algorithm = extract_size_algorithm(scope, &readable_strategy)?;
         // Step 7: Let _writableHighWaterMark_ be ? `ExtractHighWaterMark`(_writableStrategy_, 1).
         let writable_high_water_mark = extract_high_water_mark(scope, &writable_strategy, 1.0)?;
         // Step 8: Let _writableSizeAlgorithm_ be ! `ExtractSizeAlgorithm`(_writableStrategy_).
-        let writable_size_algorithm =
-            scope.root_value(extract_size_algorithm(scope, &writable_strategy)?);
+        let writable_size_algorithm = extract_size_algorithm(scope, &writable_strategy)?;
         // Step 9: Let _startPromise_ be `a new promise`.
         let start_promise = Promise::new_pending(scope)?;
         // Step 10: Perform ! `InitializeTransformStream`(`this`, _startPromise_,
@@ -138,13 +133,9 @@ impl TransformStream {
             let controller: TransformStreamDefaultController<'_> = self
                 .data()
                 .controller
-                .as_ref()
-                .expect("controller is set")
-                .get(scope);
-            let controller_value = scope.root_value(controller.as_value());
-            let start_value = scope.root_value(start.as_value());
-            let result =
-                js::Function::call(scope, transformer_value, start_value, &[controller_value])?;
+                .get(scope)
+                .expect("controller is set");
+            let result = js::Function::call(scope, transformer_value, start, &[controller])?;
             start_promise.resolve(scope, result)?;
         } else {
             // Step 13: Otherwise, `resolve` _startPromise_ with undefined.
@@ -175,7 +166,8 @@ impl TransformStream {
                 .writable
                 .get(scope)
                 .data_mut()
-                .identity_transform = Some(Heap::from(*self));
+                .identity_transform
+                .set(*self);
         }
         Ok(())
     }

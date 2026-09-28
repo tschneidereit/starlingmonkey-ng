@@ -6,9 +6,8 @@ use js::{
     error::ExnThrown,
     gc::{handle::Heap, scope::Scope},
     heap::RootedTraceableBox,
-    native::Value,
-    prelude::{CallbackArgs, HandleValue, ToJSVal},
-    value, Array, Function, Object, Promise,
+    prelude::{HandleValue, ToJSVal},
+    Array, Object, Promise,
 };
 
 use crate::queuing::{QueueWithSizes, QueuingStrategy, ValueWithSize};
@@ -84,48 +83,21 @@ pub(crate) fn extract_high_water_mark(
 /// <https://streams.spec.whatwg.org/#make-size-algorithm-from-size-function>
 /// ExtractSizeAlgorithm(strategy) performs the following steps:
 ///
-/// In this implementation a controller's size algorithm is stored as a JS
-/// callable. A missing `size` member — "an algorithm that returns 1" — becomes
-/// a native callback returning 1 ([`default_size_algorithm`]); otherwise the
-/// algorithm is the `size` callback itself, later `invoked` with argument list
-/// « chunk ». Either way the stored value is callable while the stream is in
-/// use (it is only reset to `undefined` by `…ClearAlgorithms`).
-pub(crate) fn extract_size_algorithm(
-    scope: &Scope<'_>,
+/// A controller stores its size algorithm as a JS value: the `size` callback
+/// itself, later `invoked` with argument list « chunk », or `undefined` for "an
+/// algorithm that returns 1", which the controllers apply without a call.
+pub(crate) fn extract_size_algorithm<'r>(
+    scope: &'r Scope<'_>,
     strategy: &Option<QueuingStrategy<'_>>,
-) -> Result<Value, ExnThrown> {
+) -> Result<HandleValue<'r>, ExnThrown> {
     // Step 1: If _strategy_["``size``"] does not `exist`, return an algorithm that returns 1.
     // Step 2: Return an algorithm that performs the following steps, taking a _chunk_ argument:
     //         Return the result of `invoking` _strategy_["``size``"] with argument list « _chunk_
     //         ».
     match strategy.as_ref().and_then(|s| s.size.as_ref()) {
-        Some(size_fn) if size_fn.is_callable() => Ok(size_fn.as_value()),
-        Some(_) => Err(js::error::throw_type_error(
-            scope,
-            c"queuing strategy size must be a function",
-        )),
-        // The "returns 1" default size algorithm is a per-global singleton (it is
-        // an internal slot, never author-observable).
-        None => js::class::get_or_init_shared_function(
-            scope,
-            default_size_algorithm as *const () as usize,
-            |scope| {
-                let undef = HandleValue::undefined();
-                Function::new_callback(scope, c"size", 1, default_size_algorithm, undef)
-            },
-        )
-        .map(|f| f.as_value()),
+        Some(size_fn) => Ok(scope.root_value(size_fn.as_value())),
+        None => Ok(HandleValue::undefined()),
     }
-}
-
-/// The default `QueuingStrategySize` algorithm — `ExtractSizeAlgorithm` step 1's
-/// "an algorithm that returns 1". Used when a strategy omits `size`.
-fn default_size_algorithm(
-    _scope: &Scope<'_>,
-    _args: CallbackArgs<'_>,
-    _payload: HandleValue<'_>,
-) -> Result<Value, ExnThrown> {
-    Ok(value::from_f64(1.0))
 }
 
 /// <https://streams.spec.whatwg.org/#dequeue-value>
@@ -148,7 +120,7 @@ pub(crate) fn dequeue_value<'r>(
     let value_with_size = RootedTraceableBox::new(container.queue_mut().pop_front().unwrap());
     // Step 5: Set _container_.[[queueTotalSize]] to _container_.[[queueTotalSize]] −
     //         _valueWithSize_’s `size`.
-    let mut total = container.queue_total_size() - value_with_size.size;
+    let mut total = container.queue_total_size() - value_with_size.size();
     // Step 6: If _container_.[[queueTotalSize]] < 0, set _container_.[[queueTotalSize]] to 0. (This
     //         can occur due to rounding errors.)
     if total < 0.0 {
@@ -156,7 +128,11 @@ pub(crate) fn dequeue_value<'r>(
     }
     container.set_queue_total_size(total);
     // Step 7: Return _valueWithSize_’s `value`.
-    value_with_size.value.get(scope)
+    //         (The close sentinel's value is never read, so it dequeues as undefined.)
+    match &*value_with_size {
+        ValueWithSize::Chunk { value, .. } => value.get(scope),
+        ValueWithSize::CloseSentinel => HandleValue::undefined(),
+    }
 }
 
 /// <https://streams.spec.whatwg.org/#enqueue-value-with-size>
@@ -185,10 +161,9 @@ pub(crate) fn enqueue_value_with_size(
     }
     // Step 4: `Append` a new `value-with-size` with `value` _value_ and `size` _size_ to
     //         _container_.[[queue]].
-    container.queue_mut().push_back(ValueWithSize {
+    container.queue_mut().push_back(ValueWithSize::Chunk {
         value: Heap::from(value.get()),
         size,
-        is_close_sentinel: false,
     });
     // Step 5: Set _container_.[[queueTotalSize]] to _container_.[[queueTotalSize]] + _size_.
     let total = container.queue_total_size() + size;

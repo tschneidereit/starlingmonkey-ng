@@ -14,13 +14,14 @@ use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
 use js::prelude::{HandleValue, OptionHeapExt};
-use js::{Function, Object, Promise};
+use js::{Object, Promise};
 use web_streams::readable::default_reader::DefaultReaderImpl;
 use web_streams::readable::native_read::{
     acquire_native_reader, native_reader_cancel, native_reader_read, NativeReadSteps,
 };
 use web_streams::readable::readable_stream::{ReadableStream, ReadableStreamImpl};
 use web_streams::readable::{DefaultReader, ReadableStreamDefaultController};
+use web_streams::AlgorithmArg;
 
 /// State for one body proxy: the internal reader on the original stream, the
 /// proxy stream's controller (captured at pull time), and the in-flight pull's
@@ -50,12 +51,8 @@ impl BodyProxySource {
     }
 
     fn controller<'r>(&self, scope: &'r Scope) -> ReadableStreamDefaultController<'r> {
-        let controller = self
-            .stream(scope)
-            .controller(scope)
-            .expect("source is fully initialized");
-        controller
-            .cast::<ReadableStreamDefaultController>()
+        self.stream(scope)
+            .default_controller(scope)
             .expect("Body proxies always have a default controller")
     }
 }
@@ -68,16 +65,13 @@ pub(crate) fn proxy_body_stream<'r>(
 ) -> Result<ReadableStream<'r>, ExnThrown> {
     let reader = acquire_native_reader(scope, source)?;
     let state = BodyProxySource::new(scope, reader)?;
-    let pull = Function::new_callback(scope, c"", 1, proxy_pull, state)?;
-    let pull_value = scope.root_value(pull.as_value());
+    let pull = AlgorithmArg::native(scope, proxy_pull, state)?;
     // Cancelling the proxy must cancel the stream it is draining, otherwise the original stays
     // locked to the internal reader forever, and the source isn't stopped & dropped.
-    let cancel = Function::new_callback(scope, c"", 1, proxy_cancel, state)?;
-    let cancel_value = scope.root_value(cancel.as_value());
+    let cancel = AlgorithmArg::native(scope, proxy_cancel, state)?;
     // No native-source marker: the proxy must deliver through its own queue, so
     // the incoming→outgoing shortcut does not apply to it.
-    let stream =
-        ReadableStream::new_native(scope, HandleValue::undefined(), pull_value, cancel_value)?;
+    let stream = ReadableStream::new_native(scope, HandleValue::undefined(), pull, cancel)?;
     state.data_mut().stream.set(stream);
     Ok(stream)
 }

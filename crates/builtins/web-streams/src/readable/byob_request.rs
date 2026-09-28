@@ -7,8 +7,7 @@ use js::conversion::EnforceRange;
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
-use js::native::Value;
-use js::prelude::{HandleValue, OptionHeapExt};
+use js::prelude::OptionHeapExt;
 
 /// <https://streams.spec.whatwg.org/#rs-byob-request-class>
 #[webidl_interface]
@@ -20,7 +19,7 @@ pub struct ReadableStreamBYOBRequest {
     /// <https://streams.spec.whatwg.org/#ReadableStreamBYOBRequest-view>
     /// A typed array representing the destination region to which the controller can write generated
     /// data, or null after the BYOB request has been invalidated.
-    pub(crate) view: Heap<Value>,
+    pub(crate) view: Option<Heap<js::typedarray::ArrayBufferView>>,
 }
 
 #[webidl_methods]
@@ -32,20 +31,12 @@ impl ReadableStreamBYOBRequest {
 
     /// <https://streams.spec.whatwg.org/#rs-byob-request-view>
     #[getter]
-    fn view<'r>(&self, scope: &'r Scope<'_>) -> Option<HandleValue<'r>> {
+    fn view<'r>(&self, scope: &'r Scope<'_>) -> Option<js::ArrayBufferView<'r>> {
         // WebIDL: Uint8Array
         // Step 1: Return `this`.`[[view]]`.
-        //         The slot holds a `Uint8Array` or null (after invalidation); a null is surfaced as
-        //         the WebIDL nullable's `None`.
-        if self.data().view.is_undefined() {
-            return None;
-        }
-        let view = self.data().view.get(scope);
-        if view.is_null() {
-            None
-        } else {
-            Some(view)
-        }
+        //         The slot holds a `Uint8Array`, or `None` after invalidation, which the WebIDL
+        //         nullable surfaces as null.
+        self.data().view.get(scope)
     }
 
     /// <https://streams.spec.whatwg.org/#rs-byob-request-respond>
@@ -68,10 +59,11 @@ impl ReadableStreamBYOBRequest {
         };
         // Step 2: If ! `IsDetachedBuffer`(`this`.`[[view]]`.[[ArrayBuffer]]) is true, throw a
         //         ``TypeError`` exception.
-        let view = js::Object::from_value(scope, self.data().view.get(scope).get())
-            .ok()
-            .and_then(js::ArrayBufferView::from_object)
-            .expect("BYOB request view is an ArrayBufferView");
+        let view = self
+            .data()
+            .view
+            .get(scope)
+            .expect("BYOB request view is set while its controller is");
         if view.viewed_buffer(scope)?.is_detached() {
             return Err(js::error::throw_type_error(
                 scope,
@@ -96,19 +88,8 @@ impl ReadableStreamBYOBRequest {
     fn respond_with_new_view(
         &self,
         scope: &Scope<'_>,
-        view: HandleValue<'_>, /* WebIDL: ArrayBufferView */
+        view: js::ArrayBufferView<'_>,
     ) -> Result<(), ExnThrown> {
-        // The WebIDL signature coerces the argument to an `ArrayBufferView`; a non-view value is a
-        // ``TypeError`` before the steps below run.
-        let view = js::Object::from_value(scope, *view)
-            .ok()
-            .and_then(js::ArrayBufferView::from_object)
-            .ok_or_else(|| {
-                js::error::throw_type_error(
-                    scope,
-                    c"respondWithNewView() argument is not an ArrayBufferView",
-                )
-            })?;
         // Step 1: If `this`.`[[controller]]` is undefined, throw a ``TypeError`` exception.
         let controller = match self.data().controller.get(scope) {
             Some(c) => c,

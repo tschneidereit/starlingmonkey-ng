@@ -2,12 +2,16 @@
 
 //! <https://streams.spec.whatwg.org/>
 
-use super::async_iterator::{ReadableStreamAsyncIterator, ReadableStreamAsyncIteratorImpl};
+use super::async_iterator::ReadableStreamAsyncIterator;
 use super::enums::ReadableStreamType;
 use super::options::{
     ReadableStreamGetReaderOptions, ReadableStreamIteratorOptions, StreamPipeOptions,
 };
 use super::underlying_source::UnderlyingSource;
+use super::unions::{
+    HeapReadableStreamController, HeapReadableStreamReader, ReadableStreamController,
+    ReadableStreamReader,
+};
 use super::{algorithms, ReadableByteStreamController};
 use crate::algorithms::{extract_high_water_mark, extract_size_algorithm};
 use crate::queuing::QueuingStrategy;
@@ -18,14 +22,14 @@ use crate::readable::algorithms::{
     readable_stream_default_controller_error, readable_stream_default_tee,
 };
 use crate::readable::ReadableStreamDefaultController;
+use crate::support::AlgorithmArg;
 use crate::transform::readable_writable_pair::ReadableWritablePair;
 use crate::writable::WritableStream;
 use core_runtime::{webidl_interface, webidl_methods};
 use js::prelude::ToJSVal;
 use js::{
-    conversion::ConversionError, conversion::FromJSVal, error::ExnThrown, gc::handle::Heap,
-    gc::handle::OptionHeapExt, gc::scope::Scope, native::Value, prelude::HandleValue, Object,
-    Promise, Uint8Array,
+    conversion::FromJSVal, error::ExnThrown, gc::handle::Heap, gc::handle::OptionHeapExt,
+    gc::scope::Scope, native::Value, prelude::HandleValue, Object, Promise, Uint8Array,
 };
 use web_globals::signals::AbortSignal;
 
@@ -41,8 +45,6 @@ fn pipe_options<'r>(
     }
 }
 
-pub type ReadableStreamReader<'a> = HandleValue<'a>; // WebIDL: (DefaultReader or BYOBReader)
-
 /// <https://streams.spec.whatwg.org/#rs-class>
 #[webidl_interface]
 pub struct ReadableStream {
@@ -50,22 +52,16 @@ pub struct ReadableStream {
     /// A ReadableStreamDefaultController or ReadableByteStreamController created with the ability to
     /// control the state and queue of this stream
     ///
-    /// Polymorphic (default-or-byte controller), so stored as an `Object` and
-    /// downcast with `Object::cast` at the use site. `None` until set up.
-    pub(crate) controller: Option<Heap<js::object::Object>>,
-    /// <https://streams.spec.whatwg.org/#readablestream-detached>
-    /// A boolean flag set to true when the stream is transferred
-    pub(crate) detached: bool,
+    /// `None` until `SetUpReadableStreamDefaultController` or `SetUpReadableByteStreamController`
+    /// runs.
+    pub(crate) controller: Option<HeapReadableStreamController>,
     /// <https://streams.spec.whatwg.org/#readablestream-disturbed>
     /// A boolean flag set to true when the stream has been read from or canceled
     pub(crate) disturbed: bool,
     /// <https://streams.spec.whatwg.org/#readablestream-reader>
     /// A DefaultReader or BYOBReader instance, if the stream is locked
     /// to a reader, or undefined if it is not
-    ///
-    /// Polymorphic (default-or-BYOB reader), so stored as an `Object` and
-    /// downcast with `Object::cast` at the use site. `None` when unlocked.
-    pub(crate) reader: Option<Heap<js::object::Object>>,
+    pub(crate) reader: Option<HeapReadableStreamReader>,
     /// <https://streams.spec.whatwg.org/#readablestream-state>
     /// A string containing the stream’s current state, used internally; one of "readable",
     /// "closed", or "errored"
@@ -163,7 +159,7 @@ impl ReadableStream {
         //         `ExtractHighWaterMark`(_strategy_, 1). Perform ?
         //         `SetUpDefaultControllerFromUnderlyingSource`(`this`,
         //         _underlyingSource_, _underlyingSourceDict_, _highWaterMark_, _sizeAlgorithm_).
-        let size_algorithm = scope.root_value(extract_size_algorithm(scope, &strategy)?);
+        let size_algorithm = extract_size_algorithm(scope, &strategy)?;
         let high_water_mark = extract_high_water_mark(scope, &strategy, 1.0)?;
         algorithms::set_up_readable_stream_default_controller_from_underlying_source(
             scope,
@@ -175,8 +171,8 @@ impl ReadableStream {
         )
     }
 
-    /// Create a `ReadableStream` driven by the provided `pull`/`cancel` algorithms (JS
-    /// functions, typically native callbacks).
+    /// Create a `ReadableStream` driven by the provided `pull`/`cancel` algorithms, typically
+    /// native callbacks.
     ///
     /// `pull` is called with the stream's controller as its argument when more data is wanted.
     /// `cancel` is called with the cancel reason.
@@ -191,13 +187,13 @@ impl ReadableStream {
     pub fn new_native<'r>(
         scope: &'r Scope<'_>,
         underlying_source: impl ToJSVal<'r>,
-        pull: HandleValue<'_>,
-        cancel: HandleValue<'_>,
+        pull: AlgorithmArg<'r>,
+        cancel: AlgorithmArg<'r>,
     ) -> Result<ReadableStream<'r>, ExnThrown> {
         let underlying_source = underlying_source.to_jsval_throwing(scope)?;
         let stream = create_readable_stream(
             scope,
-            HandleValue::undefined(),
+            AlgorithmArg::None,
             pull,
             cancel,
             0.0,
@@ -219,8 +215,9 @@ impl ReadableStream {
         scope: &'r Scope<'_>,
         bytes: &[u8],
     ) -> Result<ReadableStream<'r>, ExnThrown> {
+        let none = AlgorithmArg::None;
         let undef = HandleValue::undefined();
-        let stream = create_readable_stream(scope, undef, undef, undef, 1.0, undef)?;
+        let stream = create_readable_stream(scope, none, none, none, 1.0, undef)?;
         let controller = stream
             .default_controller(scope)
             .expect("stream has a default controller");
@@ -276,8 +273,10 @@ impl ReadableStream {
         // Step 1: If ! `IsReadableStreamLocked`(`this`) is true, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if self.is_locked() {
-            js::error::throw_type_error(scope, c"Cannot cancel a stream that already has a reader");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"Cannot cancel a stream that already has a reader",
+            ));
         }
         // Step 2: Return ! `ReadableStreamCancel`(`this`, _reason_).
         let reason = reason.unwrap_or(HandleValue::undefined());
@@ -296,12 +295,12 @@ impl ReadableStream {
         let mode = options.and_then(|o| o.mode);
         if mode.is_none() {
             let reader = algorithms::acquire_readable_stream_default_reader(scope, self)?;
-            return Ok(scope.root_value(reader.as_value()));
+            return Ok(ReadableStreamReader::Default(reader));
         }
         // Step 2: Assert: _options_["``mode``"] is "``byob``".
         // Step 3: Return ? `AcquireBYOBReader`(`this`).
         let reader = algorithms::acquire_readable_stream_byob_reader(scope, self)?;
-        Ok(scope.root_value(reader.as_value()))
+        Ok(ReadableStreamReader::Byob(reader))
     }
 
     /// <https://streams.spec.whatwg.org/#rs-pipe-through>
@@ -353,39 +352,23 @@ impl ReadableStream {
         &self,
         scope: &'r Scope<'_>,
         destination: WritableStream<'_>,
-        options: Option<HandleValue<'_>>,
+        options: Option<StreamPipeOptions<'_>>,
     ) -> Result<Promise<'r>, ExnThrown> {
-        // `pipeTo` returns a promise, so per WebIDL a failed coercion of the
-        // `options` dictionary (e.g. an invalid `signal`) must reject the
-        // returned promise rather than throw synchronously. The dictionary is
-        // therefore coerced here, inside the method, instead of as a typed
-        // parameter.
-        let options = match options {
-            Some(v) if !v.is_undefined() => match StreamPipeOptions::from_jsval(scope, v, ()) {
-                Ok(o) => Some(o),
-                Err(e) => {
-                    // A non-object value (e.g. an invalid `signal`) fails without
-                    // a pending exception; surface it as a TypeError so the
-                    // returned promise rejects with one.
-                    if let ConversionError::Failure(msg) = e {
-                        js::error::throw_type_error(scope, msg.as_ref());
-                    }
-                    return Promise::new_rejected_with_pending_error(scope);
-                }
-            },
-            _ => None,
-        };
         // Step 1: If ! `IsReadableStreamLocked`(`this`) is true, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if self.is_locked() {
-            js::error::throw_type_error(scope, c"cannot pipe from a locked ReadableStream");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"cannot pipe from a locked ReadableStream",
+            ));
         }
         // Step 2: If ! `IsWritableStreamLocked`(_destination_) is true, return `a promise rejected
         //         with` a ``TypeError`` exception.
         if crate::writable::algorithms::is_writable_stream_locked(&destination) {
-            js::error::throw_type_error(scope, c"cannot pipe to a locked WritableStream");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"cannot pipe to a locked WritableStream",
+            ));
         }
         // Step 3: Let _signal_ be _options_["``signal``"] if it `exists`, or undefined otherwise.
         let (prevent_close, prevent_abort, prevent_cancel, signal) = pipe_options(&options);
@@ -446,15 +429,12 @@ impl ReadableStream {
         // Step 1: Let _reader_ be ? `AcquireDefaultReader`(`this`).
         let reader = algorithms::acquire_readable_stream_default_reader(scope, self)?;
         // Step 2: Let _iterator_ be a `new` ``ReadableStreamAsyncIterator``.
-        let iterator =
-            js::class::create_instance_with::<ReadableStreamAsyncIteratorImpl>(scope, |_| {
-                ReadableStreamAsyncIteratorImpl::default()
-            })?;
         // Step 3: Set _iterator_'s reader to _reader_.
-        iterator.data_mut().reader = Some(Heap::from(reader));
         // Step 4: Let _preventCancel_ be _options_["``preventCancel``"].
         // Step 5: Set _iterator_'s prevent cancel to _preventCancel_.
-        iterator.data_mut().prevent_cancel = options.map(|o| o.prevent_cancel).unwrap_or(false);
+        //         (`ReadableStreamAsyncIterator::new` performs steps 3 and 5.)
+        let prevent_cancel = options.is_some_and(|o| o.prevent_cancel);
+        let iterator = ReadableStreamAsyncIterator::new(scope, reader, prevent_cancel)?;
         // Step 6: Return _iterator_.
         Ok(iterator)
     }
@@ -497,36 +477,45 @@ impl ReadableStream {
     }
 
     pub fn error(&self, scope: &Scope<'_>, reason: HandleValue<'_>) {
-        if let Some(controller) = self.default_controller(scope) {
-            readable_stream_default_controller_error(scope, &controller, reason);
-        } else {
-            let controller = self.byte_controller(scope).unwrap();
-            readable_byte_stream_controller_error(scope, &controller, reason);
+        match self.controller(scope) {
+            ReadableStreamController::Default(controller) => {
+                readable_stream_default_controller_error(scope, &controller, reason)
+            }
+            ReadableStreamController::Byte(controller) => {
+                readable_byte_stream_controller_error(scope, &controller, reason)
+            }
         }
     }
 
-    pub(crate) fn default_controller<'r>(
-        &'r self,
-        scope: &'r Scope<'_>,
-    ) -> Option<ReadableStreamDefaultController<'r>> {
+    /// The stream's `[[controller]]`. Panics if the stream is not set up yet.
+    pub(crate) fn controller<'r>(&self, scope: &'r Scope<'_>) -> ReadableStreamController<'r> {
         self.data()
             .controller
-            .get(scope)
+            .as_ref()
             .expect("stream has a controller")
-            .cast::<ReadableStreamDefaultController>()
-            .ok()
+            .get(scope)
     }
 
+    /// The stream's `[[controller]]` if it is a `ReadableStreamDefaultController`.
+    pub fn default_controller<'r>(
+        &self,
+        scope: &'r Scope<'_>,
+    ) -> Option<ReadableStreamDefaultController<'r>> {
+        match self.controller(scope) {
+            ReadableStreamController::Default(controller) => Some(controller),
+            ReadableStreamController::Byte(_) => None,
+        }
+    }
+
+    /// The stream's `[[controller]]` if it is a `ReadableByteStreamController`.
     pub(crate) fn byte_controller<'r>(
         &self,
         scope: &'r Scope<'_>,
     ) -> Option<ReadableByteStreamController<'r>> {
-        self.data()
-            .controller
-            .get(scope)
-            .expect("stream has a controller")
-            .cast::<ReadableByteStreamController>()
-            .ok()
+        match self.controller(scope) {
+            ReadableStreamController::Byte(controller) => Some(controller),
+            ReadableStreamController::Default(_) => None,
+        }
     }
 
     /// The native source object backing this stream, if any (see
@@ -541,7 +530,7 @@ impl ReadableStream {
 
     /// Record `source` as this stream's native byte source.
     pub fn set_native_source(&self, source: &Object<'_>) {
-        self.data_mut().native_byte_source = Some(Heap::from(*source));
+        self.data_mut().native_byte_source.set(*source);
     }
 
     /// For streams piped to an identity `TransformStream` whose readable end has not
@@ -572,13 +561,5 @@ impl ReadableStream {
         // before the promise handle leaves this scope.
         let demand = transform.data().backpressure_change_promise.get(scope);
         demand
-    }
-
-    pub fn controller(&self, scope: &'s Scope<'_>) -> Option<Object<'s>> {
-        self.data().controller.get(scope)
-    }
-
-    pub fn reader(&self, scope: &'s Scope<'_>) -> Option<Object<'s>> {
-        self.data().reader.get(scope)
     }
 }

@@ -13,7 +13,7 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
-use js::prelude::{HandleValue, OptionHeapExt};
+use js::prelude::HandleValue;
 
 /// <https://streams.spec.whatwg.org/#rs-default-controller-class>
 #[webidl_interface]
@@ -21,7 +21,7 @@ pub struct ReadableStreamDefaultController {
     /// <https://streams.spec.whatwg.org/#ReadableStreamDefaultController-cancelalgorithm>
     /// A promise-returning algorithm, taking one argument (the cancel reason), which communicates a
     /// requested cancelation to the underlying source
-    pub(crate) cancel_algorithm: Heap<Value>,
+    pub(crate) cancel_algorithm: crate::support::Algorithm,
     /// <https://streams.spec.whatwg.org/#ReadableStreamDefaultController-closerequested>
     /// A boolean flag indicating whether the stream has been closed by its underlying source, but
     /// still has chunks in its internal queue that have not yet been read
@@ -33,7 +33,7 @@ pub struct ReadableStreamDefaultController {
     pub(crate) pull_again: bool,
     /// <https://streams.spec.whatwg.org/#ReadableStreamDefaultController-pullalgorithm>
     /// A promise-returning algorithm that pulls data from the underlying source
-    pub(crate) pull_algorithm: Heap<Value>,
+    pub(crate) pull_algorithm: crate::support::Algorithm,
     /// <https://streams.spec.whatwg.org/#ReadableStreamDefaultController-pulling>
     /// A boolean flag set to true while the underlying source’s pull algorithm is executing and
     /// the returned promise has not yet fulfilled, used to prevent reentrant calls
@@ -59,16 +59,12 @@ pub struct ReadableStreamDefaultController {
     /// The `this` value the start/pull/cancel algorithms are invoked with.
     ///
     /// Not a spec slot: the spec models pull/cancel as algorithms closing over
-    /// the underlying source. We store the raw callbacks plus their receiver
-    /// (the underlying source object for the from-underlying-source path, or
-    /// `undefined` for native algorithms, which ignore `this`).
+    /// the underlying source. We store a JS algorithm's callback plus its
+    /// receiver, the underlying source object. Native algorithms don't use it.
     pub(crate) algorithm_receiver: Heap<Value>,
     /// <https://streams.spec.whatwg.org/#ReadableStreamDefaultController-stream>
     /// The ReadableStream instance controlled
-    ///
-    /// `Option` because the controller is created before `SetUp...Controller`
-    /// wires it to its stream; it is always `Some` thereafter.
-    pub(crate) stream: Option<Heap<ReadableStreamImpl>>,
+    pub(crate) stream: Heap<ReadableStreamImpl>,
     /// The pull-reaction callbacks (`DefaultControllerCallPullIfNeeded` steps
     /// 7-8; payload = this controller), created on the first pull.
     pub(crate) pull_fulfilled_fn: Option<Heap<js::function::Function>>,
@@ -77,8 +73,11 @@ pub struct ReadableStreamDefaultController {
 
 #[webidl_methods]
 impl ReadableStreamDefaultController {
-    fn new() -> Self {
-        ReadableStreamDefaultControllerImpl::default()
+    fn new(stream: ReadableStream<'_>) -> Self {
+        ReadableStreamDefaultControllerImpl {
+            stream: Heap::from(stream),
+            ..Default::default()
+        }
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-desired-size>
@@ -128,11 +127,8 @@ impl ReadableStreamDefaultController {
         Ok(())
     }
 
-    pub(crate) fn stream<'r>(&'r self, scope: &'r Scope<'_>) -> ReadableStream<'r> {
-        self.data()
-            .stream
-            .get(scope)
-            .expect("controller has a stream")
+    pub(crate) fn stream<'r>(&self, scope: &'r Scope<'_>) -> ReadableStream<'r> {
+        self.data().stream.get(scope)
     }
 }
 

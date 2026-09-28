@@ -165,3 +165,26 @@ fn abort_signal_not_suppressed_by_stop_immediate_propagation() {
     ));
     assert_eq!(out, "rejected:stop|aborted:true");
 }
+
+/// Aborting a pipe runs author code synchronously: the destination controller's
+/// `signal` listeners. A listener that enqueues into the source re-enters the
+/// pipe's pending read request, which must not find the pipe state borrowed.
+#[test]
+fn abort_listener_enqueueing_into_source_does_not_panic() {
+    let out = run(r#"
+        globalThis.__out = "pending";
+        let sourceController;
+        const rs = new ReadableStream({ start(c) { sourceController = c; } });
+        const ws = new WritableStream({
+            start(c) {
+                c.signal.addEventListener("abort", () => sourceController.enqueue("late"));
+            },
+        });
+        const ac = new AbortController();
+        const p = rs.pipeTo(ws, { signal: ac.signal });
+        Promise.resolve().then(() => ac.abort(new Error("stop")));
+        p.then(() => { globalThis.__out = "fulfilled"; },
+               e => { globalThis.__out = "rejected:" + e.message; });
+        "#);
+    assert_eq!(out, "rejected:stop");
+}

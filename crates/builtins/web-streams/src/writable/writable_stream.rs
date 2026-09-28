@@ -14,7 +14,7 @@ use crate::writable::WritableStreamDefaultController;
 use core_runtime::{webidl_interface, webidl_methods};
 use js::conversion::FromJSVal;
 use js::error::ExnThrown;
-use js::gc::handle::Heap;
+use js::gc::handle::{Heap, OptionHeapExt};
 use js::gc::scope::Scope;
 use js::native::Value;
 use js::prelude::HandleValue;
@@ -30,16 +30,8 @@ use web_globals::events::algorithms::ScriptStackState;
 /// normally; once moved out via `take`/`pop_front` it must be consumed
 /// immediately (`into_promise`) or kept in a `RootedTraceableBox`.
 #[js::must_root]
-#[derive(Default, js::ScopeRoot)]
+#[derive(core_runtime::Traceable, Default, js::ScopeRoot)]
 pub(crate) struct PromiseSlot(Heap<js::promise::Promise>);
-
-// Safety: the only GC pointer is the inner Heap.
-unsafe impl js::heap::Trace for PromiseSlot {
-    #[inline]
-    unsafe fn trace(&self, trc: *mut js::native::JSTracer) {
-        self.0.trace(trc);
-    }
-}
 
 impl PromiseSlot {
     /// Wrap a promise in a slot.
@@ -98,9 +90,6 @@ pub struct WritableStream {
     /// `Option` because the stream is created before `SetUp...Controller` wires
     /// it; always `Some` thereafter.
     pub(crate) controller: Option<Heap<WritableStreamDefaultControllerImpl>>,
-    /// <https://streams.spec.whatwg.org/#writablestream-detached>
-    /// A boolean flag set to true when the stream is transferred
-    pub(crate) detached: bool,
     /// <https://streams.spec.whatwg.org/#writablestream-inflightwriterequest>
     /// A slot set to the promise for the current in-flight write operation while the underlying
     /// sink’s write algorithm is executing and has not yet fulfilled, used to prevent reentrant
@@ -193,7 +182,7 @@ impl WritableStream {
         // Step 4: Perform ! `InitializeWritableStream`(`this`).
         algorithms::initialize_writable_stream(self);
         // Step 5: Let _sizeAlgorithm_ be ! `ExtractSizeAlgorithm`(_strategy_).
-        let size_algorithm = scope.root_value(extract_size_algorithm(scope, &strategy)?);
+        let size_algorithm = extract_size_algorithm(scope, &strategy)?;
         // Step 6: Let _highWaterMark_ be ? `ExtractHighWaterMark`(_strategy_, 1).
         let high_water_mark = extract_high_water_mark(scope, &strategy, 1.0)?;
         // Step 7: Perform ? `SetUpWritableStreamDefaultControllerFromUnderlyingSink`(`this`,
@@ -225,8 +214,10 @@ impl WritableStream {
         // Step 1: If ! `IsWritableStreamLocked`(`this`) is true, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if algorithms::is_writable_stream_locked(self) {
-            js::error::throw_type_error(scope, c"Cannot abort a stream that already has a writer");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"Cannot abort a stream that already has a writer",
+            ));
         }
         // Step 2: Return ! `WritableStreamAbort`(`this`, _reason_).
         Ok(algorithms::writable_stream_abort(
@@ -243,14 +234,18 @@ impl WritableStream {
         // Step 1: If ! `IsWritableStreamLocked`(`this`) is true, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if algorithms::is_writable_stream_locked(self) {
-            js::error::throw_type_error(scope, c"Cannot close a stream that already has a writer");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"Cannot close a stream that already has a writer",
+            ));
         }
         // Step 2: If ! `WritableStreamCloseQueuedOrInFlight`(`this`) is true, return `a promise
         //         rejected with` a ``TypeError`` exception.
         if algorithms::writable_stream_close_queued_or_in_flight(self) {
-            js::error::throw_type_error(scope, c"Cannot close an already-closing stream");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"Cannot close an already-closing stream",
+            ));
         }
         // Step 3: Return ! `WritableStreamClose`(`this`).
         Ok(algorithms::writable_stream_close(scope, self))
@@ -272,8 +267,7 @@ impl WritableStream {
     ) -> WritableStreamDefaultController<'r> {
         self.data()
             .controller
-            .as_ref()
-            .expect("stream has a controller")
             .get(scope)
+            .expect("stream has a controller")
     }
 }

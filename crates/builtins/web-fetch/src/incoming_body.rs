@@ -22,6 +22,7 @@ use platform::http::IncomingBody;
 use web_streams::readable::default_controller::ReadableStreamDefaultControllerImpl;
 use web_streams::readable::readable_stream::{ReadableStream, ReadableStreamImpl};
 use web_streams::readable::ReadableStreamDefaultController;
+use web_streams::AlgorithmArg;
 
 /// Back a new external `ArrayBuffer` with `bytes`, zero-copy when the chunk is
 /// uniquely owned. A shared chunk (another `Bytes` clone alive, e.g. a body
@@ -251,14 +252,11 @@ pub(crate) fn host_body_stream<'r>(
     host_body: IncomingBody,
 ) -> Result<(ReadableStream<'r>, HostBodySource<'r>), ExnThrown> {
     let state = HostBodySource::new(scope, host_body)?;
-    // TODO: check if `pull` and `cancel` could be per-global singletons and read `state` from their args.
-    let pull = Function::new_callback(scope, c"", 1, host_pull, state)?;
-    let cancel = Function::new_callback(scope, c"", 1, host_cancel, state)?;
-    let pull_value = scope.root_value(pull.as_value());
-    let cancel_value = scope.root_value(cancel.as_value());
+    let pull = AlgorithmArg::native(scope, host_pull, state)?;
+    let cancel = AlgorithmArg::native(scope, host_cancel, state)?;
     // Record the source so the stream can be recognized as host-backed via
     // `ReadableStream::native_source`.
-    let stream = ReadableStream::new_native(scope, state, pull_value, cancel_value)?;
+    let stream = ReadableStream::new_native(scope, state, pull, cancel)?;
     // Backlink the stream, so a pull can ask what it is feeding.
     state.data_mut().stream = Some(Heap::from(stream));
     Ok((stream, state))

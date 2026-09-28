@@ -22,22 +22,31 @@ use js::native::Value;
 ///
 /// <https://streams.spec.whatwg.org/#value-with-size>
 #[js::must_root]
-#[derive(Traceable, Default)]
-pub struct ValueWithSize {
-    /// The enqueued chunk.
-    pub value: Heap<Value>,
-    /// The chunk's size, as computed by the stream's size algorithm. Already
-    /// `ToNumber`-coerced (the size algorithm returns an `unrestricted double`),
-    /// so it is a plain `f64` rather than a JS value.
-    #[no_trace]
-    pub size: f64,
-    /// Whether this entry is the writable stream's `close sentinel` (enqueued by
-    /// `WritableStreamDefaultControllerClose` with size 0). The readable
-    /// controllers never set this.
+#[derive(Traceable)]
+pub enum ValueWithSize {
+    /// An enqueued chunk.
+    Chunk {
+        value: Heap<Value>,
+        /// The chunk's size, as computed by the stream's size algorithm.
+        #[no_trace]
+        size: f64,
+    },
+    /// The writable stream's `close sentinel`, enqueued by
+    /// `WritableStreamDefaultControllerClose` with size 0. Never enqueued by the readable
+    /// controllers.
     ///
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-close-sentinel>
-    #[no_trace]
-    pub is_close_sentinel: bool,
+    CloseSentinel,
+}
+
+impl ValueWithSize {
+    /// The entry's `size`.
+    pub fn size(&self) -> f64 {
+        match self {
+            Self::Chunk { size, .. } => *size,
+            Self::CloseSentinel => 0.0,
+        }
+    }
 }
 
 /// A container with `[[queue]]` and `[[queueTotalSize]]` internal slots, as

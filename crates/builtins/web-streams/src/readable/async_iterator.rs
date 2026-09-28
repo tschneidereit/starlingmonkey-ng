@@ -6,8 +6,8 @@
 //!
 //! `ReadableStream.prototype.values()` and `[Symbol.asyncIterator]()` return an
 //! instance of this interface. Its prototype chains to `%AsyncIteratorPrototype%`
-//! (via `js_proto = "AsyncIterator"`), which supplies `[Symbol.asyncIterator]`
-//! returning `this`. The `next`/`return` methods implement WebIDL §3.7.10.2's
+//! (set up in `add_to_global`), which supplies `[Symbol.asyncIterator]` returning
+//! `this`. The `next`/`return` methods implement WebIDL §3.7.10.2's
 //! default async iterator semantics: calls are serialized through an "ongoing
 //! promise", and a finished iterator yields `{ value: undefined, done: true }`.
 
@@ -34,7 +34,7 @@ use js::{Function, Object, Promise};
 #[webidl_interface(hidden, to_string_tag = "ReadableStream AsyncIterator")]
 pub struct ReadableStreamAsyncIterator {
     /// The `DefaultReader` acquired for this iteration.
-    pub(crate) reader: Option<Heap<DefaultReaderImpl>>,
+    pub(crate) reader: Heap<DefaultReaderImpl>,
     /// The `preventCancel` option captured at creation.
     #[no_trace]
     pub(crate) prevent_cancel: bool,
@@ -56,34 +56,63 @@ pub struct ReadableStreamAsyncIterator {
 
 #[webidl_methods]
 impl ReadableStreamAsyncIterator {
-    /// Not exposed to JS (see `hidden`). Produces the default-initialized data;
-    /// the fields are populated by `ReadableStream.prototype.values`.
-    fn new() -> Self {
-        ReadableStreamAsyncIteratorImpl::default()
+    /// Not exposed to JS, called by `ReadableStream.prototype.values`.
+    fn new(reader: DefaultReader<'_>, prevent_cancel: bool) -> Self {
+        ReadableStreamAsyncIteratorImpl {
+            reader: Heap::from(reader),
+            prevent_cancel,
+            ..Default::default()
+        }
     }
 
     /// <https://webidl.spec.whatwg.org/#dfn-asynchronous-iterator-prototype-object>: `next`.
     #[method]
     fn next<'r>(&self, scope: &'r Scope<'_>) -> Result<Promise<'r>, ExnThrown> {
-        // Serialize on the ongoing promise: run the next steps now if none is
-        // pending, otherwise after the pending one settles (either way).
-        let prev = self.data().ongoing_promise.get(scope);
-        let ongoing = match prev {
-            Some(prev) => {
-                if self.data().after_ongoing_next_fn.is_none() {
-                    let cb = Function::new_callback(scope, c"", 1, after_ongoing_next, self)?;
-                    self.data_mut().after_ongoing_next_fn = Some(Heap::from(cb));
-                }
-                let cb = self
-                    .data()
-                    .after_ongoing_next_fn
-                    .get(scope)
-                    .expect("created above");
-                prev.then(scope, Some(*cb), Some(*cb))?
+        // Step 1: Let _interface_ be the `interface` for which the `asynchronous iterator prototype
+        //         object` exists.
+        // Step 2: Let _thisValidationPromiseCapability_ be ! NewPromiseCapability(%Promise%).
+        // Step 3: Let _thisValue_ be the *this* value.
+        // Step 4: Let _object_ be Completion(ToObject(_thisValue_)).
+        // Step 5: IfAbruptRejectPromise(_object_, _thisValidationPromiseCapability_).
+        // Step 6: If _object_ `is a platform object`, then `perform a security check`, passing:
+        //         the platform object _object_, the identifier "`next`", and the type
+        //         "`method`". If this threw an exception _e_, then: Perform ! Call(
+        //         _thisValidationPromiseCapability_.[[Reject]], undefined, « _e_ »). Return
+        //         _thisValidationPromiseCapability_.[[Promise]].
+        // Step 7: If _object_ is not a `default asynchronous iterator object` for _interface_,
+        //         then: Let _error_ be a new TypeError. Perform ! Call(
+        //         _thisValidationPromiseCapability_.[[Reject]], undefined, « _error_ »). Return
+        //         _thisValidationPromiseCapability_.[[Promise]].
+        //         (Steps 1-7: the `Result<Promise>` method style brand-checks `this` and returns a
+        //         rejected promise on failure. There are no security checks in this runtime.)
+        // Step 8: Let _nextSteps_ be the following steps: (implemented in `run_next_steps`)
+        // Step 9: Let _ongoingPromise_ be _object_'s `ongoing promise`.
+        let ongoing_promise = self.data().ongoing_promise.get(scope);
+        // Step 10: If _ongoingPromise_ is not null, then:
+        let ongoing = if let Some(ongoing_promise) = ongoing_promise {
+            // Step 10.1: Let _afterOngoingPromiseCapability_ be ! NewPromiseCapability(%Promise%).
+            // Step 10.2: Let _onSettled_ be CreateBuiltinFunction(_nextSteps_, 0, "", « »).
+            if self.data().after_ongoing_next_fn.is_none() {
+                let cb = Function::new_callback(scope, c"", 1, after_ongoing_next, self)?;
+                self.data_mut().after_ongoing_next_fn.set(cb);
             }
-            None => run_next_steps(scope, self)?,
+            let on_settled = self
+                .data()
+                .after_ongoing_next_fn
+                .get(scope)
+                .expect("created above");
+            // Step 10.3: Perform PerformPromiseThen(_ongoingPromise_, _onSettled_, _onSettled_,
+            //            _afterOngoingPromiseCapability_).
+            // Step 10.4: Set _object_'s `ongoing promise` to
+            //            _afterOngoingPromiseCapability_.[[Promise]].
+            ongoing_promise.then(scope, Some(*on_settled), Some(*on_settled))?
+        } else {
+            // Step 11: Otherwise:
+            // Step 11.1: Set _object_'s `ongoing promise` to the result of running _nextSteps_.
+            run_next_steps(scope, self)?
         };
-        self.data_mut().ongoing_promise = Some(Heap::from(ongoing));
+        self.data_mut().ongoing_promise.set(ongoing);
+        // Step 12: Return _object_'s `ongoing promise`.
         Ok(ongoing)
     }
 
@@ -95,17 +124,52 @@ impl ReadableStreamAsyncIterator {
         value: Option<HandleValue<'r>>,
     ) -> Result<Promise<'r>, ExnThrown> {
         let value = value.unwrap_or(HandleValue::undefined());
-        let prev = self.data().ongoing_promise.get(scope);
-        let ongoing = match prev {
-            Some(prev) => {
-                let payload = pair_payload(scope, scope.root_value(self.as_value()), value)?;
-                let cb = Function::new_callback(scope, c"", 1, after_ongoing_return, payload)?;
-                prev.then(scope, Some(*cb), Some(*cb))?
-            }
-            None => run_return_steps(scope, self, value)?,
+        // Step 1: Let _interface_ be the `interface` for which the `asynchronous iterator prototype
+        //         object` exists.
+        // Step 2: Let _returnPromiseCapability_ be ! NewPromiseCapability(%Promise%).
+        // Step 3: Let _thisValue_ be the *this* value.
+        // Step 4: Let _object_ be Completion(ToObject(_thisValue_)).
+        // Step 5: IfAbruptRejectPromise(_object_, _returnPromiseCapability_).
+        // Step 6: If _object_ `is a platform object`, then `perform a security check`, passing:
+        //         the platform object _object_, the identifier "`return`", and the type
+        //         "`method`". If this threw an exception _e_, then: Perform ! Call(
+        //         _returnPromiseCapability_.[[Reject]], undefined, « _e_ »). Return
+        //         _returnPromiseCapability_.[[Promise]].
+        // Step 7: If _object_ is not a `default asynchronous iterator object` for _interface_,
+        //         then: Let _error_ be a new TypeError. Perform ! Call(
+        //         _returnPromiseCapability_.[[Reject]], undefined, « _error_ »). Return
+        //         _returnPromiseCapability_.[[Promise]].
+        //         (Steps 1-7: the `Result<Promise>` method style brand-checks `this` and returns a
+        //         rejected promise on failure. There are no security checks in this runtime.)
+        // Step 8: Let _returnSteps_ be the following steps: (implemented in `run_return_steps`)
+        // Step 9: Let _ongoingPromise_ be _object_'s `ongoing promise`.
+        let ongoing_promise = self.data().ongoing_promise.get(scope);
+        // Step 10: If _ongoingPromise_ is not null, then:
+        let ongoing = if let Some(ongoing_promise) = ongoing_promise {
+            // Step 10.1: Let _afterOngoingPromiseCapability_ be ! NewPromiseCapability(%Promise%).
+            // Step 10.2: Let _onSettled_ be CreateBuiltinFunction(_returnSteps_, 0, "", « »).
+            let payload = pair_payload(scope, self, value)?;
+            let on_settled = Function::new_callback(scope, c"", 1, after_ongoing_return, payload)?;
+            // Step 10.3: Perform PerformPromiseThen(_ongoingPromise_, _onSettled_, _onSettled_,
+            //            _afterOngoingPromiseCapability_).
+            // Step 10.4: Set _object_'s `ongoing promise` to
+            //            _afterOngoingPromiseCapability_.[[Promise]].
+            ongoing_promise.then(scope, Some(*on_settled), Some(*on_settled))?
+        } else {
+            // Step 11: Otherwise:
+            // Step 11.1: Set _object_'s `ongoing promise` to the result of running _returnSteps_.
+            run_return_steps(scope, self, value)?
         };
-        self.data_mut().ongoing_promise = Some(Heap::from(ongoing));
-        Ok(ongoing)
+        self.data_mut().ongoing_promise.set(ongoing);
+        // Step 12: Let _fulfillSteps_ be the following steps:
+        // Step 12.1: Return CreateIteratorResultObject(_value_, true).
+        //            (Implemented in `return_fulfilled`.)
+        // Step 13: Let _onFulfilled_ be CreateBuiltinFunction(_fulfillSteps_, 1, "", « »).
+        let on_fulfilled = Function::new_callback(scope, c"", 1, return_fulfilled, value)?;
+        // Step 14: Perform PerformPromiseThen(_object_'s `ongoing promise`, _onFulfilled_,
+        //          undefined, _returnPromiseCapability_).
+        // Step 15: Return _returnPromiseCapability_.[[Promise]].
+        ongoing.then(scope, Some(*on_fulfilled), None)
     }
 }
 
@@ -132,16 +196,30 @@ fn after_ongoing_return(
     Ok(run_return_steps(scope, &iter, value)?.as_value())
 }
 
-/// WebIDL next steps: a finished iterator yields end-of-iteration; otherwise read
-/// the next chunk and map the result.
+/// The _nextSteps_ of the asynchronous iterator `next` method.
 fn run_next_steps<'r>(
     scope: &'r Scope<'_>,
     iter: &ReadableStreamAsyncIterator<'_>,
 ) -> Result<Promise<'r>, ExnThrown> {
+    // Step 1: Let _nextPromiseCapability_ be ! NewPromiseCapability(%Promise%).
+    // Step 2: If _object_'s `is finished` is true, then:
     if iter.data().is_finished {
+        // Step 2.1: Let _result_ be CreateIteratorResultObject(undefined, true).
         let result = create_iter_result(scope, HandleValue::undefined(), true)?;
+        // Step 2.2: Perform ! Call(_nextPromiseCapability_.[[Resolve]], undefined, « _result_ »).
+        // Step 2.3: Return _nextPromiseCapability_.[[Promise]].
         return Promise::new_resolved_with_value(scope, result);
     }
+    // Step 3: Let _kind_ be _object_'s `kind`.
+    //         (A value asynchronously iterable declaration has no kind to use.)
+    // Step 4: Let _nextPromise_ be the result of `getting the next iteration result` with
+    //         _object_'s `target` and _object_.
+    // Step 5: Let _fulfillSteps_ be the following steps, given _next_: (implemented in
+    //         `next_fulfilled`)
+    // Step 6: Let _onFulfilled_ be CreateBuiltinFunction(_fulfillSteps_, 1, "", « »).
+    // Step 7: Let _rejectSteps_ be the following steps, given _reason_: (implemented in
+    //         `next_rejected`)
+    // Step 8: Let _onRejected_ be CreateBuiltinFunction(_rejectSteps_, 1, "", « »).
     // The unique sentinel the close steps resolve the next-iteration promise
     // with (recognized by identity in `next_fulfilled`) and the reaction
     // callbacks are per-iterator; create them on the first `next()` and reuse
@@ -171,9 +249,10 @@ fn run_next_steps<'r>(
         .next_rejected_fn
         .get(scope)
         .expect("created above");
-    next_promise
-        .then(scope, Some(*on_f), Some(*on_r))
-        .map_err(|_| ExnThrown)
+    // Step 9: Perform PerformPromiseThen(_nextPromise_, _onFulfilled_, _onRejected_,
+    //         _nextPromiseCapability_).
+    // Step 10: Return _nextPromiseCapability_.[[Promise]].
+    next_promise.then(scope, Some(*on_f), Some(*on_r))
 }
 
 /// The fulfill steps of `next()`: build the `{ value, done }` result from the
@@ -193,26 +272,39 @@ fn next_fulfilled(
         .get(scope)
         .expect("sentinel is created with this callback");
     let next = args.get(0);
-    // If _next_ is end of iteration: set the iterator finished and return
-    // CreateIterResultObject(undefined, true).
+    // Step 1: Set _object_'s `ongoing promise` to null.
+    iter.data_mut().ongoing_promise = None;
+    // Step 2: If _next_ is `end of iteration`, then:
     if next.get() == sentinel.as_value() {
+        // Step 2.1: Set _object_'s `is finished` to true.
         iter.data_mut().is_finished = true;
+        // Step 2.2: Return CreateIteratorResultObject(undefined, true).
         let result = create_iter_result(scope, HandleValue::undefined(), true)?;
         return Ok(result.as_value());
     }
-    // Otherwise return CreateIterResultObject(next, false).
+    // Step 3: Otherwise, if _interface_ has a `pair asynchronously iterable declaration`:
+    //         (`ReadableStream` has a value declaration.)
+    // Step 4: Otherwise:
+    // Step 4.1: Assert: _interface_ has a `value asynchronously iterable declaration`.
+    // Step 4.2: Assert: _next_ is a value of the type that appears in the declaration.
+    // Step 4.3: Let _value_ be _next_, `converted to a JavaScript value`.
+    // Step 4.4: Return CreateIteratorResultObject(_value_, false).
     let result = create_iter_result(scope, next, false)?;
     Ok(result.as_value())
 }
 
-/// The rejection of `get the next iteration result`: mark finished and rethrow.
+/// The _rejectSteps_ of the asynchronous iterator `next` method.
 fn next_rejected(
     scope: &Scope<'_>,
     args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
     let iter = cast_payload::<ReadableStreamAsyncIterator>(scope, payload);
+    // Step 1: Set _object_'s `ongoing promise` to null.
+    iter.data_mut().ongoing_promise = None;
+    // Step 2: Set _object_'s `is finished` to true.
     iter.data_mut().is_finished = true;
+    // Step 3: Throw _reason_.
     Err(js::exception::set_pending(
         scope,
         args.get(0),
@@ -220,35 +312,37 @@ fn next_rejected(
     ))
 }
 
-/// WebIDL return steps: a finished iterator resolves with `{ value, done: true }`;
-/// otherwise mark finished, run the asynchronous iterator return, then wrap.
+/// The _returnSteps_ of the asynchronous iterator `return` method.
 fn run_return_steps<'r>(
     scope: &'r Scope<'_>,
     iter: &ReadableStreamAsyncIterator<'_>,
     value: HandleValue<'r>,
 ) -> Result<Promise<'r>, ExnThrown> {
+    // Step 1: Let _returnPromiseCapability_ be ! NewPromiseCapability(%Promise%).
+    // Step 2: If _object_'s `is finished` is true, then:
     if iter.data().is_finished {
+        // Step 2.1: Let _result_ be CreateIteratorResultObject(_value_, true).
         let result = create_iter_result(scope, value, true)?;
+        // Step 2.2: Perform ! Call(_returnPromiseCapability_.[[Resolve]], undefined,
+        //           « _result_ »).
+        // Step 2.3: Return _returnPromiseCapability_.[[Promise]].
         return Promise::new_resolved_with_value(scope, result);
     }
+    // Step 3: Set _object_'s `is finished` to true.
     iter.data_mut().is_finished = true;
-    let return_promise = asynchronous_iterator_return(scope, iter, value)?;
-    let payload = pair_payload(scope, scope.root_value(iter.as_value()), value)?;
-    let on_f = Function::new_callback(scope, c"", 1, return_fulfilled, payload)?;
-    return_promise
-        .then(scope, Some(*on_f), None)
-        .map_err(|_| ExnThrown)
+    // Step 4: Return the result of running the `asynchronous iterator return` algorithm for
+    //         _interface_, given _object_'s `target`, _object_, and _value_.
+    asynchronous_iterator_return(scope, iter, value)
 }
 
-/// The fulfillment of the asynchronous iterator return: wrap the argument as
-/// `{ value, done: true }` (payload = `[iterator, value]`).
+/// The _fulfillSteps_ of the asynchronous iterator `return` method (payload = the
+/// `return` argument).
 fn return_fulfilled(
     scope: &Scope<'_>,
     _args: CallbackArgs<'_>,
     payload: HandleValue<'_>,
 ) -> Result<Value, ExnThrown> {
-    let (_iter_v, value) = pair_parts(scope, payload);
-    let result = create_iter_result(scope, value, true)?;
+    let result = create_iter_result(scope, payload, true)?;
     Ok(result.as_value())
 }
 
@@ -298,7 +392,7 @@ fn iter_reader<'r>(
     scope: &'r Scope<'_>,
     iter: &ReadableStreamAsyncIterator<'_>,
 ) -> DefaultReader<'r> {
-    iter.data().reader.get(scope).expect("reader is set")
+    iter.data().reader.get(scope)
 }
 
 // --- ReadRequest::AsyncIter step bodies (called from `read_request.rs`) -------

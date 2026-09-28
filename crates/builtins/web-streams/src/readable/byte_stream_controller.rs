@@ -16,8 +16,7 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
-use js::prelude::{HandleValue, OptionHeapExt};
-use js::Object;
+use js::prelude::HandleValue;
 
 /// A readable byte stream queue entry: a contiguous region of an
 /// `ArrayBuffer`.
@@ -32,7 +31,7 @@ use js::Object;
 #[derive(Traceable, Default, js::ScopeRoot)]
 pub(crate) struct ByteQueueEntry {
     /// The `ArrayBuffer` backing this entry's bytes.
-    pub(crate) buffer: Heap<js::object::Object>,
+    pub(crate) buffer: Heap<js::typedarray::ArrayBuffer>,
     /// The offset, in bytes, of this entry's region within `buffer`.
     #[no_trace]
     pub(crate) byte_offset: usize,
@@ -44,7 +43,7 @@ pub(crate) struct ByteQueueEntry {
 impl<'s> StackByteQueueEntry<'s> {
     /// Consume the rooted entry, returning its buffer and the region's
     /// `(byte_offset, byte_length)`.
-    pub(crate) fn into_parts(self) -> (Object<'s>, usize, usize) {
+    pub(crate) fn into_parts(self) -> (js::ArrayBuffer<'s>, usize, usize) {
         (self.buffer, self.byte_offset, self.byte_length)
     }
 }
@@ -78,7 +77,7 @@ pub(crate) enum ReaderType {
 #[derive(Traceable)]
 pub(crate) struct PullIntoDescriptor {
     /// The `ArrayBuffer` being filled.
-    pub(crate) buffer: Heap<js::object::Object>,
+    pub(crate) buffer: Heap<js::typedarray::ArrayBuffer>,
     /// The byte length of `buffer`.
     #[no_trace]
     pub(crate) buffer_byte_length: usize,
@@ -121,7 +120,7 @@ pub struct ReadableByteStreamController {
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-cancelalgorithm>
     /// A promise-returning algorithm, taking one argument (the cancel reason), which communicates a
     /// requested cancelation to the underlying byte source
-    pub(crate) cancel_algorithm: Heap<Value>,
+    pub(crate) cancel_algorithm: crate::support::Algorithm,
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-closerequested>
     /// A boolean flag indicating whether the stream has been closed by its underlying byte source,
     /// but still has chunks in its internal queue that have not yet been read
@@ -133,10 +132,10 @@ pub struct ReadableByteStreamController {
     pub(crate) pull_again: bool,
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-pullalgorithm>
     /// A promise-returning algorithm that pulls data from the underlying byte source
-    pub(crate) pull_algorithm: Heap<Value>,
-    /// The `this` value with which the pull and cancel algorithms are invoked
-    /// (the underlying byte source object, or undefined for a controller created
-    /// internally). Mirrors the default controller's `algorithm_receiver` slot.
+    pub(crate) pull_algorithm: crate::support::Algorithm,
+    /// The `this` value with which JS pull and cancel algorithms are invoked: the
+    /// underlying byte source object. Mirrors the default controller's
+    /// `algorithm_receiver` slot.
     pub(crate) algorithm_receiver: Heap<Value>,
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-pulling>
     /// A boolean flag set to true while the underlying byte source’s pull algorithm is executing
@@ -160,9 +159,8 @@ pub struct ReadableByteStreamController {
     /// the point at which the stream will apply backpressure to its underlying byte source
     pub(crate) strategy_hwm: f64,
     /// <https://streams.spec.whatwg.org/#ReadableByteStreamController-stream>
-    /// The ReadableStream instance controlled. `None` only between creating the
-    /// bare controller and `SetUpByteStreamController` wiring it up.
-    pub(crate) stream: Option<Heap<ReadableStreamImpl>>,
+    /// The ReadableStream instance controlled
+    pub(crate) stream: Heap<ReadableStreamImpl>,
     /// The pull-reaction callbacks (`ByteStreamControllerCallPullIfNeeded`
     /// steps 7-8; payload = this controller), created on the first pull and
     /// reused for every subsequent pull.
@@ -173,8 +171,11 @@ pub struct ReadableByteStreamController {
 #[webidl_methods]
 impl ReadableByteStreamController {
     /// <https://streams.spec.whatwg.org/#dom-ReadableByteStreamController-constructor>
-    fn new() -> Self {
-        ReadableByteStreamControllerImpl::default()
+    fn new(stream: ReadableStream<'_>) -> Self {
+        ReadableByteStreamControllerImpl {
+            stream: Heap::from(stream),
+            ..Default::default()
+        }
     }
 
     /// <https://streams.spec.whatwg.org/#rbs-controller-byob-request>
@@ -203,11 +204,7 @@ impl ReadableByteStreamController {
         }
         // Step 2: If `this`.`[[stream]]`.`[[state]]` is not "`readable`", throw a ``TypeError``
         //         exception.
-        let stream = self
-            .data()
-            .stream
-            .get(scope)
-            .expect("controller has a stream");
+        let stream = self.data().stream.get(scope);
         if stream.data().state != ReadableStreamState::Readable {
             return Err(js::error::throw_type_error(
                 scope,
@@ -220,19 +217,7 @@ impl ReadableByteStreamController {
 
     /// <https://streams.spec.whatwg.org/#rbs-controller-enqueue>
     #[method]
-    fn enqueue(
-        &self,
-        scope: &Scope<'_>,
-        chunk: HandleValue<'_>, /* WebIDL: ArrayBufferView */
-    ) -> Result<(), ExnThrown> {
-        // WebIDL coerces the argument to an `ArrayBufferView`; a non-view value
-        // is a ``TypeError`` before any of the steps below run.
-        let view = Object::from_value(scope, *chunk)
-            .ok()
-            .and_then(js::ArrayBufferView::from_object)
-            .ok_or_else(|| {
-                js::error::throw_type_error(scope, c"enqueue() argument is not an ArrayBufferView")
-            })?;
+    fn enqueue(&self, scope: &Scope<'_>, view: js::ArrayBufferView<'_>) -> Result<(), ExnThrown> {
         // Step 1: If _chunk_.[[ByteLength]] is 0, throw a ``TypeError`` exception.
         if view.byte_length() == 0 {
             return Err(js::error::throw_type_error(
@@ -257,11 +242,7 @@ impl ReadableByteStreamController {
         }
         // Step 4: If `this`.`[[stream]]`.`[[state]]` is not "`readable`", throw a ``TypeError``
         //         exception.
-        let stream = self
-            .data()
-            .stream
-            .get(scope)
-            .expect("controller has a stream");
+        let stream = self.data().stream.get(scope);
         if stream.data().state != ReadableStreamState::Readable {
             return Err(js::error::throw_type_error(
                 scope,
@@ -276,15 +257,12 @@ impl ReadableByteStreamController {
     #[method]
     fn error(&self, scope: &Scope<'_>, e: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
         // Step 1: Perform ! `ByteStreamControllerError`(`this`, _e_).
-        let e = e.unwrap_or_else(|| scope.root_value(js::value::undefined()));
+        let e = e.unwrap_or(HandleValue::undefined());
         super::algorithms::readable_byte_stream_controller_error(scope, self, e);
         Ok(())
     }
 
-    pub(crate) fn stream<'r>(&'r self, scope: &'r Scope<'_>) -> ReadableStream<'r> {
-        self.data()
-            .stream
-            .get(scope)
-            .expect("controller has a stream")
+    pub(crate) fn stream<'r>(&self, scope: &'r Scope<'_>) -> ReadableStream<'r> {
+        self.data().stream.get(scope)
     }
 }

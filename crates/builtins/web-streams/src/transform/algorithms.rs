@@ -5,13 +5,12 @@
 use js::error::ExnThrown;
 use js::exception::take_pending_or_undefined;
 use js::function::cast_payload;
-use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::native::Value;
 use js::prelude::{CallbackArgs, HandleValue, OptionHeapExt};
 use js::value;
 use js::Function;
-use js::{Object, Promise};
+use js::Promise;
 
 use super::transform_stream::TransformStream;
 use super::transform_stream_default_controller::TransformStreamDefaultController;
@@ -23,35 +22,13 @@ use crate::readable::algorithms::{
     readable_stream_default_controller_error, readable_stream_default_controller_get_desired_size,
     readable_stream_default_controller_has_backpressure,
 };
-use crate::readable::default_controller::ReadableStreamDefaultController;
 use crate::readable::readable_stream::{ReadableStream, ReadableStreamState};
 use crate::support;
+use crate::support::{Algorithm, AlgorithmArg};
 use crate::writable::algorithms::{
     create_writable_stream, writable_stream_default_controller_error_if_needed,
 };
 use crate::writable::writable_stream::{WritableStream, WritableStreamState};
-
-// ---------------------------------------------------------------------------
-// Private accessors bridging the polymorphic `[[controller]]`/`[[reader]]`
-// object slots to the concrete default-stream newtypes.
-// ---------------------------------------------------------------------------
-
-/// The stream's `[[controller]]` as a default controller. Panics if the
-/// controller is unset or is not a `ReadableStreamDefaultController`; both are
-/// invariants on the readable default path.
-fn stream_default_controller<'r>(
-    scope: &'r Scope<'_>,
-    stream: &ReadableStream<'_>,
-) -> ReadableStreamDefaultController<'r> {
-    let obj: Object<'r> = stream
-        .data()
-        .controller
-        .as_ref()
-        .expect("stream has a controller")
-        .get(scope);
-    obj.cast::<ReadableStreamDefaultController>()
-        .expect("controller is a ReadableStreamDefaultController")
-}
 
 // ---------------------------------------------------------------------------
 // Transform-stream accessors, native algorithm callbacks, and reactions.
@@ -65,9 +42,8 @@ fn ts_controller<'r>(
     stream
         .data()
         .controller
-        .as_ref()
-        .expect("transform stream has a controller")
         .get(scope)
+        .expect("transform stream has a controller")
 }
 
 /// The transform stream's `[[readable]]`.
@@ -85,12 +61,7 @@ fn ts_controller_stream<'r>(
     scope: &'r Scope<'_>,
     controller: &TransformStreamDefaultController<'_>,
 ) -> TransformStream<'r> {
-    controller
-        .data()
-        .stream
-        .as_ref()
-        .expect("controller has a stream")
-        .get(scope)
+    controller.data().stream.get(scope)
 }
 
 /// The controller's `[[finishPromise]]` (asserted set).
@@ -101,22 +72,13 @@ fn ts_finish_promise<'r>(
     controller
         .data()
         .finish_promise
-        .as_ref()
-        .expect("finish promise is set")
         .get(scope)
+        .expect("finish promise is set")
 }
 
 // Native algorithm callbacks built by `InitializeTransformStream` (payload = the
 // transform stream, except the start algorithm whose payload is the start
 // promise). Each returns the underlying transform algorithm's promise as a value.
-
-/// A `TransformStreamDefaultController` value usable as a reaction payload.
-fn ts_controller_value<'r>(
-    scope: &'r Scope<'_>,
-    controller: &TransformStreamDefaultController<'_>,
-) -> HandleValue<'r> {
-    scope.root_value(controller.as_value())
-}
 
 /// The desired size of the transform controller's readable side (the
 /// `TransformStreamDefaultController.desiredSize` getter).
@@ -126,7 +88,9 @@ pub(crate) fn transform_controller_readable_desired_size(
 ) -> Option<f64> {
     let stream = ts_controller_stream(scope, controller);
     let readable = ts_readable(scope, &stream);
-    let readable_controller = stream_default_controller(scope, &readable);
+    let readable_controller = readable
+        .default_controller(scope)
+        .expect("readable side has a default controller");
     readable_stream_default_controller_get_desired_size(scope, &readable_controller)
 }
 
@@ -212,8 +176,11 @@ fn ts_perform_transform_rejected(
     let r = args.get(0);
     // Perform ! TransformStreamError(stream, r). Throw r.
     transform_stream_error(scope, &stream, r);
-    js::exception::set_pending(scope, r, js::native::ExceptionStackBehavior::DoNotCapture);
-    Err(ExnThrown)
+    Err(js::exception::set_pending(
+        scope,
+        r,
+        js::native::ExceptionStackBehavior::DoNotCapture,
+    ))
 }
 
 /// `TransformStreamDefaultSinkWriteAlgorithm` step 3 fulfillment steps
@@ -236,12 +203,11 @@ fn ts_sink_write_after_backpressure(
     // If state is "erroring", throw writable's storedError.
     if state == WritableStreamState::Erroring {
         let stored_error = writable.data().stored_error.get(scope);
-        js::exception::set_pending(
+        return Err(js::exception::set_pending(
             scope,
             stored_error,
             js::native::ExceptionStackBehavior::DoNotCapture,
-        );
-        return Err(ExnThrown);
+        ));
     }
     debug_assert_eq!(state, WritableStreamState::Writable);
     // Return ! TransformStreamDefaultControllerPerformTransform(controller, chunk).
@@ -263,7 +229,9 @@ fn ts_sink_close_fulfilled(
         let stored_error = readable.data().stored_error.get(scope);
         finish.reject(scope, stored_error).expect("reject finish");
     } else {
-        let readable_controller = stream_default_controller(scope, &readable);
+        let readable_controller = readable
+            .default_controller(scope)
+            .expect("readable side has a default controller");
         readable_stream_default_controller_close(scope, &readable_controller);
         finish.resolve(scope, HandleValue::undefined())?;
     }
@@ -280,7 +248,9 @@ fn ts_sink_close_rejected(
     let stream = ts_controller_stream(scope, &controller);
     let readable = ts_readable(scope, &stream);
     let r = args.get(0);
-    let readable_controller = stream_default_controller(scope, &readable);
+    let readable_controller = readable
+        .default_controller(scope)
+        .expect("readable side has a default controller");
     readable_stream_default_controller_error(scope, &readable_controller, r);
     ts_finish_promise(scope, &controller)
         .reject(scope, r)
@@ -304,7 +274,9 @@ fn ts_sink_abort_fulfilled(
         let stored_error = readable.data().stored_error.get(scope);
         finish.reject(scope, stored_error).expect("reject finish");
     } else {
-        let readable_controller = stream_default_controller(scope, &readable);
+        let readable_controller = readable
+            .default_controller(scope)
+            .expect("readable side has a default controller");
         readable_stream_default_controller_error(scope, &readable_controller, reason);
         finish.resolve(scope, HandleValue::undefined())?;
     }
@@ -323,7 +295,9 @@ fn ts_sink_abort_rejected(
     let stream = ts_controller_stream(scope, &controller);
     let readable = ts_readable(scope, &stream);
     let r = args.get(0);
-    let readable_controller = stream_default_controller(scope, &readable);
+    let readable_controller = readable
+        .default_controller(scope)
+        .expect("readable side has a default controller");
     readable_stream_default_controller_error(scope, &readable_controller, r);
     ts_finish_promise(scope, &controller)
         .reject(scope, r)
@@ -388,23 +362,17 @@ pub(crate) fn initialize_transform_stream(
     readable_high_water_mark: f64,
     readable_size_algorithm: HandleValue<'_>,
 ) -> Result<(), ExnThrown> {
-    let stream_payload = scope.root_value(stream.as_value());
     // Step 1: Let _startAlgorithm_ be an algorithm that returns _startPromise_.
-    let start_promise_value = scope.root_value(start_promise.as_value());
-    let start = Function::new_callback(scope, c"", 0, ts_start_native, start_promise_value)?;
-    let start = scope.root_value(start.as_value());
+    let start = AlgorithmArg::native(scope, ts_start_native, start_promise)?;
     // Step 2: Let _writeAlgorithm_ be the following steps, taking a _chunk_ argument: Return !
     //         `TransformStreamDefaultSinkWriteAlgorithm`(_stream_, _chunk_).
-    let write = Function::new_callback(scope, c"", 2, ts_sink_write_native, stream_payload)?;
-    let write = scope.root_value(write.as_value());
+    let write = AlgorithmArg::native(scope, ts_sink_write_native, *stream)?;
     // Step 3: Let _abortAlgorithm_ be the following steps, taking a _reason_ argument: Return !
     //         `TransformStreamDefaultSinkAbortAlgorithm`(_stream_, _reason_).
-    let abort = Function::new_callback(scope, c"", 1, ts_sink_abort_native, stream_payload)?;
-    let abort = scope.root_value(abort.as_value());
+    let abort = AlgorithmArg::native(scope, ts_sink_abort_native, *stream)?;
     // Step 4: Let _closeAlgorithm_ be the following steps: Return !
     //         `TransformStreamDefaultSinkCloseAlgorithm`(_stream_).
-    let close = Function::new_callback(scope, c"", 0, ts_sink_close_native, stream_payload)?;
-    let close = scope.root_value(close.as_value());
+    let close = AlgorithmArg::native(scope, ts_sink_close_native, *stream)?;
     // Step 5: Set _stream_.`[[writable]]` to ! `CreateWritableStream`(_startAlgorithm_,
     //         _writeAlgorithm_, _closeAlgorithm_, _abortAlgorithm_, _writableHighWaterMark_,
     //         _writableSizeAlgorithm_).
@@ -420,12 +388,10 @@ pub(crate) fn initialize_transform_stream(
     stream.data_mut().writable.set(writable);
     // Step 6: Let _pullAlgorithm_ be the following steps: Return !
     //         `TransformStreamDefaultSourcePullAlgorithm`(_stream_).
-    let pull = Function::new_callback(scope, c"", 0, ts_source_pull_native, stream_payload)?;
-    let pull = scope.root_value(pull.as_value());
+    let pull = AlgorithmArg::native(scope, ts_source_pull_native, *stream)?;
     // Step 7: Let _cancelAlgorithm_ be the following steps, taking a _reason_ argument: Return !
     //         `TransformStreamDefaultSourceCancelAlgorithm`(_stream_, _reason_).
-    let cancel = Function::new_callback(scope, c"", 1, ts_source_cancel_native, stream_payload)?;
-    let cancel = scope.root_value(cancel.as_value());
+    let cancel = AlgorithmArg::native(scope, ts_source_cancel_native, *stream)?;
     // Step 8: Set _stream_.`[[readable]]` to ! `CreateReadableStream`(_startAlgorithm_,
     //         _pullAlgorithm_, _cancelAlgorithm_, _readableHighWaterMark_,
     //         _readableSizeAlgorithm_).
@@ -463,7 +429,9 @@ pub(crate) fn transform_stream_error(
     //         `DefaultControllerError`(_stream_.`[[readable]]`.`[[controller]]`,
     //         _e_).
     let readable = ts_readable(scope, stream);
-    let readable_controller = stream_default_controller(scope, &readable);
+    let readable_controller = readable
+        .default_controller(scope)
+        .expect("readable side has a default controller");
     readable_stream_default_controller_error(scope, &readable_controller, e);
     // Step 2: Perform ! `TransformStreamErrorWritableAndUnblockWrite`(_stream_, _e_).
     transform_stream_error_writable_and_unblock_write(scope, stream, e);
@@ -501,18 +469,16 @@ pub(crate) fn transform_stream_set_backpressure(
     debug_assert_ne!(stream.data().backpressure, backpressure);
     // Step 2: If _stream_.`[[backpressureChangePromise]]` is not undefined, `resolve`
     //         stream.`[[backpressureChangePromise]]` with undefined.
-    if stream.data().backpressure_change_promise.is_some() {
-        let promise = stream
-            .data()
-            .backpressure_change_promise
-            .as_ref()
-            .unwrap()
-            .get(scope);
+    let promise = stream.data().backpressure_change_promise.get(scope);
+    if let Some(promise) = promise {
         promise.resolve(scope, HandleValue::undefined()).unwrap();
     }
     // Step 3: Set _stream_.`[[backpressureChangePromise]]` to `a new promise`.
     let new_promise = Promise::new_pending(scope).expect("new promise");
-    stream.data_mut().backpressure_change_promise = Some(Heap::from(new_promise));
+    stream
+        .data_mut()
+        .backpressure_change_promise
+        .set(new_promise);
     // Step 4: Set _stream_.`[[backpressure]]` to _backpressure_.
     stream.data_mut().backpressure = backpressure;
 }
@@ -533,33 +499,25 @@ pub(crate) fn set_up_transform_stream_default_controller(
     _scope: &Scope<'_>,
     stream: &TransformStream<'_>,
     controller: &TransformStreamDefaultController<'_>,
-    transform_algorithm: HandleValue<'_>,
-    flush_algorithm: HandleValue<'_>,
-    cancel_algorithm: HandleValue<'_>,
+    transform_algorithm: AlgorithmArg<'_>,
+    flush_algorithm: AlgorithmArg<'_>,
+    cancel_algorithm: AlgorithmArg<'_>,
     algorithm_receiver: HandleValue<'_>,
 ) {
     // Step 1: Assert: _stream_ `implements` ``TransformStream``.
     // Step 2: Assert: _stream_.`[[controller]]` is undefined.
     debug_assert!(stream.data().controller.is_none());
     // Step 3: Set _controller_.`[[stream]]` to _stream_.
-    controller.data_mut().stream = Some(Heap::from(*stream));
+    //         (Already done by `TransformStreamDefaultController::new`.)
+    debug_assert!(stream.eq_heap(&controller.data().stream));
     // Step 4: Set _stream_.`[[controller]]` to _controller_.
-    stream.data_mut().controller = Some(Heap::from(*controller));
+    stream.data_mut().controller.set(*controller);
     // Step 5: Set _controller_.`[[transformAlgorithm]]` to _transformAlgorithm_.
-    controller
-        .data_mut()
-        .transform_algorithm
-        .set(transform_algorithm.get());
+    controller.data_mut().transform_algorithm = Algorithm::from(transform_algorithm);
     // Step 6: Set _controller_.`[[flushAlgorithm]]` to _flushAlgorithm_.
-    controller
-        .data_mut()
-        .flush_algorithm
-        .set(flush_algorithm.get());
+    controller.data_mut().flush_algorithm = Algorithm::from(flush_algorithm);
     // Step 7: Set _controller_.`[[cancelAlgorithm]]` to _cancelAlgorithm_.
-    controller
-        .data_mut()
-        .cancel_algorithm
-        .set(cancel_algorithm.get());
+    controller.data_mut().cancel_algorithm = Algorithm::from(cancel_algorithm);
     // (The algorithms close over `algorithm_receiver` — the transformer — as their `this`.)
     controller
         .data_mut()
@@ -576,7 +534,7 @@ pub(crate) fn set_up_transform_stream_default_controller_from_transformer(
     transformer_dict: &Transformer<'_>,
 ) -> Result<(), ExnThrown> {
     // Step 1: Let _controller_ be a `new` ``TransformStreamDefaultController``.
-    let controller = TransformStreamDefaultController::new(scope)?;
+    let controller = TransformStreamDefaultController::new(scope, *stream)?;
     // Step 2: Let _transformAlgorithm_ be the following steps, taking a _chunk_ argument: Let
     //         _result_ be `TransformStreamDefaultControllerEnqueue`(_controller_, _chunk_). If
     //         _result_ is an abrupt completion, return `a promise rejected with`
@@ -586,46 +544,22 @@ pub(crate) fn set_up_transform_stream_default_controller_from_transformer(
     //         _transformerDict_["``transform``"] with argument list « _chunk_, _controller_ » and
     //         `callback this value` _transformer_.
     let transform_algorithm = match transformer_dict.transform.as_ref() {
-        Some(transform) if transform.is_callable() => scope.root_value(transform.as_value()),
-        Some(_) => {
-            return Err(js::error::throw_type_error(
-                scope,
-                c"transformer transform must be a function",
-            ));
-        }
-        None => {
-            let controller_value = ts_controller_value(scope, &controller);
-            let default = Function::new_callback(
-                scope,
-                c"",
-                2,
-                ts_default_transform_native,
-                controller_value,
-            )?;
-            scope.root_value(default.as_value())
-        }
+        Some(transform) => AlgorithmArg::Js(scope.root_value(transform.as_value())),
+        None => AlgorithmArg::native(scope, ts_default_transform_native, controller)?,
     };
     // Step 3: Let _flushAlgorithm_ be an algorithm which returns `a promise resolved with`
     //         undefined.
     // Step 6: If _transformerDict_["``flush``"] `exists`, set _flushAlgorithm_ to an algorithm
     //         which returns the result of `invoking` _transformerDict_["``flush``"] with argument
     //         list « _controller_ » and `callback this value` _transformer_.
-    let flush_algorithm = support::callback_member(
-        scope,
-        transformer_dict.flush.as_ref(),
-        c"transformer flush must be a function",
-    )?;
+    let flush_algorithm = AlgorithmArg::from_member(scope, transformer_dict.flush.as_ref());
     // Step 4: Let _cancelAlgorithm_ be an algorithm which returns `a promise resolved with`
     //         undefined.
     // Step 7: If _transformerDict_["``cancel``"] `exists`, set _cancelAlgorithm_ to an algorithm
     //         which takes an argument _reason_ and returns the result of `invoking`
     //         _transformerDict_["``cancel``"] with argument list « _reason_ » and `callback this
     //         value` _transformer_.
-    let cancel_algorithm = support::callback_member(
-        scope,
-        transformer_dict.cancel.as_ref(),
-        c"transformer cancel must be a function",
-    )?;
+    let cancel_algorithm = AlgorithmArg::from_member(scope, transformer_dict.cancel.as_ref());
     // Step 8: Perform ! `SetUpTransformStreamDefaultController`(_stream_, _controller_,
     //         _transformAlgorithm_, _flushAlgorithm_, _cancelAlgorithm_).
     set_up_transform_stream_default_controller(
@@ -646,20 +580,11 @@ pub(crate) fn transform_stream_default_controller_clear_algorithms(
     controller: &TransformStreamDefaultController<'_>,
 ) {
     // Step 1: Set _controller_.`[[transformAlgorithm]]` to undefined.
-    controller
-        .data_mut()
-        .transform_algorithm
-        .set(value::undefined());
+    controller.data_mut().transform_algorithm = Algorithm::None;
     // Step 2: Set _controller_.`[[flushAlgorithm]]` to undefined.
-    controller
-        .data_mut()
-        .flush_algorithm
-        .set(value::undefined());
+    controller.data_mut().flush_algorithm = Algorithm::None;
     // Step 3: Set _controller_.`[[cancelAlgorithm]]` to undefined.
-    controller
-        .data_mut()
-        .cancel_algorithm
-        .set(value::undefined());
+    controller.data_mut().cancel_algorithm = Algorithm::None;
 }
 
 /// <https://streams.spec.whatwg.org/#transform-stream-default-controller-enqueue>
@@ -673,7 +598,9 @@ pub(crate) fn transform_stream_default_controller_enqueue(
     let stream = ts_controller_stream(scope, controller);
     // Step 2: Let _readableController_ be _stream_.`[[readable]]`.`[[controller]]`.
     let readable = ts_readable(scope, &stream);
-    let readable_controller = stream_default_controller(scope, &readable);
+    let readable_controller = readable
+        .default_controller(scope)
+        .expect("readable side has a default controller");
     // Step 3: If ! `DefaultControllerCanCloseOrEnqueue`(_readableController_) is
     //         false, throw a ``TypeError`` exception.
     if !readable_stream_default_controller_can_close_or_enqueue(scope, &readable_controller) {
@@ -691,12 +618,11 @@ pub(crate) fn transform_stream_default_controller_enqueue(
         let error = take_pending_or_undefined(scope);
         transform_stream_error_writable_and_unblock_write(scope, &stream, error);
         let stored_error = readable.data().stored_error.get(scope);
-        js::exception::set_pending(
+        return Err(js::exception::set_pending(
             scope,
             stored_error,
             js::native::ExceptionStackBehavior::DoNotCapture,
-        );
-        return Err(ExnThrown);
+        ));
     }
     // Step 6: Let _backpressure_ be !
     //         `DefaultControllerHasBackpressure`(_readableController_).
@@ -750,14 +676,13 @@ pub(crate) fn transform_stream_default_controller_perform_transform<'r>(
         let on_rejected =
             Function::new_callback(scope, c"", 1, ts_perform_transform_rejected, controller)
                 .expect("cb");
-        controller.data_mut().transform_rejected_fn = Some(Heap::from(on_rejected));
+        controller.data_mut().transform_rejected_fn.set(on_rejected);
     }
     let on_rejected = controller
         .data()
         .transform_rejected_fn
-        .as_ref()
-        .expect("created above")
-        .get(scope);
+        .get(scope)
+        .expect("created above");
     transform_promise
         .then(scope, None, Some(*on_rejected))
         .expect("then")
@@ -773,7 +698,9 @@ pub(crate) fn transform_stream_default_controller_terminate(
     let stream = ts_controller_stream(scope, controller);
     // Step 2: Let _readableController_ be _stream_.`[[readable]]`.`[[controller]]`.
     let readable = ts_readable(scope, &stream);
-    let readable_controller = stream_default_controller(scope, &readable);
+    let readable_controller = readable
+        .default_controller(scope)
+        .expect("readable side has a default controller");
     // Step 3: Perform ! `DefaultControllerClose`(_readableController_).
     readable_stream_default_controller_close(scope, &readable_controller);
     // Step 4: Let _error_ be a ``TypeError`` exception indicating that the stream has been
@@ -818,7 +745,10 @@ pub(crate) fn transform_stream_default_sink_write_algorithm<'r>(
             let on_fulfilled =
                 Function::new_callback(scope, c"", 1, ts_sink_write_after_backpressure, controller)
                     .expect("cb");
-            controller.data_mut().write_after_backpressure_fn = Some(Heap::from(on_fulfilled));
+            controller
+                .data_mut()
+                .write_after_backpressure_fn
+                .set(on_fulfilled);
         }
         let on_fulfilled = controller
             .data()
@@ -850,7 +780,7 @@ pub(crate) fn transform_stream_default_sink_abort_algorithm<'r>(
     // Step 3: Let _readable_ be _stream_.`[[readable]]`. (Used by the reaction.)
     // Step 4: Let _controller_.`[[finishPromise]]` be a new promise.
     let finish = Promise::new_pending(scope).expect("new promise");
-    controller.data_mut().finish_promise = Some(Heap::from(finish));
+    controller.data_mut().finish_promise.set(finish);
     // Step 5: Let _cancelPromise_ be the result of performing _controller_.`[[cancelAlgorithm]]`,
     //         passing _reason_.
     let cancel_algorithm = controller.data().cancel_algorithm.get(scope);
@@ -897,7 +827,7 @@ pub(crate) fn transform_stream_default_sink_close_algorithm<'r>(
     // Step 3: Let _readable_ be _stream_.`[[readable]]`. (Used by the reaction.)
     // Step 4: Let _controller_.`[[finishPromise]]` be a new promise.
     let finish = Promise::new_pending(scope).expect("new promise");
-    controller.data_mut().finish_promise = Some(Heap::from(finish));
+    controller.data_mut().finish_promise.set(finish);
     // Step 5: Let _flushPromise_ be the result of performing _controller_.`[[flushAlgorithm]]`.
     //         The from-transformer flush callback is invoked with « controller ».
     let flush_algorithm = controller.data().flush_algorithm.get(scope);
@@ -943,7 +873,7 @@ pub(crate) fn transform_stream_default_source_cancel_algorithm<'r>(
     // Step 3: Let _writable_ be _stream_.`[[writable]]`. (Used by the reaction.)
     // Step 4: Let _controller_.`[[finishPromise]]` be a new promise.
     let finish = Promise::new_pending(scope).expect("new promise");
-    controller.data_mut().finish_promise = Some(Heap::from(finish));
+    controller.data_mut().finish_promise.set(finish);
     // Step 5: Let _cancelPromise_ be the result of performing _controller_.`[[cancelAlgorithm]]`,
     //         passing _reason_.
     let cancel_algorithm = controller.data().cancel_algorithm.get(scope);
@@ -992,7 +922,6 @@ pub(crate) fn transform_stream_default_source_pull_algorithm<'r>(
     stream
         .data()
         .backpressure_change_promise
-        .as_ref()
-        .expect("backpressureChangePromise is set")
         .get(scope)
+        .expect("backpressureChangePromise is set")
 }

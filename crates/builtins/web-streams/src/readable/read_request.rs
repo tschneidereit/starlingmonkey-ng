@@ -10,14 +10,12 @@
 //! `pipeTo`, `tee`, the async iterator) supplies its own. They are modelled as
 //! an enum — one variant per consumer — rather than as JS values, because the
 //! steps are native and the `[[readRequests]]` list must trace whatever rooted
-//! state they hold. The `Traceable` derive rejects enums, so `Trace` is
-//! hand-written.
+//! state they hold.
 
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::iteration::create_iter_result;
-use js::native::JSTracer;
 use js::prelude::HandleValue;
 use js::promise::Promise;
 
@@ -41,7 +39,7 @@ use crate::readable::read_all_bytes::{
 /// untraced-`Heap`-across-GC hazard — forcing callers to keep it traced
 /// (`RootedTraceableBox`) until they settle it.
 #[js::must_root]
-#[derive(js::ScopeRoot)]
+#[derive(core_runtime::Traceable, js::ScopeRoot)]
 pub(crate) enum ReadRequest {
     /// A `DefaultReader.read()` call.
     ///
@@ -118,6 +116,7 @@ pub(crate) enum ReadRequest {
     /// observe it.
     Native {
         /// The consumer's step functions.
+        #[no_trace]
         steps: crate::readable::native_read::NativeReadSteps,
         /// The consumer's rooted state object.
         payload: Heap<js::object::Object>,
@@ -126,16 +125,10 @@ pub(crate) enum ReadRequest {
 
 impl<'s> StackReadRequest<'s> {
     /// Perform the read request's `chunk steps` given `chunk`.
-    pub(crate) fn chunk_steps(
-        self,
-        scope: &Scope<'_>,
-        chunk: HandleValue<'_>,
-    ) -> Result<(), ExnThrown> {
-        match self {
-            StackReadRequest::Read { promise } => {
-                let result = create_iter_result(scope, chunk, false)?;
-                promise.resolve(scope, result)
-            }
+    pub(crate) fn chunk_steps(self, scope: &Scope<'_>, chunk: HandleValue<'_>) {
+        let result = match self {
+            StackReadRequest::Read { promise } => create_iter_result(scope, chunk, false)
+                .and_then(|result| promise.resolve(scope, result)),
             StackReadRequest::Tee { state } => tee_read_request_chunk_steps(scope, state, chunk),
             StackReadRequest::Pipe { state } => pipe_read_request_chunk_steps(scope, state, chunk),
             StackReadRequest::AsyncIter { promise, .. } => {
@@ -146,15 +139,16 @@ impl<'s> StackReadRequest<'s> {
             }
             StackReadRequest::Consume { state } => read_all_bytes_chunk_steps(scope, state, chunk),
             StackReadRequest::Native { steps, payload } => (steps.chunk)(scope, payload, chunk),
-        }
+        };
+        report_failed_steps(scope, result, "read request chunk steps");
     }
 
     /// Perform the read request's `close steps`.
-    pub(crate) fn close_steps(self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
-        match self {
+    pub(crate) fn close_steps(self, scope: &Scope<'_>) {
+        let result = match self {
             StackReadRequest::Read { promise } => {
-                let result = create_iter_result(scope, HandleValue::undefined(), true)?;
-                promise.resolve(scope, result)
+                create_iter_result(scope, HandleValue::undefined(), true)
+                    .and_then(|result| promise.resolve(scope, result))
             }
             StackReadRequest::Tee { state } => tee_read_request_close_steps(scope, state),
             // The pipe loop's close steps do nothing — shutdown is driven by the
@@ -175,16 +169,13 @@ impl<'s> StackReadRequest<'s> {
             }
             StackReadRequest::Consume { state } => read_all_bytes_close_steps(scope, state),
             StackReadRequest::Native { steps, payload } => (steps.close)(scope, payload),
-        }
+        };
+        report_failed_steps(scope, result, "read request close steps");
     }
 
     /// Perform the read request's `error steps` given `e`.
-    pub(crate) fn error_steps(
-        self,
-        scope: &Scope<'_>,
-        e: HandleValue<'_>,
-    ) -> Result<(), ExnThrown> {
-        match self {
+    pub(crate) fn error_steps(self, scope: &Scope<'_>, e: HandleValue<'_>) {
+        let result = match self {
             StackReadRequest::Read { promise } => promise.reject(scope, e),
             StackReadRequest::Tee { state } => tee_read_request_error_steps(scope, state, e),
             // The pipe loop's error steps do nothing — shutdown is driven by the
@@ -202,32 +193,8 @@ impl<'s> StackReadRequest<'s> {
             }
             StackReadRequest::Consume { state } => read_all_bytes_error_steps(scope, state, e),
             StackReadRequest::Native { steps, payload } => (steps.error)(scope, payload, e),
-        }
-    }
-}
-
-// Safety: trace every GC pointer held by each variant.
-unsafe impl js::heap::Trace for ReadRequest {
-    #[inline]
-    unsafe fn trace(&self, trc: *mut JSTracer) {
-        match self {
-            ReadRequest::Read { promise } => promise.trace(trc),
-            ReadRequest::Tee { state } => state.trace(trc),
-            ReadRequest::Pipe { state } => state.trace(trc),
-            ReadRequest::AsyncIter {
-                promise,
-                reader,
-                end_of_iteration,
-            } => {
-                promise.trace(trc);
-                reader.trace(trc);
-                end_of_iteration.trace(trc);
-            }
-            ReadRequest::ByteTeeDefault { state } => state.trace(trc),
-            ReadRequest::Consume { state } => state.trace(trc),
-            // `steps` holds only fn pointers; the payload is the sole GC pointer.
-            ReadRequest::Native { payload, .. } => payload.trace(trc),
-        }
+        };
+        report_failed_steps(scope, result, "read request error steps");
     }
 }
 
@@ -242,7 +209,7 @@ unsafe impl js::heap::Trace for ReadRequest {
 /// Marked `#[js::must_root]` for the same reason as [`ReadRequest`]: its
 /// variants hold a `Heap`, so crown forbids holding one untraced across a GC.
 #[js::must_root]
-#[derive(js::ScopeRoot)]
+#[derive(core_runtime::Traceable, js::ScopeRoot)]
 pub(crate) enum ReadIntoRequest {
     /// A `BYOBReader.read(view)` call.
     ///
@@ -262,52 +229,39 @@ pub(crate) enum ReadIntoRequest {
         /// The byte-tee state object.
         state: Heap<ByteTeeStateImpl>,
         /// Whether this read-into targets branch 2 (`forBranch2`).
+        #[no_trace]
         for_branch2: bool,
     },
 }
 
 impl<'s> StackReadIntoRequest<'s> {
     /// Perform the read-into request's `chunk steps` given `chunk`.
-    pub(crate) fn chunk_steps(
-        self,
-        scope: &Scope<'_>,
-        chunk: HandleValue<'_>,
-    ) -> Result<(), ExnThrown> {
-        match self {
-            StackReadIntoRequest::Read { promise } => {
-                let result = create_iter_result(scope, chunk, false)?;
-                promise.resolve(scope, result)
-            }
+    pub(crate) fn chunk_steps(self, scope: &Scope<'_>, chunk: HandleValue<'_>) {
+        let result = match self {
+            StackReadIntoRequest::Read { promise } => create_iter_result(scope, chunk, false)
+                .and_then(|result| promise.resolve(scope, result)),
             StackReadIntoRequest::ByteTeeByob { state, for_branch2 } => {
                 byte_tee_byob_chunk_steps(scope, state, for_branch2, chunk)
             }
-        }
+        };
+        report_failed_steps(scope, result, "read-into request chunk steps");
     }
 
     /// Perform the read-into request's `close steps` given `chunk`.
-    pub(crate) fn close_steps(
-        self,
-        scope: &Scope<'_>,
-        chunk: HandleValue<'_>,
-    ) -> Result<(), ExnThrown> {
-        match self {
-            StackReadIntoRequest::Read { promise } => {
-                let result = create_iter_result(scope, chunk, true)?;
-                promise.resolve(scope, result)
-            }
+    pub(crate) fn close_steps(self, scope: &Scope<'_>, chunk: HandleValue<'_>) {
+        let result = match self {
+            StackReadIntoRequest::Read { promise } => create_iter_result(scope, chunk, true)
+                .and_then(|result| promise.resolve(scope, result)),
             StackReadIntoRequest::ByteTeeByob { state, for_branch2 } => {
                 byte_tee_byob_close_steps(scope, state, for_branch2, chunk)
             }
-        }
+        };
+        report_failed_steps(scope, result, "read-into request close steps");
     }
 
     /// Perform the read-into request's `error steps` given `e`.
-    pub(crate) fn error_steps(
-        self,
-        scope: &Scope<'_>,
-        e: HandleValue<'_>,
-    ) -> Result<(), ExnThrown> {
-        match self {
+    pub(crate) fn error_steps(self, scope: &Scope<'_>, e: HandleValue<'_>) {
+        let result = match self {
             StackReadIntoRequest::Read { promise } => promise.reject(scope, e),
             // The byte-tee BYOB read-into request's error steps only set `reading`
             // to false; stream errors are forwarded via the reader's closed promise.
@@ -316,17 +270,16 @@ impl<'s> StackReadIntoRequest<'s> {
                 byte_tee_set_not_reading(scope, state);
                 Ok(())
             }
-        }
+        };
+        report_failed_steps(scope, result, "read-into request error steps");
     }
 }
 
-// Safety: trace every GC pointer held by each variant.
-unsafe impl js::heap::Trace for ReadIntoRequest {
-    #[inline]
-    unsafe fn trace(&self, trc: *mut JSTracer) {
-        match self {
-            ReadIntoRequest::Read { promise } => promise.trace(trc),
-            ReadIntoRequest::ByteTeeByob { state, .. } => state.trace(trc),
-        }
+/// Read request steps have no caller to throw to, so an exception one of them
+/// leaves (from a consumer's native step, or running out of memory) is reported
+/// and cleared.
+fn report_failed_steps(scope: &Scope<'_>, result: Result<(), ExnThrown>, context: &str) {
+    if result.is_err() {
+        js::exception::report_and_clear(scope, context);
     }
 }

@@ -76,8 +76,10 @@ impl WritableStreamDefaultWriter {
         // Step 1: If `this`.`[[stream]]` is undefined, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if self.data().stream.is_none() {
-            js::error::throw_type_error(scope, c"Cannot abort a stream using a released writer");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"Cannot abort a stream using a released writer",
+            ));
         }
         // Step 2: Return ! `DefaultWriterAbort`(`this`, _reason_).
         Ok(algorithms::writable_stream_default_writer_abort(
@@ -97,18 +99,19 @@ impl WritableStreamDefaultWriter {
         let stream = match algorithms::writer_stream(scope, self) {
             Some(stream) => stream,
             None => {
-                js::error::throw_type_error(
+                return Err(js::error::throw_type_error(
                     scope,
                     c"Cannot close a stream using a released writer",
-                );
-                return Promise::new_rejected_with_pending_error(scope);
+                ));
             }
         };
         // Step 3: If ! `WritableStreamCloseQueuedOrInFlight`(_stream_) is true, return `a promise
         //         rejected with` a ``TypeError`` exception.
         if algorithms::writable_stream_close_queued_or_in_flight(&stream) {
-            js::error::throw_type_error(scope, c"Cannot close an already-closing stream");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"Cannot close an already-closing stream",
+            ));
         }
         // Step 4: Return ! `DefaultWriterClose`(`this`).
         Ok(algorithms::writable_stream_default_writer_close(
@@ -140,8 +143,10 @@ impl WritableStreamDefaultWriter {
         // Step 1: If `this`.`[[stream]]` is undefined, return `a promise rejected with` a
         //         ``TypeError`` exception.
         if self.data().stream.is_none() {
-            js::error::throw_type_error(scope, c"Cannot write to a stream using a released writer");
-            return Promise::new_rejected_with_pending_error(scope);
+            return Err(js::error::throw_type_error(
+                scope,
+                c"Cannot write to a stream using a released writer",
+            ));
         }
         // Step 2: Return ! `DefaultWriterWrite`(`this`, _chunk_).
         let chunk = chunk.unwrap_or(HandleValue::undefined());

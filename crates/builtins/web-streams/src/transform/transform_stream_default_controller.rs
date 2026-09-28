@@ -3,7 +3,7 @@
 //! <https://streams.spec.whatwg.org/>
 
 use super::algorithms;
-use super::transform_stream::TransformStreamImpl;
+use super::transform_stream::{TransformStream, TransformStreamImpl};
 use core_runtime::{webidl_interface, webidl_methods};
 use js::error::ExnThrown;
 use js::gc::handle::Heap;
@@ -17,7 +17,7 @@ pub struct TransformStreamDefaultController {
     /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-cancelalgorithm>
     /// A promise-returning algorithm, taking one argument (the reason for cancellation), which
     /// communicates a requested cancellation to the transformer
-    pub(crate) cancel_algorithm: Heap<Value>,
+    pub(crate) cancel_algorithm: crate::support::Algorithm,
     /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-finishpromise>
     /// A promise which resolves on completion of either the [[cancelAlgorithm]] or the
     /// [[flushAlgorithm]]. If this field is unpopulated (that is, undefined), then neither of those
@@ -25,19 +25,17 @@ pub struct TransformStreamDefaultController {
     pub(crate) finish_promise: Option<Heap<js::promise::Promise>>,
     /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-flushalgorithm>
     /// A promise-returning algorithm which communicates a requested close to the transformer
-    pub(crate) flush_algorithm: Heap<Value>,
-    /// The `this` value the transform/flush/cancel algorithms are invoked with (the
-    /// transformer object, or `undefined` for native algorithms). Not a spec slot.
+    pub(crate) flush_algorithm: crate::support::Algorithm,
+    /// The `this` value JS transform/flush/cancel algorithms are invoked with: the
+    /// transformer object. Not a spec slot.
     pub(crate) algorithm_receiver: Heap<Value>,
     /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-stream>
     /// The TransformStream instance controlled
-    ///
-    /// `Option`: set by `SetUpTransformStreamDefaultController` after creating.
-    pub(crate) stream: Option<Heap<TransformStreamImpl>>,
+    pub(crate) stream: Heap<TransformStreamImpl>,
     /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-transformalgorithm>
     /// A promise-returning algorithm, taking one argument (the chunk to transform), which requests
     /// the transformer perform its transformation
-    pub(crate) transform_algorithm: Heap<Value>,
+    pub(crate) transform_algorithm: crate::support::Algorithm,
     /// The transform-rejection callback (`TransformStreamDefaultControllerPerformTransform`
     /// step 2; payload = this controller), created on the first transform and
     /// reused for every subsequent chunk. `None` until the first transform.
@@ -52,8 +50,11 @@ pub struct TransformStreamDefaultController {
 
 #[webidl_methods]
 impl TransformStreamDefaultController {
-    fn new() -> Self {
-        TransformStreamDefaultControllerImpl::default()
+    fn new(stream: TransformStream<'_>) -> Self {
+        TransformStreamDefaultControllerImpl {
+            stream: Heap::from(stream),
+            ..Default::default()
+        }
     }
 
     /// <https://streams.spec.whatwg.org/#ts-default-controller-desired-size>

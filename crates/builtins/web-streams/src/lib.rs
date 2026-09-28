@@ -7,6 +7,8 @@ pub(crate) mod support;
 pub mod transform;
 pub mod writable;
 
+pub use support::AlgorithmArg;
+
 use js::gc::scope::Scope;
 use js::Object;
 use readable::readable_stream::ReadableStreamImpl;
