@@ -11,7 +11,7 @@ edition.workspace = true
 test = false
 
 [dependencies]
-smallvec = "1.16"
+smallvec.workspace = true
 core-runtime.workspace = true
 js.workspace = true
 web-globals.workspace = true
