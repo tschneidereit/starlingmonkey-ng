@@ -253,10 +253,7 @@ pub(crate) fn rejection_message(
         return context.to_string();
     };
     js::exception::set_pending(scope, reason, js::native::ExceptionStackBehavior::Capture);
-    match ExnThrown::capture(scope).message {
-        Some(message) => format!("{context}: {message}"),
-        None => context.to_string(),
-    }
+    ExnThrown::capture(scope).with_context(context)
 }
 
 // ============================================================================

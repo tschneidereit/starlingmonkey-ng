@@ -78,7 +78,9 @@ pub fn link(scope: &Scope<'_>, module_record: Object) -> Result<(), ExnThrown> {
 
 /// Evaluate a linked module.
 ///
-/// Returns the evaluation result (typically a promise for top-level await).
+/// Returns the evaluation result (typically a promise for top-level await). A
+/// promise is marked handled, since the caller consumes its outcome, so its
+/// rejection is not reported as an unhandled one.
 pub fn evaluate<'r>(
     scope: &'r Scope<'_>,
     module_record: Object,
@@ -88,7 +90,14 @@ pub fn evaluate<'r>(
         wrappers2::ModuleEvaluate(scope.cx_mut(), module_record.handle(), rval.reborrow())
     };
     ExnThrown::check(ok)?;
-    Ok(rval.handle())
+    let rval = rval.handle();
+    if let Some(promise) = Object::from_value(scope, rval)
+        .ok()
+        .and_then(|object| object.cast::<Promise>().ok())
+    {
+        promise.set_any_is_handled(scope)?;
+    }
+    Ok(rval)
 }
 
 /// Throw if module evaluation failed.

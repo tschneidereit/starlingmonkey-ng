@@ -290,6 +290,7 @@ impl Runtime {
 
         // Create the default global and register builtins.
         drop(rt.new_global());
+        js::jobs::track_unhandled_rejections(&rt.default_global());
         if config.pre_initialize {
             let scope = rt.default_global();
             // SAFETY: the context lives as long as `rt`, whose `Drop` stops the recording.
@@ -465,6 +466,8 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         // SAFETY: stopping the recording has no precondition.
         unsafe { js::stack::record_origins(None) };
+        // The tracked promises are rooted, so they go while the context is alive.
+        js::jobs::clear_unhandled_rejections();
         // Futures left by loops that were never canceled, and those spawned with no loop active,
         // have to go while the context is alive.
         js::promise::cancel_all_pending_futures();

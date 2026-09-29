@@ -149,9 +149,17 @@ is `undefined` at the top level.
 **Legacy script mode** (`--legacy-script`) — sloppy mode, no
 `import`/`export`, `this` is the global object.
 
-**Exit status** — `0` when the script and all the work it scheduled complete, `1`
-when the script throws or an initializer, the event loop or the runtime fails (the
-error is printed to stderr), and `2` for invalid command-line arguments.
+**Output** — `console.log`, `console.info` and `console.debug` print to stdout,
+and `console.warn` and `console.error` print to stderr with a `Warn:` or `Error:`
+prefix. An exception a timer or other task throws is reported on stderr as
+`Uncaught` with its message and stack, and a promise rejected with no handler as
+`Uncaught (in promise)` with the reason's.
+
+**Exit status** — `0` when the script and all the work it scheduled complete,
+including when a promise rejected with no handler. `1` when the script throws,
+its top-level `await` rejects or never settles, or an initializer, the event loop
+or the runtime fails, with the error printed to stderr. `2` for invalid
+command-line arguments.
 
 ---
 

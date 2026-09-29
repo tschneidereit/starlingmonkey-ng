@@ -978,11 +978,15 @@ pub async unsafe fn run_until<S, F>(
 
 /// Handle and clear a pending JS exception.
 ///
-/// Prints the exception to stderr and clears the pending state,
-/// allowing the event loop to continue. This is called by [`EventLoop::step`]
-/// when a task or microtask throws.
+/// Prints the exception to stderr as `Uncaught` followed by its message,
+/// location and stack, and clears the pending state, allowing the event loop to
+/// continue. This is called by [`EventLoop::step`] when a task or microtask
+/// throws.
 fn handle_and_clear_exception(scope: &Scope<'_>) {
-    js::exception::report_and_clear(scope, "event_loop");
+    if js::exception::is_pending(scope) {
+        let captured = js::error::ExnThrown::capture(scope);
+        eprintln!("Uncaught {}", captured.to_string().trim_end());
+    }
 }
 
 impl EventLoop {
@@ -1088,7 +1092,8 @@ impl Default for EventLoop {
 /// then clears the weak-reference set for the current "turn".
 ///
 /// Any `FinalizationRegistry` cleanup a collection queued runs first, so a
-/// callback's own microtasks are drained in the same turn.
+/// callback's own microtasks are drained in the same turn. A promise rejected
+/// with no handler attached by the end of the drain is reported on stderr.
 pub fn run_microtasks(scope: &Scope<'_>) {
     debug_assert!(
         !js::exception::is_pending(scope),
@@ -1097,4 +1102,18 @@ pub fn run_microtasks(scope: &Scope<'_>) {
     crate::finalization::run_pending(scope);
     jobs::run_jobs(scope);
     // Weak-ref set is cleared by run_jobs.
+    report_unhandled_rejections(scope);
+}
+
+/// Report each promise that was rejected with no handler attached, and still has none, on
+/// stderr, with the rejection reason's message and stack.
+pub fn report_unhandled_rejections(scope: &Scope<'_>) {
+    for promise in jobs::take_unhandled_rejections(scope) {
+        let Some(reason) = promise.result(scope) else {
+            continue;
+        };
+        js::exception::set_pending(scope, reason, js::native::ExceptionStackBehavior::Capture);
+        let captured = js::error::ExnThrown::capture(scope);
+        eprintln!("Uncaught (in promise) {}", captured.to_string().trim_end());
+    }
 }
