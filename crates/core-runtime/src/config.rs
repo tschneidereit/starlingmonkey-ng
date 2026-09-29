@@ -132,7 +132,9 @@ pub struct RuntimeConfig {
     #[command(flatten)]
     pub serve_limits: ServeLimits,
 
-    /// Pre-initialize the runtime (used during wizer snapshot).
+    /// Pre-initialize the runtime for a Wizer snapshot. The runtime then records where each piece
+    /// of asynchronous work is created, for reporting work still pending when the snapshot is
+    /// taken (see [`EventLoop::ensure_idle_for_snapshot`](crate::event_loop::EventLoop::ensure_idle_for_snapshot)).
     #[arg(skip)]
     pub pre_initialize: bool,
 }

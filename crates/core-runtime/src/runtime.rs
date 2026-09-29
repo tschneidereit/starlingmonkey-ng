@@ -290,6 +290,11 @@ impl Runtime {
 
         // Create the default global and register builtins.
         drop(rt.new_global());
+        if config.pre_initialize {
+            let scope = rt.default_global();
+            // SAFETY: the context lives as long as `rt`, whose `Drop` stops the recording.
+            unsafe { js::stack::record_origins(Some(scope.raw_cx_no_gc())) };
+        }
         rt.run_initializer_script(config)?;
 
         Ok(rt)
@@ -458,6 +463,8 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        // SAFETY: stopping the recording has no precondition.
+        unsafe { js::stack::record_origins(None) };
         // Futures left by loops that were never canceled, and those spawned with no loop active,
         // have to go while the context is alive.
         js::promise::cancel_all_pending_futures();

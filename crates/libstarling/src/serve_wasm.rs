@@ -60,11 +60,6 @@ enum Startup {
     Pending(OwnedInvocation, core_runtime::ScriptEvaluation),
     /// A request is currently driving it. Concurrent requests wait.
     Driving,
-    /// The script has finished evaluating, but whatever background work it left behind is not
-    /// being driven yet. Only [`pre_initialize`] leaves a loop in this state: it drives evaluation
-    /// before the snapshot is taken, and the task that would go on driving the leftovers cannot
-    /// cross a snapshot, so the first request of the resumed instance starts it.
-    Evaluated(OwnedInvocation),
     /// Driven to completion (or there never was one).
     Done,
 }
@@ -87,22 +82,33 @@ fn install_runtime(pair: (Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeo
 ///
 /// A failed startup is final: this returns its error on every later call without retrying.
 fn runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts), String> {
+    runtime_for(false)
+}
+
+/// [`runtime`], creating a runtime configured for a Wizer snapshot if `pre_initialize` is set and
+/// none exists yet.
+fn runtime_for(
+    pre_initialize: bool,
+) -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts), String> {
     if let Some(pair) = RUNTIME.with(|cell| cell.borrow().clone()) {
         return Ok(pair);
     }
     if let Some(failure) = STARTUP_FAILURE.with(|cell| cell.borrow().clone()) {
         return Err(failure);
     }
-    start_runtime().inspect_err(|failure| {
+    start_runtime(pre_initialize).inspect_err(|failure| {
         STARTUP_FAILURE.with(|cell| *cell.borrow_mut() = Some(failure.clone()));
     })
 }
 
-/// Create the runtime for [`runtime`].
-fn start_runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts), String> {
+/// Create the runtime for [`runtime_for`].
+fn start_runtime(
+    pre_initialize: bool,
+) -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts), String> {
     // `wasmtime serve` passes the guest no arguments, so the HTTP entry point is configured
     // through `STARLINGMONKEY_CONFIG` instead (an empty one yields the defaults: `./index.js`).
-    let config = RuntimeConfig::from_env().map_err(|e| e.to_string())?;
+    let mut config = RuntimeConfig::from_env().map_err(|e| e.to_string())?;
+    config.pre_initialize = pre_initialize;
     config.validate_serve_timeouts()?;
     super::apply_pre_init_config(&config)?;
     crate::register_builtins();
@@ -126,12 +132,36 @@ fn start_runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeT
     Ok(pair)
 }
 
-/// Record that this instance's state is being captured in a Wizer snapshot. The resumed
-/// instance's first request runs the resume fixups (see [`fix_up_after_resume`]), which advance
-/// its clocks by the monotonic clock reading taken here. Every caller is a Wizer entry point, and
-/// calls this last, since a reading taken afterwards would sit past the recorded one and so still
-/// be in the resumed instance's future.
-pub fn mark_resumed_from_snapshot() {
+/// Prepare this instance's state to be captured in a Wizer snapshot. Every caller is a Wizer
+/// entry point, and calls this last.
+///
+/// Buffered standard output is flushed, then wasi-libc closes every file descriptor it holds,
+/// including stdio and the preopened directories. Their host handles do not exist in the resumed
+/// instance, and libc opens stdio and the preopens again on first use there. Recording where
+/// asynchronous work is created stops, so the resumed instance does not record it.
+///
+/// The resumed instance's first request runs the resume fixups (see [`fix_up_after_resume`]),
+/// which advance its clocks by the monotonic clock reading taken here. The reading is taken last,
+/// since one taken afterwards would sit past the recorded one and so still be in the resumed
+/// instance's future.
+pub fn prepare_for_snapshot() {
+    unsafe extern "C" {
+        fn fflush(stream: *mut std::ffi::c_void) -> std::ffi::c_int;
+        fn __wasilibc_reset_preopens();
+    }
+
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `fflush(NULL)` flushes every open C stdio stream. `__wasilibc_reset_preopens` takes
+    // libc's own locks, and nothing holds a descriptor across this call.
+    unsafe {
+        fflush(std::ptr::null_mut());
+        __wasilibc_reset_preopens();
+    }
+    // SAFETY: stopping the recording has no precondition.
+    unsafe { js::stack::record_origins(None) };
+
     RESUMED_FROM_SNAPSHOT.with(|resumed| resumed.set(true));
     platform::clock::record_snapshot_reading();
 }
@@ -139,43 +169,43 @@ pub fn mark_resumed_from_snapshot() {
 /// Initializes the runtime until it's ready for Wizer snapshotting.
 ///
 /// This entails initializing the JS runtime, registering builtins, running the top-level script to
-/// completion (including async work), and checking whether the result is a valid snapshot input
-/// state.
+/// completion, including a top-level `await`, and checking whether the result is a valid snapshot
+/// input state. The script must register a `fetch` listener, and must leave no asynchronous work
+/// behind once its top level has finished.
 pub async fn pre_initialize() -> Result<(), String> {
-    let (_runtime, raw_cx, _) = runtime()?;
+    let (_runtime, raw_cx, _) = runtime_for(true)?;
     let Startup::Pending(invocation, evaluation) =
         STARTUP.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), Startup::Driving))
     else {
         // Nothing to evaluate: `runtime` was already stood up, so this is a second call.
-        mark_resumed_from_snapshot();
+        prepare_for_snapshot();
         return Ok(());
     };
-    drive_startup(raw_cx, invocation.state().event_loop(), &evaluation).await;
-
     // SAFETY: `runtime` entered the default global's realm for the process lifetime.
     let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
+    // The loop is driven only while the top level is unfinished, so work it merely queued, such
+    // as a timer, is refused below rather than run under Wizer.
+    if !evaluation.is_finished(&scope) {
+        drive_startup(raw_cx, invocation.state().event_loop(), &evaluation).await;
+    }
+    evaluation.rejection(&scope, "Script evaluation failed")?;
+    if !evaluation.is_finished(&scope) {
+        return Err(
+            "the script's top-level `await` never settled: the event loop ran out of \
+                    work while it was still pending"
+                .to_string(),
+        );
+    }
     // Throw an error instead of creating a snapshot that can't possibly serve requests.
     if evaluated_without_listener(&scope, &evaluation) {
         return Err(crate::serve_common::NO_FETCH_LISTENER.to_string());
     }
-    // If any external async tasks are active, that means component model resources are held, making
-    // a snapshot impossible.
-    if invocation
-        .state()
-        .event_loop()
-        .has_active_external_async_tasks()
-    {
-        return Err(
-            "Host I/O pending when evaluation finished. Ensure all I/O is finished by `await`ing it."
-                .to_string(),
-        );
-    }
+    invocation.state().event_loop().ensure_idle_for_snapshot()?;
     // Define every standard class the global has not resolved yet, so the snapshot holds them
     // all and an instance restored from it defines none of them on first use.
     js::class::enumerate_standard_classes(&scope, scope.global().handle())
         .map_err(|_| "defining the standard classes failed".to_string())?;
-    // Store the event loop, in case it has tasks to resume after snapshot restoration.
-    STARTUP.with(|cell| *cell.borrow_mut() = Startup::Evaluated(invocation));
+    STARTUP.with(|cell| *cell.borrow_mut() = Startup::Done);
     Ok(())
 }
 
@@ -225,8 +255,6 @@ async fn ensure_started(raw_cx: *mut js::native::RawJSContext) {
     loop {
         enum Action {
             Drive(OwnedInvocation, core_runtime::ScriptEvaluation),
-            /// Evaluated before the snapshot was taken, so only its leftovers need a driver.
-            Keep(OwnedInvocation),
             Wait,
             Ready,
         }
@@ -237,7 +265,6 @@ async fn ensure_started(raw_cx: *mut js::native::RawJSContext) {
                     *state = Startup::Driving;
                     Action::Drive(invocation, evaluation)
                 }
-                Startup::Evaluated(invocation) => Action::Keep(invocation),
                 Startup::Driving => {
                     *state = Startup::Driving;
                     Action::Wait
@@ -247,12 +274,6 @@ async fn ensure_started(raw_cx: *mut js::native::RawJSContext) {
         });
         match action {
             Action::Ready => return,
-            Action::Keep(invocation) => {
-                // The listener check and the missing-listener report already ran before the
-                // snapshot, where failing the check refused the snapshot outright.
-                keep_startup_loop_running(raw_cx, invocation);
-                return;
-            }
             Action::Drive(invocation, evaluation) => {
                 let mut driving = Driving {
                     pending: Some((invocation, evaluation)),

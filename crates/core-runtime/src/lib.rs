@@ -118,11 +118,10 @@ pub unsafe fn evaluate_content_script(
 
     let pending = if module_mode {
         module::settled_module_evaluation(scope, value, "Script evaluation failed")?
-            .map(js::gc::handle::RootedHeap::new)
     } else {
         None
     };
-    Ok(ScriptEvaluation { pending })
+    Ok(ScriptEvaluation::new(pending))
 }
 
 /// What a content script left running: its evaluation promise, if a top-level `await` means it is
@@ -133,11 +132,35 @@ pub struct ScriptEvaluation {
 }
 
 impl ScriptEvaluation {
+    /// The evaluation of a module whose evaluation promise is `pending`, as
+    /// [`module::settled_module_evaluation`] returns it. `None` is a finished evaluation.
+    pub fn new(pending: Option<js::Promise<'_>>) -> Self {
+        Self {
+            pending: pending.map(js::gc::handle::RootedHeap::new),
+        }
+    }
+
     /// Whether the script has finished evaluating.
     pub fn is_finished(&self, scope: &js::gc::scope::Scope<'_>) -> bool {
         self.pending
             .as_ref()
             .is_none_or(|promise| !promise.get(scope).is_pending())
+    }
+
+    /// `Err` with `context: reason` if the script's top-level `await` rejected after this
+    /// evaluation was created, and `Ok` otherwise, including while it is still pending.
+    pub fn rejection(&self, scope: &js::gc::scope::Scope<'_>, context: &str) -> Result<(), String> {
+        match &self.pending {
+            Some(promise) => {
+                let promise = promise.get(scope);
+                if promise.is_rejected() {
+                    Err(module::rejection_message(scope, &promise, context))
+                } else {
+                    Ok(())
+                }
+            }
+            None => Ok(()),
+        }
     }
 }
 

@@ -15,13 +15,80 @@
 //! Most functions accept an optional `*mut JSPrincipals` for security-filtered
 //! access. Pass `std::ptr::null_mut()` for unprivileged access.
 
-use crate::gc::scope::Scope;
+use crate::gc::scope::{RootScope, Scope};
 use mozjs::gc::HandleObject;
-use mozjs::jsapi::{JSObject, JSPrincipals, SavedFrameSelfHosted, StackCapture, StackFormat};
+use mozjs::jsapi::{
+    JSContext as RawJSContext, JSObject, JSPrincipals, JSString, SavedFrameSelfHosted,
+    StackCapture, StackFormat,
+};
 use mozjs::rust::wrappers2;
 use mozjs::rust::{MutableHandleObject, MutableHandleString};
+use std::cell::Cell;
+use std::rc::Rc;
 
 use super::error::ExnThrown;
+
+crate::instance_local! {
+    /// The context [`current_origin`] captures stacks on, and null while origins are not being
+    /// recorded.
+    static ORIGIN_CX: Cell<*mut RawJSContext> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// Record where asynchronous work is created from now on, capturing stacks on `cx`, or stop
+/// recording for `None`. While recording, [`current_origin`] returns the current JS call stack.
+///
+/// # Safety
+///
+/// `cx` must stay a valid context until recording is stopped.
+pub unsafe fn record_origins(cx: Option<*mut RawJSContext>) {
+    ORIGIN_CX.with(|cell| cell.set(cx.unwrap_or(std::ptr::null_mut())));
+}
+
+/// The current JS call stack, formatted as `Error.prototype.stack` formats one, for describing
+/// where asynchronous work being created comes from.
+///
+/// Returns `None` while [`record_origins`] is not recording, when no realm is entered or no
+/// script is running, and when capturing the stack fails. A failed capture's exception is
+/// cleared.
+pub fn current_origin() -> Option<Rc<str>> {
+    // The most frames an origin holds, counted from the call that created the work.
+    const MAX_FRAMES: u32 = 16;
+
+    let cx = ORIGIN_CX.with(Cell::get);
+    // SAFETY: `record_origins`' caller keeps a non-null `cx` valid while recording.
+    if cx.is_null() || unsafe { mozjs::jsapi::GetCurrentRealmOrNull(cx) }.is_null() {
+        return None;
+    }
+    // SAFETY: `cx` is valid, as above, and has a realm entered.
+    let scope = unsafe { RootScope::from_current_realm(cx) };
+    let frame = match capture_saved_frame(&scope, MAX_FRAMES) {
+        Ok(frame) => frame?,
+        Err(ExnThrown) => {
+            crate::exception::clear(&scope);
+            return None;
+        }
+    };
+    mozjs::rooted!(in(cx) let mut formatted = std::ptr::null_mut::<JSString>());
+    // SAFETY: null principals request unfiltered frames, and `frame` is a rooted `SavedFrame`.
+    let built = unsafe {
+        build_stack_string(
+            &scope,
+            std::ptr::null_mut(),
+            frame.handle(),
+            formatted.handle_mut(),
+            0,
+            StackFormat::Default,
+        )
+    };
+    if built.is_err() {
+        crate::exception::clear(&scope);
+        return None;
+    }
+    let formatted = std::ptr::NonNull::new(formatted.get())?;
+    let text = crate::conversion::jsstr_to_string(&scope, formatted);
+    let text = text.trim_end();
+    (!text.is_empty()).then(|| Rc::from(text))
+}
 
 /// Capture the current JavaScript call stack.
 ///

@@ -17,7 +17,8 @@
 //! The event loop is considered alive when either the task queue has
 //! pending work or the interest count is positive.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use event_listener::Event;
@@ -26,6 +27,10 @@ use event_listener::Event;
 /// [`InterestHandle`]s.
 struct InterestState {
     count: Cell<u32>,
+    /// The origin of each held handle acquired while origins were being recorded, by the key in
+    /// its [`InterestHandle::origin`]. See [`js::stack::record_origins`].
+    origins: RefCell<HashMap<u64, Rc<str>>>,
+    next_origin_key: Cell<u64>,
     /// The owning loop's driver notification: a release may happen while the
     /// owning loop is parked in its await branch (the handle dropped during
     /// another loop's turn), and must wake it so it can observe `Done`.
@@ -49,6 +54,8 @@ impl InterestTracker {
         Self {
             state: Rc::new(InterestState {
                 count: Cell::new(0),
+                origins: RefCell::new(HashMap::new()),
+                next_origin_key: Cell::new(0),
                 notify,
             }),
         }
@@ -61,9 +68,21 @@ impl InterestTracker {
         self.state
             .count
             .set(count.checked_add(1).expect("interest count overflow"));
+        let origin = js::stack::current_origin().map(|origin| {
+            let key = self.state.next_origin_key.get();
+            self.state.next_origin_key.set(key + 1);
+            self.state.origins.borrow_mut().insert(key, origin);
+            key
+        });
         InterestHandle {
             state: Rc::clone(&self.state),
+            origin,
         }
+    }
+
+    /// The origins of the held handles acquired while origins were being recorded.
+    pub fn origins(&self) -> Vec<Rc<str>> {
+        self.state.origins.borrow().values().cloned().collect()
     }
 
     /// Returns `true` if at least one interest is held.
@@ -82,6 +101,8 @@ impl InterestTracker {
 /// is active at the time, and wakes the loop's driver.
 pub struct InterestHandle {
     state: Rc<InterestState>,
+    /// The key of this handle's entry in [`InterestState::origins`], if it has one.
+    origin: Option<u64>,
 }
 
 impl InterestHandle {
@@ -98,6 +119,9 @@ impl Drop for InterestHandle {
                 .checked_sub(1)
                 .expect("InterestHandle outlived its tracker's count"),
         );
+        if let Some(key) = self.origin {
+            self.state.origins.borrow_mut().remove(&key);
+        }
         // Wake the owning loop's driver — interest may have dropped to zero
         // while it was parked.
         self.state.notify.notify(1);

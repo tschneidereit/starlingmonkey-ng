@@ -106,7 +106,7 @@ mod wasm_entry {
                 }
                 // Last, so that the clock reading it records is past every timestamp the
                 // snapshot holds.
-                libstarling::serve_wasm::mark_resumed_from_snapshot();
+                libstarling::serve_wasm::prepare_for_snapshot();
             }
         }
 
