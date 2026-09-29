@@ -303,11 +303,12 @@ pub enum ScriptStackState {
 impl ScriptStackState {
     /// [Clean up after running script] step 3: if the JavaScript execution context stack is now
     /// empty, perform a microtask checkpoint. Run after every `call a user object's operation`.
+    /// The checkpoint also reports the promises rejected with no handler, as HTML's does.
     ///
     /// [Clean up after running script]: https://html.spec.whatwg.org/multipage/webappapis.html#clean-up-after-running-script
     pub fn clean_up_after_running_script(self, scope: &Scope<'_>) {
         if self == Self::Empty {
-            js::jobs::run_jobs(scope);
+            core_runtime::event_loop::run_microtasks(scope);
         }
     }
 }

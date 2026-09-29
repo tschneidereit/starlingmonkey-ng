@@ -9,8 +9,8 @@ pub mod globals {
     use crate::request::{request_info, Request, RequestInit};
     use crate::response::response_from_platform;
     use js::conversion::ToJSVal;
-    use js::error::throw_type_error;
     use js::error::ExnThrown;
+    use js::error::{throw_type_error, ThrowException, TypeError};
     use js::gc::handle::RootedHeap;
     use js::gc::scope::Scope;
     use js::prelude::HandleValue;
@@ -115,7 +115,7 @@ pub mod globals {
             // fetch`'s "`data`" arm — then `Resolve` _p_ with _responseObject_.
             crate::algorithms::FetchOutcome::Response(response_object) => {
                 if let Some(state) = &abort_state {
-                    state.set_response(&response_object);
+                    state.deliver(scope, &response_object);
                 }
                 p.resolve(scope, response_object)?;
                 return Ok(p);
@@ -124,6 +124,9 @@ pub mod globals {
             // `TypeError` and abort these steps. Throw one to set the pending exception, then
             // take it as the rejection value.
             crate::algorithms::FetchOutcome::NetworkError => {
+                if let Some(state) = &abort_state {
+                    state.detach(scope);
+                }
                 throw_type_error(scope, c"Failed to fetch");
                 p.reject_with_pending(scope)?;
                 return Ok(p);
@@ -148,8 +151,7 @@ pub mod globals {
             web_globals::worker_location::current_location_url().map(|url| url.origin());
         let method = platform_request.method.clone();
         // Root the abort state across the host fetch, so the resolve callback can
-        // record the delivered response on it. `on_settled` keeps the abort
-        // algorithm registered only when the response is known to it.
+        // deliver the response to it, or detach it if the response fails.
         let abort_state = abort_state.map(RootedHeap::new);
         let future = async move {
             match crate::transport::send_following_redirects(
@@ -170,14 +172,33 @@ pub mod globals {
                             &method,
                             redirect_mode,
                             tainting,
-                        )?;
+                        );
                         if let Some(state) = &abort_state {
-                            state.get(scope).set_response(&response);
+                            match &response {
+                                Ok(response) => state.get(scope).deliver(scope, response),
+                                Err(_) => {
+                                    // Detaching runs with no exception pending.
+                                    let error = js::exception::take_pending(scope);
+                                    state.get(scope).detach(scope);
+                                    if let Some(error) = error {
+                                        js::exception::set_pending(
+                                            scope,
+                                            error,
+                                            js::native::ExceptionStackBehavior::DoNotCapture,
+                                        );
+                                    }
+                                }
+                            }
                         }
-                        response.to_jsval_throwing(scope)
+                        response?.to_jsval_throwing(scope)
                     }))
                 }
-                Err(error) => PromiseOutcome::Reject(format!("Failed to fetch: {error}")),
+                Err(error) => PromiseOutcome::Resolve(Box::new(move |scope: &Scope<'_>| {
+                    if let Some(state) = &abort_state {
+                        state.get(scope).detach(scope);
+                    }
+                    Err(TypeError(format!("Failed to fetch: {error}")).throw(scope))
+                })),
             }
         };
         p.spawn(PromiseFuture::new(future));

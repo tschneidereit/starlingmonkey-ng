@@ -104,8 +104,8 @@ impl ExtendableEvent {
         // Step 5: Upon `fulfillment` or `rejection` of _promise_, `queue a microtask` to run these
         //     substeps:
         // A promise settles once, so exactly one handler runs, releasing the interest exactly once.
-        // The reactions must not mark a rejection as handled: that would suppress
-        // unhandled-rejection reporting for a lifetime promise the author never catches.
+        // Like any reaction, these mark the lifetime promise handled, so its rejection is not
+        // reported as unhandled.
         promise.add_reactions_ignoring_unhandled_rejection(
             scope,
             Some(*on_settled),

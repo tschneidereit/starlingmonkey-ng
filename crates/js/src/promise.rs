@@ -243,7 +243,10 @@ impl<'s> Stack<'s, Promise> {
         ExnThrown::check(ok)
     }
 
-    /// Add `then` reactions ignoring unhandled rejection tracking.
+    /// Add `then` reactions, as [`add_reactions`](Self::add_reactions) does,
+    /// except that a rejection with no `on_rejected` reaction is not reported
+    /// through a derived promise. Like any reaction, these mark the promise
+    /// handled, so its own rejection is not reported as unhandled either.
     pub fn add_reactions_ignoring_unhandled_rejection(
         &self,
         scope: &Scope<'_>,

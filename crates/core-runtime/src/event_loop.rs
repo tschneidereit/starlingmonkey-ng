@@ -969,6 +969,9 @@ unsafe fn settle_completed_futures(
             return;
         }
         js::promise::settle_completed_futures(&scope, completed);
+        // Settling drains the reactions, and this reports the rejections they left
+        // unhandled, as after a task.
+        run_microtasks(&scope);
     });
 }
 
