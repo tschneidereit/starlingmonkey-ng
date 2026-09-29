@@ -14,8 +14,9 @@ use crate::{Object, Promise};
 use mozjs::gc::{Handle, HandleObject, HandleValue};
 use mozjs::jsapi::mozilla::Utf8Unit;
 use mozjs::jsapi::HandleValue as RawHandleValue;
+pub use mozjs::jsapi::ModuleType;
 use mozjs::jsapi::{
-    ExceptionStackBehavior, JSObject, JSScript, JSString, ModuleErrorBehaviour, ModuleType,
+    ExceptionStackBehavior, JSObject, JSScript, JSString, ModuleErrorBehaviour,
     ReadOnlyCompileOptions, SourceText,
 };
 use mozjs::jsval::UndefinedValue;
@@ -286,6 +287,10 @@ pub fn load_requested_modules(scope: &Scope<'_>, module_record: Object) -> Resul
 /// received. The hook must call this exactly once per invocation unless it
 /// returns `false`.
 ///
+/// A promise `payload` belongs to a dynamic `import()`. The hook must have
+/// loaded `result`'s own imports with [`load_requested_modules`] first, and the
+/// engine then links and evaluates `result` in a promise job.
+///
 /// # Safety
 ///
 /// Only valid from within a module load hook, with that hook's own arguments.
@@ -303,8 +308,14 @@ pub unsafe fn finish_loading_imported_module(
             module_request,
             payload,
             result,
-            false,
+            is_dynamic_import_payload(scope, payload),
         )
     };
     ExnThrown::check(ok)
+}
+
+/// Whether a load hook's `payload` belongs to a dynamic `import()`, whose
+/// payload is its promise, rather than to loading a static module graph.
+pub fn is_dynamic_import_payload(scope: &Scope<'_>, payload: HandleValue) -> bool {
+    Object::from_value(scope, payload).is_ok_and(|object| object.cast::<Promise>().is_ok())
 }

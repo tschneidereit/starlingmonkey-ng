@@ -46,6 +46,7 @@ use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::gc::scope::Scope;
 use js::heap::Trace;
+use js::module::ModuleType;
 use js::module_raw::{transform_str_to_source_text, SetModulePrivate};
 use js::native::{GCHandle, HandleObject, JSNative, JSObject, JSString, JSTracer, Value};
 use js::prelude::{HandleValue, RootScope};
@@ -237,16 +238,24 @@ pub fn settled_module_evaluation<'s>(
     if !promise.is_rejected() {
         return Ok(None);
     }
+    Err(rejection_message(scope, &promise, context))
+}
 
+/// `context: reason` for the rejected module evaluation `promise`.
+pub(crate) fn rejection_message(
+    scope: &Scope<'_>,
+    promise: &js::Promise<'_>,
+    context: &str,
+) -> String {
     // Re-raise the reason so the shared capture path formats it the same way a
     // thrown exception is formatted, then clear it again.
     let Some(reason) = promise.result(scope) else {
-        return Err(context.to_string());
+        return context.to_string();
     };
     js::exception::set_pending(scope, reason, js::native::ExceptionStackBehavior::Capture);
     match ExnThrown::capture(scope).message {
-        Some(message) => Err(format!("{context}: {message}")),
-        None => Err(context.to_string()),
+        Some(message) => format!("{context}: {message}"),
+        None => context.to_string(),
     }
 }
 
@@ -258,12 +267,19 @@ pub fn settled_module_evaluation<'s>(
 /// a module graph.
 ///
 /// Resolution strategy:
-/// 1. Check the module registry for an exact match: native modules by name,
-///    already-compiled file modules by canonical path.
+/// 1. For a JavaScript request, check the module registry for an exact match:
+///    native modules by name, already-compiled file modules by canonical path.
 /// 2. Resolve via `oxc_resolver` against the referencing module's directory
 ///    (file-backed modules carry their canonical path in their module
 ///    private), or against the loader's base path for pathless referrers
 ///    (eval scripts, native modules).
+///
+/// A request with `with { type: "json" }` compiles the file as a JSON module.
+/// Every other module type is refused.
+///
+/// For a dynamic `import()`, the hook also loads the module's own imports
+/// before handing it over, and the engine links and evaluates it in a promise
+/// job.
 ///
 /// Every call ends either by handing the module to
 /// `finish_loading_imported_module` or by returning `false`, which leaves the
@@ -288,20 +304,36 @@ unsafe extern "C" fn module_load_hook(
         return false;
     };
     let specifier = jsstr_to_string(&scope, specifier_str);
+    let kind = match js::module::get_module_request_type(&scope, request) {
+        ModuleType::JavaScript => ModuleKind::JavaScript,
+        ModuleType::JSON => ModuleKind::Json,
+        _ => {
+            let message = format!(
+                "Cannot import '{specifier}': only JavaScript and JSON modules are supported"
+            );
+            let c_msg = CString::new(message).unwrap_or_else(|_| c"Unsupported module type".into());
+            js::error::report_error_ascii(&scope, &c_msg);
+            return false;
+        }
+    };
 
-    // 1. Check the module registry for an exact match.
-    let cached = registry(|reg| {
-        reg.borrow()
-            .get(&specifier)
-            .map(|entry| entry.module_obj.get(&scope))
-    });
+    // 1. Check the module registry for an exact match. The `json:`-prefixed keys
+    // hold JSON modules, which a JavaScript import never gets.
+    let cached = match kind {
+        ModuleKind::JavaScript if !specifier.starts_with("json:") => registry(|reg| {
+            reg.borrow()
+                .get(&specifier)
+                .map(|entry| entry.module_obj.get(&scope))
+        }),
+        ModuleKind::JavaScript | ModuleKind::Json => None,
+    };
 
     // 2. Resolve via filesystem using oxc_resolver, relative to the referrer.
     let module = match cached {
         Some(obj) => obj,
         None => {
             let base_dir = referrer_base_dir(&scope, referrer);
-            match resolve_file_module(&scope, &specifier, base_dir) {
+            match resolve_file_module(&scope, &specifier, base_dir, kind) {
                 Ok(obj) => obj,
                 Err(ModuleLoadError::Failed(msg)) => {
                     let c_msg =
@@ -314,6 +346,14 @@ unsafe extern "C" fn module_load_hook(
             }
         }
     };
+
+    // SAFETY: SpiderMonkey passes the hook a rooted `payload` handle.
+    let payload_handle = unsafe { GCHandle::from_raw(payload) };
+    if js::module::is_dynamic_import_payload(&scope, payload_handle)
+        && js::module::load_requested_modules(&scope, module).is_err()
+    {
+        return false;
+    }
 
     // SAFETY: this is the load hook, passing its own arguments, and this is its only call.
     unsafe {
@@ -353,7 +393,15 @@ fn referrer_base_dir(
     base_path(|bp| bp.borrow().clone())
 }
 
-/// Resolve a specifier to a file on disk, compile it as a module, and cache it.
+/// The kinds of module the loader compiles from a file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModuleKind {
+    JavaScript,
+    Json,
+}
+
+/// Resolve a specifier to a file on disk, compile it as a `kind` module, and
+/// cache it.
 ///
 /// Only compiles the module. Loading its own imports, linking and evaluation
 /// are handled by SpiderMonkey's module pipeline.
@@ -361,6 +409,7 @@ fn resolve_file_module<'r>(
     scope: &'r Scope,
     specifier: &str,
     base_dir: Option<PathBuf>,
+    kind: ModuleKind,
 ) -> Result<Object<'r>, ModuleLoadError> {
     let base_dir = base_dir
         .ok_or_else(|| format!("Module '{}' not found (no base path configured)", specifier))?;
@@ -386,11 +435,30 @@ fn resolve_file_module<'r>(
     let canonical_path = std::fs::canonicalize(&resolved_path)
         .unwrap_or_else(|_| lexically_normalize(resolved_path));
     let canonical_key = canonical_path.to_string_lossy().to_string();
+    // A `.json` file imported as JavaScript is refused rather than compiled as a
+    // script, which would fail on its syntax or silently evaluate it.
+    if kind == ModuleKind::JavaScript
+        && canonical_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        return Err(ModuleLoadError::Failed(format!(
+            "Cannot import '{specifier}' as JavaScript: it resolves to the JSON file '{canonical_key}'. \
+             Import it with `with {{ type: \"json\" }}`."
+        )));
+    }
+    // A file imported both as JavaScript and as JSON is two modules, so the JSON
+    // one is cached under a `json:`-prefixed key, which no canonical path has,
+    // and which the registry lookup by specifier skips.
+    let cache_key = match kind {
+        ModuleKind::JavaScript => canonical_key.clone(),
+        ModuleKind::Json => format!("json:{canonical_key}"),
+    };
 
     // Check if already compiled under the canonical path
     let cached = registry(|reg| {
         reg.borrow()
-            .get(&canonical_key)
+            .get(&cache_key)
             .map(|entry| entry.module_obj.get(scope))
     });
     if let Some(obj) = cached {
@@ -406,21 +474,32 @@ fn resolve_file_module<'r>(
         CString::new(canonical_key.as_bytes()).map_err(|_| "Invalid filename".to_string())?;
     let options = js::compile::options(scope, c_filename, 1);
     let mut src = transform_str_to_source_text(&source);
-    // SAFETY: `options` and `src` are valid for the duration of this call.
-    let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
-        .map_err(|_| ModuleLoadError::CompileThrew)?;
+    let module = match kind {
+        ModuleKind::JavaScript => {
+            // SAFETY: `options` and `src` are valid for the duration of this call.
+            let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
+                .map_err(|_| ModuleLoadError::CompileThrew)?;
 
-    // Store the canonical path in the module private: the load hook reads it
-    // to resolve this module's own relative imports against its directory.
-    let path_str = js::JSString::from_str(scope, &canonical_key)
-        .map_err(|_| "Failed to allocate module path string".to_string())?;
-    // SAFETY: `module` is the rooted module object `compile_module` returned, and `path_str` is
-    // rooted.
-    unsafe { SetModulePrivate(module.as_raw(), &path_str.as_value()) };
+            // Store the canonical path in the module private: the load hook reads it
+            // to resolve this module's own relative imports against its directory.
+            let path_str = js::JSString::from_str(scope, &canonical_key)
+                .map_err(|_| "Failed to allocate module path string".to_string())?;
+            // SAFETY: `module` is the rooted module object `compile_module` returned, and
+            // `path_str` is rooted.
+            unsafe { SetModulePrivate(module.as_raw(), &path_str.as_value()) };
+            module
+        }
+        // A JSON module has no imports, so it needs no path.
+        // SAFETY: `options` and `src` are valid for the duration of this call.
+        ModuleKind::Json => {
+            unsafe { js::module::compile_json_module(scope, options.ptr, &mut src) }
+                .map_err(|_| ModuleLoadError::CompileThrew)?
+        }
+    };
 
     registry(|reg| {
         reg.borrow_mut().insert(
-            canonical_key,
+            cache_key,
             ModuleEntry {
                 module_obj: Heap::from(module),
             },
@@ -1281,6 +1360,203 @@ mod tests {
             assert!(result.is_ok(), "mixed native+file module evaluation failed");
             assert_eq!(read_global_f64(&scope, "globalThis._native"), 777.0);
             assert_eq!(read_global_f64(&scope, "globalThis._file"), 888.0);
+        }
+    }
+
+    #[test]
+    fn json_import_evaluates_to_the_parsed_value() {
+        let dir = test_tempdir();
+        std::fs::write(dir.path().join("data.json"), r#"{ "n": 7, "s": "seven" }"#).unwrap();
+
+        let rt = test_runtime();
+        rt.reset_module_loader(dir.path().to_path_buf());
+        let scope = rt.default_global();
+        unsafe {
+            let result = evaluate_module(
+                &scope,
+                r#"
+                    import data from "./data.json" with { type: "json" };
+                    globalThis._jsonN = data.n;
+                    globalThis._jsonS = data.s;
+                "#,
+                "entry.mjs",
+            );
+            assert!(result.is_ok(), "JSON module import failed");
+            assert_eq!(read_global_f64(&scope, "globalThis._jsonN"), 7.0);
+            assert_eq!(read_global_string(&scope, "globalThis._jsonS"), "seven");
+        }
+    }
+
+    #[test]
+    fn invalid_json_module_fails_to_load() {
+        let dir = test_tempdir();
+        std::fs::write(dir.path().join("bad.json"), r#"{ "n": "#).unwrap();
+
+        let rt = test_runtime();
+        rt.reset_module_loader(dir.path().to_path_buf());
+        let scope = rt.default_global();
+        unsafe {
+            let result = evaluate_module(
+                &scope,
+                r#"import data from "./bad.json" with { type: "json" };"#,
+                "entry.mjs",
+            );
+            assert!(result.is_err(), "an invalid JSON module must not load");
+        }
+    }
+
+    #[test]
+    fn json_file_imported_as_javascript_is_refused() {
+        let dir = test_tempdir();
+        std::fs::write(dir.path().join("data.json"), r#"{ "n": 7 }"#).unwrap();
+
+        let rt = test_runtime();
+        rt.reset_module_loader(dir.path().to_path_buf());
+        let scope = rt.default_global();
+        unsafe {
+            let result = evaluate_module(&scope, r#"import data from "./data.json";"#, "entry.mjs");
+            assert!(
+                result.is_err(),
+                "a JSON file imported as JavaScript must be refused"
+            );
+            let message = ExnThrown::capture(&scope).message.unwrap_or_default();
+            assert!(message.contains(r#"with { type: "json" }"#), "{message}");
+        }
+    }
+
+    #[test]
+    fn unsupported_module_type_is_refused() {
+        let dir = test_tempdir();
+        std::fs::write(dir.path().join("style.css"), "body {}\n").unwrap();
+
+        let rt = test_runtime();
+        rt.reset_module_loader(dir.path().to_path_buf());
+        let scope = rt.default_global();
+        unsafe {
+            let result = evaluate_module(
+                &scope,
+                r#"import style from "./style.css" with { type: "css" };"#,
+                "entry.mjs",
+            );
+            assert!(result.is_err(), "a CSS module import must be refused");
+            let message = ExnThrown::capture(&scope).message.unwrap_or_default();
+            assert!(
+                message.contains("only JavaScript and JSON modules are supported"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_import_loads_the_module_graph_after_the_call_returns() {
+        let dir = test_tempdir();
+        std::fs::write(dir.path().join("c.js"), "export const BASE = 10;\n").unwrap();
+        std::fs::write(
+            dir.path().join("b.js"),
+            r#"
+                import { BASE } from "./c.js";
+                globalThis._order.push("b evaluated");
+                export const DOUBLED = BASE * 2;
+            "#,
+        )
+        .unwrap();
+
+        let rt = test_runtime();
+        rt.reset_module_loader(dir.path().to_path_buf());
+        let scope = rt.default_global();
+        unsafe {
+            let result = evaluate_module(
+                &scope,
+                r#"
+                    globalThis._order = [];
+                    import("./b.js").then((m) => { globalThis._dynamic = m.DOUBLED; });
+                    globalThis._order.push("import() returned");
+                "#,
+                "entry.mjs",
+            );
+            assert!(result.is_ok(), "module evaluation failed");
+            crate::event_loop::run_microtasks(&scope);
+            assert_eq!(read_global_f64(&scope, "globalThis._dynamic"), 20.0);
+            assert_eq!(
+                read_global_string(&scope, "globalThis._order.join()"),
+                "import() returned,b evaluated"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_await_on_dynamic_import() {
+        let dir = test_tempdir();
+        std::fs::write(dir.path().join("helper.js"), "export const VALUE = 5;\n").unwrap();
+        std::fs::write(dir.path().join("data.json"), r#"{ "n": 3 }"#).unwrap();
+
+        let rt = test_runtime();
+        rt.reset_module_loader(dir.path().to_path_buf());
+        let scope = rt.default_global();
+        unsafe {
+            let result = evaluate_module(
+                &scope,
+                r#"
+                    import data from "./data.json" with { type: "json" };
+                    const { VALUE } = await import("./helper.js");
+                    const json = await import("./data.json", { with: { type: "json" } });
+                    globalThis._sum = VALUE + json.default.n;
+                    globalThis._sameJson = json.default === data;
+                "#,
+                "entry.mjs",
+            );
+            assert!(result.is_ok(), "module evaluation failed");
+            crate::event_loop::run_microtasks(&scope);
+            assert_eq!(read_global_f64(&scope, "globalThis._sum"), 8.0);
+            assert_eq!(
+                read_global_string(&scope, "String(globalThis._sameJson)"),
+                "true"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_import_of_a_missing_module_rejects() {
+        let dir = test_tempdir();
+
+        let rt = test_runtime();
+        rt.reset_module_loader(dir.path().to_path_buf());
+        let scope = rt.default_global();
+        unsafe {
+            let result = evaluate_module(
+                &scope,
+                r#"
+                    import("./missing.js").catch((e) => { globalThis._error = e.message; });
+                "#,
+                "entry.mjs",
+            );
+            assert!(result.is_ok(), "module evaluation failed");
+            crate::event_loop::run_microtasks(&scope);
+            assert!(read_global_string(&scope, "globalThis._error")
+                .contains("Cannot resolve module './missing.js'"));
+        }
+    }
+
+    #[test]
+    fn dynamic_import_of_a_module_with_a_missing_dependency_rejects() {
+        let dir = test_tempdir();
+        std::fs::write(dir.path().join("present.js"), "import './missing.js';\n").unwrap();
+
+        let rt = test_runtime();
+        rt.reset_module_loader(dir.path().to_path_buf());
+        let scope = rt.default_global();
+        unsafe {
+            let result = evaluate_module(
+                &scope,
+                r#"
+                    import("./present.js").catch((e) => { globalThis._error = e.message; });
+                "#,
+                "entry.mjs",
+            );
+            assert!(result.is_ok(), "module evaluation failed");
+            crate::event_loop::run_microtasks(&scope);
+            assert!(read_global_string(&scope, "globalThis._error")
+                .contains("Cannot resolve module './missing.js'"));
         }
     }
 }
