@@ -2020,6 +2020,51 @@ fn a_script_with_no_fetch_listener_refuses_to_serve() {
     );
 }
 
+/// A top-level `await` that rejects after the script registered its listener fails startup with
+/// the rejection, rather than serving from a script that did not finish.
+#[test]
+fn a_late_top_level_rejection_refuses_to_serve() {
+    libstarling::register_builtins();
+    let config = RuntimeConfig {
+        eval_script: Some(
+            "addEventListener('fetch', (event) => event.respondWith(new Response('served')));\n\
+             await new Promise((resolve) => setTimeout(resolve, 10));\n\
+             throw new Error('late configuration failure');"
+                .to_string(),
+        ),
+        serve: Some(18473),
+        ..Default::default()
+    };
+    let error =
+        libstarling::serve_native::serve_with_shutdown(config, 18473, async {}).unwrap_err();
+    assert!(error.contains("late configuration failure"), "got: {error}");
+}
+
+/// With `--serve-isolated`, a top-level `await` that rejects after the script registered its
+/// listener fails the request whose evaluation it belongs to, which gets a 500.
+#[test]
+fn an_isolated_late_top_level_rejection_fails_the_request() {
+    let handle = start_serve_config(
+        RuntimeConfig {
+            eval_script: Some(
+                "addEventListener('fetch', (event) => event.respondWith(new Response('served')));\n\
+                 await new Promise((resolve) => setTimeout(resolve, 10));\n\
+                 throw new Error('late configuration failure');"
+                    .to_string(),
+            ),
+            serve: Some(18475),
+            serve_isolated: true,
+            ..Default::default()
+        },
+        18475,
+    );
+
+    assert_eq!(request(18475, "GET", "/", ""), "Internal Server Error");
+    assert_eq!(request(18475, "GET", "/", ""), "Internal Server Error");
+
+    handle.stop();
+}
+
 /// A phase timeout longer than `--end-to-end-timeout` is a contradiction the server refuses to
 /// start with, rather than quietly serving with a window the deadline never lets a phase use.
 #[test]

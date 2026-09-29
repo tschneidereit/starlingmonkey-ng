@@ -33,9 +33,10 @@ js::instance_local! {
     static RUNTIME: RefCell<Option<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts)>> =
         const { RefCell::new(None) };
 
-    /// Why [`runtime`] failed to start the runtime. Every later request fails with the same error
-    /// instead of repeating the whole bootstrap, since a bootstrap per request is far heavier
-    /// than serving from a running instance.
+    /// Why [`runtime`] failed to start the runtime, or why the content script's top-level `await`
+    /// rejected (see [`ensure_started`]). Every later request fails with the same error instead
+    /// of repeating the whole bootstrap, since a bootstrap per request is far heavier than serving
+    /// from a running instance.
     static STARTUP_FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
 
     /// The content script's startup event loop, holding its top-level async work. [`runtime`]
@@ -60,7 +61,7 @@ enum Startup {
     Pending(OwnedInvocation, core_runtime::ScriptEvaluation),
     /// A request is currently driving it. Concurrent requests wait.
     Driving,
-    /// Driven to completion (or there never was one).
+    /// Driven to completion, failed (see [`STARTUP_FAILURE`]), or there never was one.
     Done,
 }
 
@@ -80,9 +81,17 @@ fn install_runtime(pair: (Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeo
 /// (registering `fetch` handlers) and enter the global realm persistently. Synchronous (no
 /// `await`), so concurrent first requests can't race into two runtimes.
 ///
-/// A failed startup is final: this returns its error on every later call without retrying.
-fn runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts), String> {
-    runtime_for(false)
+/// A failed startup is final: this returns `Err` on every later call without retrying. The
+/// failure is logged once, by the call that ran into it. It names host paths and the server's own
+/// internals, so it goes to the log rather than to a client.
+fn runtime() -> Result<(Rc<Runtime>, *mut js::native::RawJSContext, ServeTimeouts), StartupFailed> {
+    let failed_before = STARTUP_FAILURE.with(|cell| cell.borrow().is_some());
+    runtime_for(false).map_err(|message| {
+        if !failed_before {
+            eprintln!("serve: the runtime could not be started: {message}");
+        }
+        StartupFailed
+    })
 }
 
 /// [`runtime`], creating a runtime configured for a Wizer snapshot if `pre_initialize` is set and
@@ -225,10 +234,17 @@ fn fix_up_after_resume() {
     }
 }
 
+/// The error [`runtime`] and [`ensure_started`] return once startup failed.
+struct StartupFailed;
+
 /// Let the content script finish evaluating before dispatching, so a handler registered after a
 /// top-level `await` is in place for the first request. Returns immediately once startup is done.
 /// A request arriving while another is still driving the loop waits for it.
-async fn ensure_started(raw_cx: *mut js::native::RawJSContext) {
+///
+/// `Err` means the content script's top-level `await` rejected. The failure is logged once, when
+/// it happens, and the work the script left behind is cancelled. It is final, so every later
+/// request gets `Err` too.
+async fn ensure_started(raw_cx: *mut js::native::RawJSContext) -> Result<(), StartupFailed> {
     /// Restores `Startup::Pending` if driving is cancelled mid-way (the host dropped the request
     /// future), so the loop's GC registration stays valid and a later request resumes driving.
     struct Driving {
@@ -266,19 +282,38 @@ async fn ensure_started(raw_cx: *mut js::native::RawJSContext) {
             }
         });
         match action {
-            Action::Ready => return,
+            Action::Ready => {
+                return match STARTUP_FAILURE.with(|cell| cell.borrow().is_some()) {
+                    true => Err(StartupFailed),
+                    false => Ok(()),
+                };
+            }
             Action::Drive(invocation, evaluation) => {
                 let mut driving = Driving {
                     pending: Some((invocation, evaluation)),
                 };
                 let (invocation, evaluation) = driving.pending.as_mut().expect("just set");
                 drive_startup(raw_cx, invocation.state().event_loop(), evaluation).await;
-                report_missing_fetch_listener(raw_cx, evaluation);
-                let (invocation, _) = driving.pending.take().expect("just driven");
+                // SAFETY: `runtime` entered the default global's realm for the process lifetime.
+                let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
+                let failed = evaluation.rejection(&scope, "Script evaluation failed");
+                let (invocation, evaluation) = driving.pending.take().expect("just driven");
+                match &failed {
+                    Ok(()) => report_missing_fetch_listener(raw_cx, &evaluation),
+                    Err(message) => {
+                        eprintln!(
+                            "serve: the content script's top-level `await` rejected: {message}"
+                        );
+                        STARTUP_FAILURE.with(|cell| *cell.borrow_mut() = Some(message.clone()));
+                    }
+                }
                 STARTUP.with(|cell| *cell.borrow_mut() = Startup::Done);
                 STARTUP_CHANGED.with(|changed| changed.notify(usize::MAX));
-                keep_startup_loop_running(raw_cx, invocation);
-                return;
+                match failed {
+                    Ok(()) => keep_startup_loop_running(raw_cx, invocation),
+                    Err(_) => invocation.state().event_loop().cancel_pending_futures(),
+                }
+                return failed.map_err(|_| StartupFailed);
             }
             Action::Wait => {
                 // Another request is already driving the startup loop; wait for it to finish.
@@ -355,22 +390,17 @@ fn keep_startup_loop_running(raw_cx: *mut js::native::RawJSContext, invocation: 
 /// Handle one incoming request: create (or reuse) the runtime, drive the
 /// content script's startup loop, then dispatch the request.
 pub async fn handle(wasi_request: WasiRequest) -> Result<WasiResponse, ErrorCode> {
-    let (runtime, raw_cx, timeouts) = match runtime() {
-        Ok(pair) => pair,
-        Err(message) => {
-            // The failure (a rejected configuration, a script that would not read or evaluate)
-            // names host paths and the server's own internals, so it goes to the log and the
-            // client gets a bare 500.
-            eprintln!("serve: the runtime could not be started: {message}");
-            // No runtime means no loop to drain, and no config to take a timeout from.
-            return Ok(error_response(500, "Internal Server Error", None).0);
-        }
+    let Ok((runtime, raw_cx, timeouts)) = runtime() else {
+        // No runtime means no loop to drain, and no config to take a timeout from.
+        return Ok(error_response(500, "Internal Server Error", None).0);
     };
     // Before `ensure_started`, which runs whatever the content script left after a top-level
     // `await`: that is script code, and it must not observe the state a resume still has to
     // repair.
     fix_up_after_resume();
-    ensure_started(raw_cx).await;
+    if ensure_started(raw_cx).await.is_err() {
+        return Ok(error_response(500, "Internal Server Error", None).0);
+    }
     dispatch_request(runtime, raw_cx, wasi_request, timeouts).await
 }
 

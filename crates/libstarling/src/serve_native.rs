@@ -187,6 +187,7 @@ async fn run_server(
         // Checked only once the script has finished, since a handler may be registered after a
         // top-level `await`. Isolated mode has no script here to check. Its per-request
         // evaluation sends a 500 instead.
+        evaluation.rejection(&server_realm, "Script evaluation failed")?;
         if !fetch_event::fetch_event::FetchEvent::has_listener(&server_realm) {
             return Err(crate::serve_common::NO_FETCH_LISTENER.to_string());
         }
@@ -650,6 +651,12 @@ async fn evaluate_into_request_global(
         .is_none()
     {
         eprintln!("serve: the content script's startup ran into the end-to-end timeout");
+        return Err(500);
+    }
+    // SAFETY: the caller holds the request's realm entered.
+    let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
+    if let Err(message) = evaluation.rejection(&scope, "Script evaluation failed") {
+        eprintln!("serve: content script evaluation failed: {message}");
         return Err(500);
     }
     Ok(())

@@ -176,7 +176,8 @@ fn a_runtime_that_will_not_start_keeps_its_reasons_off_the_wire() {
 }
 
 /// A runtime whose startup failed responds to every later request with a 500 without running the
-/// startup again: a reused instance evaluates the content script once.
+/// startup again or logging the failure again: a reused instance evaluates the content script
+/// once.
 #[test]
 fn a_failed_startup_is_not_retried_by_later_requests() {
     let Some(server) = Serve::new(18461)
@@ -202,6 +203,11 @@ fn a_failed_startup_is_not_retried_by_later_requests() {
         log.matches("startup-ran").count(),
         distinct.len(),
         "each instance must run the failing startup once, not once per request: {log}"
+    );
+    assert_eq!(
+        log.matches("could not be started").count(),
+        distinct.len(),
+        "each instance must log its failed startup once: {log}"
     );
 }
 
@@ -321,6 +327,41 @@ fn a_script_with_no_fetch_listener_reports_itself_and_answers_500s() {
         server.wait_for_marker("answering with a network error", Duration::from_secs(5)),
         "{}",
         server.log()
+    );
+}
+
+/// A top-level `await` that rejects after the script registered its listener fails startup: the
+/// rejection is logged once, and every request is answered with a 500.
+#[test]
+fn a_late_top_level_rejection_fails_startup() {
+    let Some(server) = Serve::new(18474)
+        .module(
+            "entry.mjs",
+            "addEventListener('fetch', (event) => event.respondWith(new Response('served')));
+             await new Promise((resolve) => setTimeout(resolve, 10));
+             throw new Error('late configuration failure');",
+        )
+        .ready(Ready::AnyResponse)
+        .start()
+    else {
+        return;
+    };
+
+    for _ in 0..2 {
+        let response = server.full_request("GET", "/", "");
+        assert!(response.starts_with("HTTP/1.1 500"), "{response}");
+    }
+    assert!(
+        server.wait_for_marker("late configuration failure", Duration::from_secs(5)),
+        "{}",
+        server.log()
+    );
+    // Logged when startup fails, not again for each request.
+    let log = server.log();
+    assert_eq!(
+        log.matches("top-level `await` rejected").count(),
+        1,
+        "{log}"
     );
 }
 

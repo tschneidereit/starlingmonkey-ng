@@ -161,6 +161,13 @@ its top-level `await` rejects or never settles, or an initializer, the event loo
 or the runtime fails, with the error printed to stderr. `2` for invalid
 command-line arguments.
 
+**Serving** — a script served with `--serve` or under `wasmtime serve` that throws,
+or whose top-level `await` rejects, fails startup. The native server exits with
+status 1 once that happens, which for a top-level `await` can be after it began
+listening. A wasm instance logs the error once and answers every request with a
+500. With `--serve-isolated`, the script is evaluated for each request, and a
+request whose evaluation fails is answered with a 500.
+
 ---
 
 ## Extending with Custom Builtins
