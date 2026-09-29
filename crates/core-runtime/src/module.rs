@@ -506,6 +506,37 @@ fn resolve_file_module<'r>(
     Ok(module)
 }
 
+/// Register `module`, an entry module compiled from the source of the file at
+/// `path`, as that file's module, the way [`resolve_file_module`] registers a
+/// file it compiles: a module importing the file gets `module`, and `module`'s
+/// relative imports resolve against the file's directory. A relative `path` is
+/// resolved against the current directory.
+pub fn register_entry_module(
+    scope: &Scope<'_>,
+    module: Object<'_>,
+    path: &Path,
+) -> Result<(), ExnThrown> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| lexically_normalize(path));
+    let key = canonical.to_string_lossy().to_string();
+    let path_str = js::JSString::from_str(scope, &key).map_err(|_| ExnThrown)?;
+    // SAFETY: `module` is a rooted module object, and `path_str` is rooted.
+    unsafe { SetModulePrivate(module.as_raw(), &path_str.as_value()) };
+    registry(|reg| {
+        reg.borrow_mut().insert(
+            key,
+            ModuleEntry {
+                module_obj: Heap::from(module),
+            },
+        );
+    });
+    Ok(())
+}
+
 /// Why [`resolve_file_module`] could not produce a module.
 enum ModuleLoadError {
     /// Resolving or reading the module failed. The message describes why.
@@ -881,26 +912,17 @@ pub unsafe fn evaluate_module<'s>(
     let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }
         .map_err(|_| ExnThrown)?;
 
-    // If the filename is a real path, store its absolute form in the module
-    // private: the load hook reads it to resolve this entry's relative
-    // imports against the entry's own directory. Pathless entries (eval
-    // scripts, synthetic filenames) leave the private unset and fall back to
-    // the loader's base path. The empty-path guard prevents WASI from
-    // treating `Path::new("").exists()` as a valid root directory.
+    // If the filename is a path in an existing directory, or a file in the
+    // current directory, register the entry as that file's module. Other entries
+    // (eval scripts, synthetic filenames) stay unregistered and resolve their
+    // relative imports against the loader's base path.
     let path = Path::new(filename);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && parent.exists() {
-            let abs = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(path)
-            };
-            let path_str =
-                js::JSString::from_str(scope, &abs.to_string_lossy()).map_err(|_| ExnThrown)?;
-            // SAFETY: `module` is the rooted module object `compile_module` returned, and `path_str` is
-            // rooted.
-            unsafe { SetModulePrivate(module.as_raw(), &path_str.as_value()) };
-        }
+    let is_path = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.exists(),
+        _ => path.is_file(),
+    };
+    if is_path {
+        register_entry_module(scope, module, path)?;
     }
 
     js::module::load_requested_modules(scope, module).map_err(|_| ExnThrown)?;
