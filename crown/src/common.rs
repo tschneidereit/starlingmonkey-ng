@@ -35,6 +35,28 @@ impl<'tcx> LateContextExt for LateContext<'tcx> {
 /// check if a DefId's path matches the given absolute type path
 /// usage e.g. with
 /// `match_def_path(cx, id, &["core", "option", "Option"])`
+/// Attribute lookups on [`TyCtxt`].
+pub trait TyCtxtExt {
+    /// Whether the item `did` has an attribute whose path is `attrs`.
+    fn has_attrs_with_path(self, did: impl Into<DefId>, attrs: &[Symbol]) -> bool;
+}
+
+impl TyCtxtExt for TyCtxt<'_> {
+    fn has_attrs_with_path(self, did: impl Into<DefId>, attrs: &[Symbol]) -> bool {
+        self.get_attrs_by_path(did.into(), attrs).next().is_some()
+    }
+}
+
+/// The item an alias type names: the associated type, opaque type or type alias.
+pub fn alias_def_id(kind: ty::AliasTyKind<'_>) -> DefId {
+    match kind {
+        ty::AliasTyKind::Projection { def_id } => def_id.into(),
+        ty::AliasTyKind::Inherent { def_id } => def_id.into(),
+        ty::AliasTyKind::Opaque { def_id } => def_id.into(),
+        ty::AliasTyKind::Free { def_id } => def_id.into(),
+    }
+}
+
 pub fn match_def_path(cx: &LateContext, def_id: DefId, path: &[Symbol]) -> bool {
     let def_path = cx.tcx.def_path(def_id);
     let krate = &cx.tcx.crate_name(def_path.krate);

@@ -9,6 +9,7 @@ use rustc_session::declare_tool_lint;
 use rustc_span::def_id::{DefId, LocalDefId};
 use rustc_span::symbol::{sym, Symbol};
 
+use crate::common::{alias_def_id, TyCtxtExt as _};
 use crate::common::{in_derive_expn, match_def_path, LateContextExt};
 use crate::symbols;
 
@@ -21,7 +22,9 @@ declare_tool_lint! {
 pub fn register(lint_store: &mut LintStore) {
     let symbols = Symbols::new();
     lint_store.register_lints(&[UNROOTED_MUST_ROOT]);
-    lint_store.register_late_pass(move |_| Box::new(UnrootedPass::new(symbols.clone())));
+    lint_store.register_late_lint_pass(Box::new(move |_| {
+        Box::new(UnrootedPass::new(symbols.clone()))
+    }));
 }
 
 /// Lint for ensuring safe usage of unrooted pointers
@@ -75,7 +78,7 @@ fn associated_type_has_attr<'tcx>(
                     &[sym.crown, sym.unrooted_must_root_lint, attr],
                 );
             },
-            ty::Alias(alias)
+            ty::Alias(_, alias)
                 if matches!(
                     alias.kind,
                     ty::AliasTyKind::Projection { .. }
@@ -84,7 +87,7 @@ fn associated_type_has_attr<'tcx>(
                 ) =>
             {
                 return cx.tcx.has_attrs_with_path(
-                    alias.kind.def_id(),
+                    alias_def_id(alias.kind),
                     &[sym.crown, sym.unrooted_must_root_lint, attr],
                 )
             },
@@ -104,7 +107,10 @@ fn associated_type_has_attr<'tcx>(
 /// flagged as usual).
 fn must_root_allows_self_return(sym: &Symbols, cx: &LateContext, did: DefId) -> bool {
     cx.tcx
-        .get_attrs_by_path(did, &[sym.crown, sym.unrooted_must_root_lint, sym.must_root])
+        .get_attrs_by_path(
+            did,
+            &[sym.crown, sym.unrooted_must_root_lint, sym.must_root],
+        )
         .any(|attr| {
             attr.meta_item_list().is_some_and(|list| {
                 list.iter()
@@ -164,7 +170,7 @@ fn is_unrooted_ty<'tcx>(
                     let inner = substs.type_at(0);
                     match inner.kind() {
                         ty::Adt(did, _) => !has_attr(did.did(), sym.allow_unrooted_in_rc),
-                        ty::Alias(alias)
+                        ty::Alias(_, alias)
                             if matches!(
                                 alias.kind,
                                 ty::AliasTyKind::Projection { .. }
@@ -172,7 +178,7 @@ fn is_unrooted_ty<'tcx>(
                                     | ty::AliasTyKind::Free { .. }
                             ) =>
                         {
-                            !has_attr(alias.kind.def_id(), sym.allow_unrooted_in_rc)
+                            !has_attr(alias_def_id(alias.kind), sym.allow_unrooted_in_rc)
                         },
                         _ => true,
                     }
@@ -271,7 +277,7 @@ fn is_unrooted_ty<'tcx>(
                 false
             },
             ty::FnDef(..) | ty::FnPtr(..) => false,
-            ty::Alias(alias)
+            ty::Alias(_, alias)
                 if matches!(
                     alias.kind,
                     ty::AliasTyKind::Projection { .. }
@@ -279,7 +285,7 @@ fn is_unrooted_ty<'tcx>(
                         | ty::AliasTyKind::Free { .. }
                 ) =>
             {
-                let def_id = alias.kind.def_id();
+                let def_id = alias_def_id(alias.kind);
                 if has_attr(def_id, sym.must_root) {
                     ret = true;
                     false

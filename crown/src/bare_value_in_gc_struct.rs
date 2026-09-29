@@ -25,6 +25,7 @@ use rustc_middle::ty;
 use rustc_session::declare_tool_lint;
 use rustc_span::symbol::Symbol;
 
+use crate::common::TyCtxtExt as _;
 use crate::common::{match_def_path_suffix, LateContextExt};
 use crate::symbols;
 
@@ -37,7 +38,9 @@ declare_tool_lint! {
 pub fn register(lint_store: &mut LintStore) {
     let symbols = Symbols::new();
     lint_store.register_lints(&[BARE_VALUE_IN_GC_STRUCT]);
-    lint_store.register_late_pass(move |_| Box::new(BareValuePass::new(symbols.clone())));
+    lint_store.register_late_lint_pass(Box::new(move |_| {
+        Box::new(BareValuePass::new(symbols.clone()))
+    }));
 }
 
 pub(crate) struct BareValuePass {
