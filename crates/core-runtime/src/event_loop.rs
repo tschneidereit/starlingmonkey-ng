@@ -188,6 +188,51 @@ pub enum StepOutcome {
     Progressed,
 }
 
+/// A `setTimeout`/`setInterval` timer, keyed by the id JS sees.
+struct JsTimer {
+    /// The task the timer controls. An interval re-queues itself under the same one.
+    task: TaskId,
+    /// Where the timer was created, kept for each re-queue of an interval.
+    origin: Option<Rc<str>>,
+}
+
+// ---------------------------------------------------------------------------
+// Pending work
+// ---------------------------------------------------------------------------
+
+/// One thing that keeps an event loop alive, as [`EventLoop::pending_work`] reports it.
+#[derive(Debug)]
+pub struct PendingWork {
+    pub kind: PendingKind,
+    /// The JS call stack that created the work, if origins were being recorded then. See
+    /// [`js::stack::record_origins`].
+    pub origin: Option<Rc<str>>,
+}
+
+/// The kinds of [`PendingWork`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingKind {
+    /// A task waiting for its deadline, labelled with its [`Task::kind`].
+    Timer(&'static str),
+    /// A task waiting to be signalled ready or to run, labelled with its [`Task::kind`].
+    Task(&'static str),
+    /// External interest held through an [`InterestHandle`], such as a stream being read.
+    Interest,
+    /// An async-promise future, such as a `fetch` in flight.
+    Future,
+}
+
+impl std::fmt::Display for PendingKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PendingKind::Timer(kind) => write!(f, "a pending `{kind}` timer"),
+            PendingKind::Task(kind) => write!(f, "a queued `{kind}` task"),
+            PendingKind::Interest => f.write_str("an operation that keeps the event loop alive"),
+            PendingKind::Future => f.write_str("a host operation in flight"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Task trait
 // ---------------------------------------------------------------------------
@@ -233,6 +278,9 @@ struct TaskEntry {
     /// The reading comes from `platform::clock`, not `std::time`, so a deadline
     /// taken before a Wizer snapshot is already past when the instance resumes.
     deadline: Option<Instant>,
+    /// Where the task was queued, if origins were being recorded then. See
+    /// [`js::stack::record_origins`].
+    origin: Option<Rc<str>>,
 }
 
 impl TaskEntry {
@@ -341,7 +389,7 @@ pub struct EventLoop {
     tasks: RefCell<TaskQueue>,
     /// HTML's per-loop "map of setTimeout and setInterval IDs": the timer ids
     /// JS sees, mapped to the internal task they control.
-    js_timers: RefCell<HashMap<u64, TaskId>>,
+    js_timers: RefCell<HashMap<u64, JsTimer>>,
     /// Scratch buffer for [`step`](Self::step)'s per-batch dispatch list,
     /// reused across steps so the hot path stays allocation-free.
     batch_buf: RefCell<Vec<TaskId>>,
@@ -384,11 +432,14 @@ impl EventLoop {
     /// Returns the [`TaskId`] assigned to this task.
     pub fn queue(&self, task: Box<dyn Task>) -> TaskId {
         let id = self.next_task_id();
+        // Read before `tasks` is borrowed: recording the origin can GC, which traces the loop.
+        let origin = js::stack::current_origin();
         self.tasks.borrow_mut().insert(TaskEntry {
             id,
             task,
             ready: false,
             deadline: None,
+            origin,
         });
         id
     }
@@ -399,11 +450,14 @@ impl EventLoop {
     /// external event (e.g. resolved promises, `queueMicrotask` work).
     pub fn queue_ready(&self, task: Box<dyn Task>) -> TaskId {
         let id = self.next_task_id();
+        // Read before `tasks` is borrowed: recording the origin can GC, which traces the loop.
+        let origin = js::stack::current_origin();
         self.tasks.borrow_mut().insert(TaskEntry {
             id,
             task,
             ready: true,
             deadline: None,
+            origin,
         });
         self.notify.notify(1);
         id
@@ -416,15 +470,27 @@ impl EventLoop {
     /// similar, use a deadline of `Instant::now()`.
     pub fn queue_timer(&self, task: Box<dyn Task>, deadline: Instant) -> TaskId {
         let id = self.next_task_id();
+        self.insert_timer(id, task, deadline, js::stack::current_origin());
+        id
+    }
+
+    /// Insert a timer task under `id`, and wake the driver so it can re-evaluate the earliest
+    /// timer deadline.
+    fn insert_timer(
+        &self,
+        id: TaskId,
+        task: Box<dyn Task>,
+        deadline: Instant,
+        origin: Option<Rc<str>>,
+    ) {
         self.tasks.borrow_mut().insert(TaskEntry {
             id,
             task,
             ready: false,
             deadline: Some(deadline),
+            origin,
         });
-        // Wake the driver so it can re-evaluate the earliest timer deadline.
         self.notify.notify(1);
-        id
     }
 
     /// Cancel a queued task, removing it from the event loop.
@@ -444,8 +510,12 @@ impl EventLoop {
         make_task: impl FnOnce(u64) -> Box<dyn Task>,
     ) -> u64 {
         let timer_id = self.allocate_js_timer_id(scope);
-        let task_id = self.queue_timer(make_task(timer_id), deadline);
-        self.js_timers.borrow_mut().insert(timer_id, task_id);
+        let task = self.next_task_id();
+        let origin = js::stack::current_origin();
+        self.insert_timer(task, make_task(timer_id), deadline, origin.clone());
+        self.js_timers
+            .borrow_mut()
+            .insert(timer_id, JsTimer { task, origin });
         timer_id
     }
 
@@ -461,17 +531,11 @@ impl EventLoop {
         task: Box<dyn Task>,
         deadline: Instant,
     ) {
-        if self.js_timers.borrow().get(&timer_id) != Some(&id) {
-            return;
-        }
-        self.tasks.borrow_mut().insert(TaskEntry {
-            id,
-            task,
-            ready: false,
-            deadline: Some(deadline),
-        });
-        // Wake the driver so it can re-evaluate the earliest timer deadline.
-        self.notify.notify(1);
+        let origin = match self.js_timers.borrow().get(&timer_id) {
+            Some(timer) if timer.task == id => timer.origin.clone(),
+            _ => return,
+        };
+        self.insert_timer(id, task, deadline, origin);
     }
 
     /// Cancel a JS timer by its `setTimeout`/`setInterval` id.
@@ -479,11 +543,11 @@ impl EventLoop {
     /// Invalid IDs are silently ignored per spec.
     pub fn clear_js_timer(&self, timer_id: u64) {
         let removed = self.js_timers.borrow_mut().remove(&timer_id);
-        if let Some(task_id) = removed {
+        if let Some(timer) = removed {
             // If the task is still queued, remove it. If it is currently
             // running (an interval clearing itself from its own callback),
             // the now-missing map entry suppresses the re-queue instead.
-            self.cancel_if_queued(task_id);
+            self.cancel_if_queued(timer.task);
         }
     }
 
@@ -600,6 +664,81 @@ impl EventLoop {
     /// This includes things like filesystem or network I/O.
     pub fn has_active_external_async_tasks(&self) -> bool {
         js::promise::has_pending_futures(self.loop_id)
+    }
+
+    /// `Ok` if this loop holds no work, and otherwise `Err` describing each piece of work it holds
+    /// and where it was created, for a caller about to take a Wizer snapshot, which cannot capture
+    /// pending work.
+    pub fn ensure_idle_for_snapshot(&self) -> Result<(), String> {
+        use std::fmt::Write as _;
+
+        let work = self.pending_work();
+        if work.is_empty() {
+            return Ok(());
+        }
+        let mut message = String::from(
+            "the application's top level finished evaluating with asynchronous work still \
+             pending, which a snapshot cannot hold. Await or cancel each of these before the top \
+             level finishes:",
+        );
+        for item in work {
+            match item.origin {
+                Some(origin) => {
+                    let _ = write!(message, "\n  - {}, created at:", item.kind);
+                    for frame in origin.lines() {
+                        let _ = write!(message, "\n      {frame}");
+                    }
+                }
+                None => {
+                    let _ = write!(
+                        message,
+                        "\n  - {}, created with no JavaScript on the stack",
+                        item.kind
+                    );
+                }
+            }
+        }
+        Err(message)
+    }
+
+    /// Everything that keeps this loop alive: its tasks, its external interest, and the
+    /// async-promise futures it owns. Each entry's origin is set if origins were being recorded
+    /// when the work was created (see [`js::stack::record_origins`]).
+    ///
+    /// Tasks come first, in the order they were queued, then interest, then futures.
+    pub fn pending_work(&self) -> Vec<PendingWork> {
+        let tasks = self.tasks.borrow();
+        let mut entries: Vec<&TaskEntry> = tasks.entries.values().collect();
+        entries.sort_unstable_by_key(|entry| entry.id.0);
+        let mut work: Vec<PendingWork> = entries
+            .into_iter()
+            .map(|entry| PendingWork {
+                kind: match entry.deadline {
+                    Some(_) => PendingKind::Timer(entry.task.kind()),
+                    None => PendingKind::Task(entry.task.kind()),
+                },
+                origin: entry.origin.clone(),
+            })
+            .collect();
+        let interest = self.interest.origins();
+        let unrecorded = self.interest.count() as usize - interest.len();
+        work.extend(interest.into_iter().map(|origin| PendingWork {
+            kind: PendingKind::Interest,
+            origin: Some(origin),
+        }));
+        work.extend((0..unrecorded).map(|_| PendingWork {
+            kind: PendingKind::Interest,
+            origin: None,
+        }));
+        work.extend(
+            js::promise::pending_future_origins(self.loop_id)
+                .into_iter()
+                .map(|origin| PendingWork {
+                    kind: PendingKind::Future,
+                    origin,
+                }),
+        );
+        work
     }
 
     /// An [`EventListener`] resolving on the next readiness notification: a task became ready, a

@@ -366,13 +366,13 @@ impl<'s> Stack<'s, Promise> {
     /// Stores the `Promise` in a `RootedHeap<Promise>` for GC safety
     /// and queues the future for later execution via `drain_promises`.
     pub fn spawn(&self, js_promise: PromiseFuture) {
-        let heap_promise = RootedHeap::new(*self);
-
-        let owner = current_future_owner(|owner_cell| owner_cell.get());
-        pending_futures(|f| {
-            f.borrow_mut()
-                .push((owner, heap_promise, js_promise.future));
-        });
+        let pending = PendingPromise {
+            owner: current_future_owner(|owner_cell| owner_cell.get()),
+            promise: RootedHeap::new(*self),
+            future: js_promise.future,
+            origin: crate::stack::current_origin(),
+        };
+        pending_futures(|f| f.borrow_mut().push(pending));
     }
 }
 
@@ -502,14 +502,24 @@ use std::pin::Pin;
 /// Callback that sets a resolved value on a `MutableHandleValue`.
 type ResolveCallback = Box<dyn for<'s> FnOnce(&'s Scope<'_>) -> Result<HandleValue<'s>, ExnThrown>>;
 
-/// A pending promise paired with its future, tagged with the id of the event loop that owns it (the
-/// loop active when it was spawned), so concurrent per-request loops drive and settle only their own
-/// futures. Id 0 means unowned (spawned with no active loop), can be driven by any loop.
-pub(crate) type PendingPromise = (
-    u64,
-    RootedHeap<Promise>,
-    Pin<Box<dyn Future<Output = PromiseOutcome> + 'static>>,
-);
+/// A pending promise paired with its future.
+pub(crate) struct PendingPromise {
+    /// The id of the event loop that owns the future (the loop active when it was spawned), so
+    /// concurrent per-request loops drive and settle only their own futures. Id 0 means unowned
+    /// (spawned with no active loop), and any loop can drive it.
+    owner: u64,
+    promise: RootedHeap<Promise>,
+    future: Pin<Box<dyn Future<Output = PromiseOutcome> + 'static>>,
+    /// Where the future was spawned, if origins were being recorded then. See
+    /// [`crate::stack::record_origins`].
+    origin: Option<std::rc::Rc<str>>,
+}
+
+impl PendingPromise {
+    fn owned_by(&self, owner: u64) -> bool {
+        self.owner == owner || self.owner == 0
+    }
+}
 
 /// The outcome of an async method — either resolve with a convertible value
 /// or reject with an error message.
@@ -664,8 +674,8 @@ fn take_pending_futures() -> Vec<PendingPromise> {
 pub fn cancel_pending_future(promise: Stack<Promise>) -> bool {
     let mut removed = false;
     let mut drop_matching = |queue: &RefCell<Vec<PendingPromise>>| {
-        queue.borrow_mut().retain(|(_owner, boxed, _)| {
-            let matches = *boxed == promise;
+        queue.borrow_mut().retain(|pending| {
+            let matches = pending.promise == promise;
             removed |= matches;
             !matches
         });
@@ -688,9 +698,7 @@ pub fn cancel_pending_future(promise: Stack<Promise>) -> bool {
 pub fn cancel_pending_futures_for(owner: u64) {
     debug_assert_ne!(owner, 0, "unowned futures belong to no single loop");
     let drop_owned = |queue: &RefCell<Vec<PendingPromise>>| {
-        queue
-            .borrow_mut()
-            .retain(|(future_owner, _, _)| *future_owner != owner);
+        queue.borrow_mut().retain(|pending| pending.owner != owner);
     };
     pending_futures(drop_owned);
     active_futures(drop_owned);
@@ -710,9 +718,28 @@ pub fn cancel_all_pending_futures() {
 /// An event loop uses this to stay alive while *its own* async I/O (e.g. a `fetch`) is in flight,
 /// even with no tasks or timers — without being held alive by another request's loop's futures.
 pub fn has_pending_futures(owner: u64) -> bool {
-    let owned_by_caller = |future: &PendingPromise| future.0 == owner || future.0 == 0;
+    let owned_by_caller = |future: &PendingPromise| future.owned_by(owner);
     active_futures(|a| a.borrow().iter().any(owned_by_caller))
         || pending_futures(|f| f.borrow().iter().any(owned_by_caller))
+}
+
+/// The origins of the async-promise futures owned by `owner` (or unowned) that are pending, one
+/// per future, with `None` for a future spawned while origins were not being recorded. See
+/// [`crate::stack::record_origins`].
+pub fn pending_future_origins(owner: u64) -> Vec<Option<std::rc::Rc<str>>> {
+    let mut origins = Vec::new();
+    let mut collect = |queue: &RefCell<Vec<PendingPromise>>| {
+        origins.extend(
+            queue
+                .borrow()
+                .iter()
+                .filter(|future| future.owned_by(owner))
+                .map(|future| future.origin.clone()),
+        );
+    };
+    active_futures(&mut collect);
+    pending_futures(&mut collect);
+    origins
 }
 
 /// A promise object whose future completed, paired with its outcome — returned by
@@ -741,15 +768,15 @@ pub fn poll_pending_futures(
 
     let mut still_pending: Vec<PendingPromise> = Vec::with_capacity(futures.len());
     let mut completed: Vec<CompletedFuture> = Vec::new();
-    for (future_owner, boxed, mut future) in futures {
+    for mut pending in futures {
         // Leave another loop's future for that loop's wait to poll and settle.
-        if future_owner != owner && future_owner != 0 {
-            still_pending.push((future_owner, boxed, future));
+        if !pending.owned_by(owner) {
+            still_pending.push(pending);
             continue;
         }
-        match future.as_mut().poll(task_cx) {
-            std::task::Poll::Ready(outcome) => completed.push((boxed, outcome)),
-            std::task::Poll::Pending => still_pending.push((future_owner, boxed, future)),
+        match pending.future.as_mut().poll(task_cx) {
+            std::task::Poll::Ready(outcome) => completed.push((pending.promise, outcome)),
+            std::task::Poll::Pending => still_pending.push(pending),
         }
     }
 

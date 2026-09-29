@@ -138,21 +138,35 @@ check "a listener-less script is refused even when it awaits first" \
     "no \`fetch\` listener added during evaluation" \
     "$gate_output"
 
-# Work the top level leaves running is background work, not part of evaluation: it survives into
-# the snapshot as the timer it is and goes on running once the instance serves.
+# A snapshot holds memory, not a running event loop, so work the top level leaves behind once it
+# has finished evaluating is refused, with the stack that created it.
 cat >leftover.mjs <<'JS'
 globalThis.ticks = 0;
-const timer = setInterval(() => { globalThis.ticks++; }, 10);
+setInterval(() => { globalThis.ticks++; }, 10);
 await new Promise((resolve) => setTimeout(resolve, 50));
+addEventListener('fetch', (event) => event.respondWith(new Response('ok')));
+JS
+leftover_output="$(snapshot snap-leftover.wasm "leftover.mjs" || true)"
+check "background work left by the top level fails the snapshot" \
+    "a pending \`interval\` timer, created at:" \
+    "$leftover_output"
+check "the refusal names where the work was created" \
+    "leftover.mjs:2:" \
+    "$leftover_output"
+
+# The snapshot holds no host handles: libc's stdio streams, opened by a top-level write, are closed
+# before it is taken, and the resumed instance opens them again on its first write.
+cat >stdio.mjs <<'JS'
+console.log('written under Wizer');
 addEventListener('fetch', (event) => {
-  clearInterval(timer);
-  event.respondWith(new Response('ticks=' + (globalThis.ticks > 0 ? 'running' : 'stalled')));
+  console.log('written by the handler');
+  event.respondWith(new Response('logged'));
 });
 JS
-snapshot snap-leftover.wasm "leftover.mjs" >/dev/null
-check "background work left by the top level keeps running after a resume" \
-    "ticks=running" \
-    "$(serve_and_get snap-leftover.wasm "leftover.mjs" 18354)"
+snapshot snap-stdio.wasm "stdio.mjs" >/dev/null
+check "a snapshot taken after a top-level write can write again" \
+    "logged" \
+    "$(serve_and_get snap-stdio.wasm "stdio.mjs" 18354)"
 
 # Host I/O still running when evaluation ends is a handle belonging to the snapshotting process,
 # and the snapshot carries memory rather than handles — so it is refused rather than resumed into a
@@ -178,7 +192,7 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 addEventListener('fetch', (event) => event.respondWith(new Response('ok')));
 JS
     check "host I/O still in flight fails the snapshot" \
-        "still had host I/O in flight" \
+        "a host operation in flight, created at:" \
         "$(snapshot snap-inflight.wasm "inflight.mjs" || true)"
 else
     echo "SKIP - host I/O still in flight fails the snapshot (no hanging upstream)"
