@@ -188,14 +188,7 @@ pub async fn pre_initialize() -> Result<(), String> {
     if !evaluation.is_finished(&scope) {
         drive_startup(raw_cx, invocation.state().event_loop(), &evaluation).await;
     }
-    evaluation.rejection(&scope, "Script evaluation failed")?;
-    if !evaluation.is_finished(&scope) {
-        return Err(
-            "the script's top-level `await` never settled: the event loop ran out of \
-                    work while it was still pending"
-                .to_string(),
-        );
-    }
+    evaluation.settled(&scope, "Script evaluation failed")?;
     // Throw an error instead of creating a snapshot that can't possibly serve requests.
     if evaluated_without_listener(&scope, &evaluation) {
         return Err(crate::serve_common::NO_FETCH_LISTENER.to_string());

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
 
-use core_runtime::event_loop::run_to_completion;
-
 // Re-export everything from core-runtime.
 pub use core_runtime::*;
 
@@ -93,9 +91,8 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
         );
     }
 
-    let (runtime, invocation) = match core_runtime::setup(config)? {
-        Some(pair) => pair,
-        None => return Ok(()),
+    let Some((runtime, invocation, evaluation)) = core_runtime::setup(config)? else {
+        return Ok(());
     };
 
     // Register `invocation` for GC tracing now that it has reached its final,
@@ -119,11 +116,15 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
     // SAFETY: `raw_cx` is valid for the duration of the await — `scope`
     // keeps the `Runtime` alive and the realm entered.
     unsafe {
-        run_to_completion(raw_cx, el, platform::clock::sleep).await;
+        evaluation
+            .run_to_completion(raw_cx, el, platform::clock::sleep)
+            .await;
     }
 
+    let settled = evaluation.settled(&scope, "Script evaluation failed");
+    drop(evaluation);
     drop(scope);
-    Ok(())
+    settled
 }
 
 /// Drive the event loop on native targets using a tokio current-thread
@@ -132,6 +133,7 @@ pub async fn run(config: config::RuntimeConfig) -> Result<(), String> {
 fn drive_event_loop_native(
     runtime: std::rc::Rc<runtime::Runtime>,
     invocation: invocation::InvocationState,
+    evaluation: &core_runtime::ScriptEvaluation,
 ) -> Result<(), String> {
     // Enable both the timer and IO drivers: timers back `setTimeout`, and IO backs
     // `fetch`'s async HTTP transport (which uses tokio TCP sockets).
@@ -160,7 +162,11 @@ fn drive_event_loop_native(
         // Since the caller owns both and `block_on` runs synchronously on
         // the same thread, this is guaranteed.
         let raw_cx = unsafe { scope.raw_cx_no_gc() };
-        unsafe { run_to_completion(raw_cx, el, tokio::time::sleep).await }
+        unsafe {
+            evaluation
+                .run_to_completion(raw_cx, el, tokio::time::sleep)
+                .await
+        }
     });
 
     drop(scope);

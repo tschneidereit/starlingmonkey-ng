@@ -28,31 +28,35 @@ use crate::runtime::Runtime;
 ///    in either ES module mode (default) or legacy script mode
 /// 6. Delegates to `drive_event_loop` to run the event loop.
 ///
-/// The `drive_event_loop` callback receives the `Runtime` and
-/// `InvocationState` and is responsible for driving the event loop to
-/// completion using whatever executor and timer mechanism the embedding
-/// provides. The invocation arrives **unregistered** from GC tracing: the
-/// callback must register it once it sits at its final address, most simply
-/// by wrapping it in [`invocation::InvocationGuard`] or
+/// The `drive_event_loop` callback receives the `Runtime`, the
+/// `InvocationState` and the script's [`ScriptEvaluation`], and is responsible
+/// for driving the event loop to completion using whatever executor and timer
+/// mechanism the embedding provides. The invocation arrives unregistered
+/// from GC tracing: the callback must register it once it sits at its final
+/// address, most simply by wrapping it in [`invocation::InvocationGuard`] or
 /// [`invocation::OwnedInvocation`], whose drop also handles the required
-/// unregistration, and then drive [`event_loop::run_to_completion`].
+/// unregistration, and then drive [`ScriptEvaluation::run_to_completion`].
 /// Driving the loop without registering leaves task-held JS objects
 /// invisible to the GC.
 ///
 /// On native targets, the callback typically creates an async runtime, e.g.
-/// Tokio, and calls `block_on(run_to_completion(..., tokio::time::sleep))`.
+/// Tokio, and calls `block_on(evaluation.run_to_completion(..., tokio::time::sleep))`.
 /// On WASIp3, it spawns the event loop via `wit_bindgen::spawn`.
 pub fn run(
     config: config::RuntimeConfig,
     drive_event_loop: impl FnOnce(
         std::rc::Rc<Runtime>,
         invocation::InvocationState,
+        &ScriptEvaluation,
     ) -> Result<(), String>,
 ) -> Result<(), String> {
-    match setup(config)? {
-        Some((runtime, invocation)) => drive_event_loop(runtime, invocation),
-        None => Ok(()),
-    }
+    let Some((runtime, invocation, evaluation)) = setup(config)? else {
+        return Ok(());
+    };
+    drive_event_loop(std::rc::Rc::clone(&runtime), invocation, &evaluation)?;
+    let settled = evaluation.settled(&runtime.default_global(), "Script evaluation failed");
+    drop(evaluation);
+    settled
 }
 
 /// The content script's source and the filename to report it under: the `-e` string when there is
@@ -162,6 +166,56 @@ impl ScriptEvaluation {
             None => Ok(()),
         }
     }
+
+    /// Whether the script's top-level `await` rejected.
+    pub fn is_rejected(&self, scope: &js::gc::scope::Scope<'_>) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|promise| promise.get(scope).is_rejected())
+    }
+
+    /// Run `event_loop` until it has nothing left, or until the script's top-level `await`
+    /// rejects. A rejection ends the run once the current step finishes, leaving the loop's
+    /// remaining tasks unrun, and cancels its pending futures.
+    ///
+    /// # Safety
+    ///
+    /// `raw_cx` must be a valid JSContext pointer whose default global's realm is entered, and
+    /// which stays valid for the lifetime of this future.
+    pub async unsafe fn run_to_completion<S, F>(
+        &self,
+        raw_cx: *mut js::native::RawJSContext,
+        event_loop: &event_loop::EventLoop,
+        sleep: S,
+    ) where
+        S: Fn(std::time::Duration) -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        // SAFETY: guaranteed by this function's caller.
+        unsafe {
+            event_loop::run_until(raw_cx, event_loop, sleep, |scope| self.is_rejected(scope)).await;
+        }
+        // SAFETY: guaranteed by this function's caller.
+        let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
+        if self.is_rejected(&scope) {
+            event_loop.cancel_pending_futures();
+        }
+    }
+
+    /// `Err` with `context: reason` if the script's top-level `await` rejected, `Err` with a
+    /// message that the top-level `await` never settled if it did not, and `Ok` if it fulfilled. Called once the event loop
+    /// has run out of work.
+    pub fn settled(&self, scope: &js::gc::scope::Scope<'_>, context: &str) -> Result<(), String> {
+        self.rejection(scope, context)?;
+        if !self.is_finished(scope) {
+            return Err(
+                "the script's top-level `await` never settled: the event loop ran out of work \
+                 while it was still pending"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Initialize the runtime and evaluate the script (the synchronous portion of an
@@ -223,27 +277,35 @@ fn init_and_eval(
 /// any asynchronous work remains.
 ///
 /// Returns:
-/// - `Ok(Some((runtime, invocation)))` if the script left work in the event
-///   loop. The caller must call [`Runtime::register_invocation`] once the
-///   invocation reaches its final (stable) location, drive
-///   [`event_loop::run_to_completion`] to completion, then call
-///   [`Runtime::unregister_invocation`] before dropping the runtime.
+/// - `Ok(Some((runtime, invocation, evaluation)))` if the script left work in
+///   the event loop. The caller must call [`Runtime::register_invocation`] once
+///   the invocation reaches its final (stable) location, drive
+///   [`ScriptEvaluation::run_to_completion`] to completion, then call
+///   [`Runtime::unregister_invocation`] and check
+///   [`ScriptEvaluation::settled`] before dropping the runtime.
 /// - `Ok(None)` if the script completed without scheduling any async work.
-/// - `Err(_)` if the script failed to parse or threw during top-level
-///   evaluation.
+/// - `Err(_)` if the script failed to parse, threw during top-level
+///   evaluation, or awaits a promise that nothing can settle.
 ///
 /// Splitting this out lets the wasm32 cdylib driver hold an async event-loop
 /// future on its own stack instead of bridging through a sync callback.
 pub fn setup(
     config: config::RuntimeConfig,
-) -> Result<Option<(std::rc::Rc<Runtime>, invocation::InvocationState)>, String> {
-    // Command mode drives the loop to completion, so the script's evaluation needs no separate
-    // wait: its promise is one more thing the loop settles on the way.
-    let (runtime, invocation, _evaluation) = init_and_eval(config)?;
+) -> Result<
+    Option<(
+        std::rc::Rc<Runtime>,
+        invocation::InvocationState,
+        ScriptEvaluation,
+    )>,
+    String,
+> {
+    let (runtime, invocation, evaluation) = init_and_eval(config)?;
     if !invocation.event_loop().is_alive() {
-        return Ok(None);
+        let settled = evaluation.settled(&runtime.default_global(), "Script evaluation failed");
+        drop(evaluation);
+        return settled.map(|()| None);
     }
-    Ok(Some((runtime, invocation)))
+    Ok(Some((runtime, invocation, evaluation)))
 }
 
 /// Like [`setup`], but always returns the runtime — for **serve mode**, where the
@@ -281,6 +343,7 @@ mod tests {
     fn noop_driver(
         _runtime: std::rc::Rc<runtime::Runtime>,
         _invocation: invocation::InvocationState,
+        _evaluation: &ScriptEvaluation,
     ) -> Result<(), String> {
         Err("script unexpectedly left the event loop alive".to_string())
     }
