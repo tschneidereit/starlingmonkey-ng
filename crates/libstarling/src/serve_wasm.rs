@@ -385,14 +385,13 @@ async fn dispatch_request(
     timeouts: ServeTimeouts,
 ) -> Result<WasiResponse, ErrorCode> {
     let clock = timeouts.start_clock();
-    let (method, url, headers, body) =
-        match platform::http::read_incoming_request(wasi_request).await {
-            Ok(parts) => parts,
-            Err(e) => {
-                eprintln!("serve: the request's headers could not be read: {e:?}");
-                return Ok(error_response(400, "Bad Request", clock.error_body_time_limit()).0);
-            }
-        };
+    let (method, url, headers, body) = match platform::http::read_incoming_request(wasi_request) {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("serve: the request's headers could not be read: {e:?}");
+            return Ok(error_response(400, "Bad Request", clock.error_body_time_limit()).0);
+        }
+    };
     // `wasi:http` always provides a body stream, even for a request that cannot have a body. In
     // that case, we drop the body, so `request.body` correctly returns `null`.
     let (has_body, content_length) = body_framing(&method, &headers);

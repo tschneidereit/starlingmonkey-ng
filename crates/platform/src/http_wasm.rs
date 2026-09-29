@@ -419,7 +419,7 @@ pub async fn send(request: Request) -> Result<Response, Error> {
 /// Read an incoming `wasi:http` request into its parts (method, full URL, headers, body).
 ///
 /// Returns `Err` for a field the host accepted that `http` cannot represent.
-pub async fn read_incoming_request(
+pub fn read_incoming_request(
     request: WasiRequest,
 ) -> Result<(String, String, http::HeaderMap, IncomingBody), ErrorCode> {
     let method = string_of_method(request.get_method());
