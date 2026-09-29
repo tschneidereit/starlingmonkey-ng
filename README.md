@@ -59,6 +59,14 @@ console.log(greet("world"));
 starlingmonkey main.js
 ```
 
+JSON modules are imported with an import attribute, and `import()` loads a module
+dynamically:
+
+```js
+import config from "./config.json" with { type: "json" };
+const { greet } = await import("./greet.js");
+```
+
 For quick one-liners, use `-e`:
 
 ```bash
