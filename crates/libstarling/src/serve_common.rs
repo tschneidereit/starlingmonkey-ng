@@ -449,7 +449,7 @@ where
     // modes, and step 21.3 doesn't apply.
     with_event_loop(invocation.event_loop(), |_| {
         event.settle_handled(scope, response.is_some());
-        js::jobs::run_jobs(scope);
+        core_runtime::event_loop::run_microtasks(scope);
     });
     // Step 24: Return _response_.
     let response = match response {
@@ -507,7 +507,7 @@ where
     let head_request = method.eq_ignore_ascii_case("HEAD");
     let body = with_event_loop(invocation.event_loop(), |_| {
         let body = response.take_send_body(scope, !head_request);
-        js::jobs::run_jobs(scope);
+        core_runtime::event_loop::run_microtasks(scope);
         body
     });
     Some(DispatchedFetch {

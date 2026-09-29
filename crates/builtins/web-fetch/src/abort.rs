@@ -51,10 +51,18 @@ impl AbortFetchState {
 }
 
 impl AbortFetchState<'_> {
-    /// Record the delivered response, so a later abort can also abort its body.
-    pub(crate) fn set_response(&self, response: &Response<'_>) {
-        debug_assert!(self.data().response.is_none());
-        self.data_mut().response = Some(Heap::from(*response));
+    /// Record the delivered response, so a later abort can also abort its body. A
+    /// response with nothing an abort could act on detaches the algorithm instead.
+    /// One with a body detaches it once that body has been read (see
+    /// `Response::consume`), since aborting mid-read must still error the stream.
+    pub(crate) fn deliver(&self, scope: &Scope<'_>, response: &Response<'_>) {
+        if response_body_is_abortable(scope, response) {
+            debug_assert!(self.data().response.is_none());
+            self.data_mut().response = Some(Heap::from(*response));
+            response.set_abort_state(self);
+        } else {
+            self.detach(scope);
+        }
     }
 
     /// Deregister the abort algorithm from the signal and drop what it held.
@@ -150,35 +158,10 @@ pub(crate) fn register_fetch_abort<'r>(
     web_globals::signals::algorithms::add_abort_algorithm(&signal, &callback);
     state.data_mut().callback = Some(Heap::from(callback));
 
-    // Detach once the fetch settles with nothing left to abort — a network error, or a response
-    // with no body. A response that still has a body keeps the algorithm registered (aborting
-    // mid-read must still error the stream) and detaches when that body is consumed instead.
-    //
-    // The reactions must not mark the fetch promise's rejection as handled: that would suppress
-    // unhandled-rejection reporting for a `fetch()` the caller never catches.
-    let settled = Function::new_callback(scope, c"", 1, on_settled, state)?;
-    promise.add_reactions_ignoring_unhandled_rejection(scope, Some(*settled), Some(*settled))?;
+    // The algorithm is detached where the fetch promise settles: by `deliver`, or on each path
+    // that rejects it. A reaction on the promise would mark it handled, which suppresses the
+    // report of a rejection the caller never catches.
     Ok(state)
-}
-
-/// The fetch promise settled: drop the abort algorithm unless the delivered
-/// response still has a body an abort could error.
-fn on_settled(
-    scope: &Scope<'_>,
-    _args: CallbackArgs<'_>,
-    payload: HandleValue<'_>,
-) -> Result<Value, ExnThrown> {
-    let state = cast_payload::<AbortFetchState>(scope, payload);
-    let response = state.data().response.get(scope);
-    if let Some(response) = response {
-        if response_body_is_abortable(scope, &response) {
-            // Still abortable: `Response::consume` detaches once the body has been read.
-            response.set_abort_state(&state);
-            return Ok(value::undefined());
-        }
-    }
-    state.detach(scope);
-    Ok(value::undefined())
 }
 
 /// <https://fetch.spec.whatwg.org/#dom-global-fetch> steps 11.1 to 11.4.

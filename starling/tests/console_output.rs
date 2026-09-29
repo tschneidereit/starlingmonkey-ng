@@ -74,6 +74,16 @@ fn unhandled_rejections_are_reported() {
     );
 }
 
+/// A rejection that settles from host I/O, with nothing else left to run, is
+/// reported too.
+#[test]
+fn unhandled_host_io_rejection_is_reported() {
+    let out = run_module("fetch('http://127.0.0.1:1/');");
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Uncaught (in promise) "), "{stderr}");
+}
+
 /// A top-level `await` that rejects fails the script once, as an evaluation
 /// failure, and is not also reported as an unhandled rejection.
 #[test]
