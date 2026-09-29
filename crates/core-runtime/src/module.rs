@@ -835,57 +835,6 @@ fn link_evaluate_and_populate_values(
     Ok(())
 }
 
-/// Register a real ES-module source under an arbitrary specifier, making it
-/// importable by name.
-///
-/// Where [`register_synthetic_module`] populates `export var` bindings with
-/// runtime values, this compiles genuine module `source` — with its own
-/// `export`s and possibly its own `import`s — and registers it under `name`. The
-/// component-model bootstrap uses it for the application's named modules (the
-/// componentizer's `modules` list): these may `import` from the synthesized
-/// import modules, so the bootstrap registers those first.
-///
-/// The module is linked and evaluated immediately so its side effects run and
-/// its exports are bound. On failure the half-registered entry is removed again,
-/// matching [`register_synthetic_module`].
-///
-/// # Safety
-///
-/// - [`init_module_loader`] must have been called first.
-pub unsafe fn register_source_module(
-    scope: &Scope<'_>,
-    name: &str,
-    source: &str,
-) -> Result<(), ExnThrown> {
-    let filename = CString::new(name).map_err(|_| ExnThrown)?;
-    let options = js::compile::options(scope, filename, 1);
-    let mut src = transform_str_to_source_text(source);
-    // SAFETY: `options` and `src` are live locals.
-    let module = unsafe { js::module::compile_module(scope, options.ptr, &mut src) }?;
-
-    // Register before loading so the load hook (and the module's own imports)
-    // can find it by name.
-    registry(|reg| {
-        reg.borrow_mut().insert(
-            name.to_string(),
-            ModuleEntry {
-                module_obj: Heap::from(module),
-            },
-        );
-    });
-
-    let linked = js::module::load_requested_modules(scope, module)
-        .and_then(|()| js::module::link(scope, module))
-        .and_then(|()| js::module::evaluate(scope, module).map(drop));
-    if linked.is_err() {
-        registry(|reg| {
-            reg.borrow_mut().remove(name);
-        });
-        return Err(ExnThrown);
-    }
-    Ok(())
-}
-
 /// Evaluate a JS script as a module, with access to registered native modules.
 ///
 /// This compiles the given source as a module, loads its dependency graph (the
