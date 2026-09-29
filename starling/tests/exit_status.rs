@@ -108,6 +108,70 @@ fn throwing_script_exits_with_code_one() {
     );
 }
 
+/// A top level that rejects once a timer has fired, after evaluation handed off to the event
+/// loop, reports the error and exits with 1.
+#[test]
+fn late_top_level_rejection_exits_with_code_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main.mjs");
+    std::fs::write(
+        &main,
+        "await new Promise((resolve) => setTimeout(resolve, 10));\n\
+         throw new Error('late failure');",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
+        .arg(&main)
+        .output()
+        .expect("failed to run starling");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("late failure"), "stderr: {stderr}");
+}
+
+/// A top level that rejects while an interval keeps the event loop busy reports the error and
+/// exits with 1, without waiting for the interval.
+#[test]
+fn late_rejection_with_work_left_exits_with_code_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main.mjs");
+    std::fs::write(
+        &main,
+        "setInterval(() => {}, 5);\n\
+         await new Promise((resolve) => setTimeout(resolve, 10));\n\
+         throw new Error('late failure');",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
+        .arg(&main)
+        .output()
+        .expect("failed to run starling");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("late failure"), "stderr: {stderr}");
+}
+
+/// A top-level `await` on a promise nothing settles exits with 1, whether or not the event loop
+/// had other work first.
+#[test]
+fn unsettled_top_level_await_exits_with_code_one() {
+    for source in [
+        "await new Promise(() => {});",
+        "setTimeout(() => {}, 10);\nawait new Promise(() => {});",
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
+            .args(["-e", source])
+            .output()
+            .expect("failed to run starling");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{source}: stderr: {stderr}");
+        assert!(
+            stderr.contains("never settled"),
+            "{source}: stderr: {stderr}"
+        );
+    }
+}
+
 /// `--help` exits with 0 and an unknown flag with clap's usage-error status 2.
 #[test]
 fn argument_errors_use_clap_exit_statuses() {

@@ -616,7 +616,7 @@ impl Fetcher {
 ```
 
 The method returns the `Promise` to JS immediately, and the future is queued on
-the event loop. `core_runtime::event_loop::run_to_completion`, which
+the event loop. `ScriptEvaluation::run_to_completion`, which
 `libstarling::run` drives for you, polls it and settles the `Promise` with the
 future's `Ok`/`Err`. Two other constructors cover the cases `new` doesn't:
 `PromiseFuture::new_void` for futures resolving to `()`, and `PromiseFuture::from_value`
