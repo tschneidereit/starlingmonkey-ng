@@ -147,8 +147,23 @@ impl ExnThrown {
                 }
             }
 
-            // No error report (a primitive throw like `throw "boom"`, or a non-`Error` object without engine error data): stringify the value itself.
-            // Any attached stack extracted above is kept.
+            // No error report (a primitive throw like `throw "boom"`, or a non-`Error` object
+            // without engine error data): stringify the value itself.
+            // If an attached stack was extracted above, it gets added to the captured error.
+            // Otherwise, the `stack` property is read from the object and and attached.
+            if stack.is_none() && exc_val.is_object() {
+                let exc_obj = Object::from_value(scope, exc_val).unwrap();
+                match exc_obj.get_property(scope, c"stack") {
+                    Ok(value) if value.is_string() => {
+                        stack = crate::string::Str::from_value(scope, value)
+                            .ok()
+                            .and_then(|s| s.to_utf8(scope).ok())
+                            .filter(|s: &String| !s.is_empty());
+                    }
+                    Ok(_) => {}
+                    Err(ExnThrown) => crate::exception::clear(scope),
+                }
+            }
             let message = match crate::string::Str::from_value(scope, exc_val) {
                 Ok(s) => s
                     .to_utf8(scope)
@@ -205,8 +220,17 @@ impl fmt::Display for CapturedError {
         } else {
             write!(f, "JavaScript exception")?;
         }
+        // The location is left out when the stack's first frame names it.
         if let Some(file) = &self.filename {
-            write!(f, " at {file}:{}:{}", self.lineno, self.column)?;
+            let location = format!("{file}:{}:{}", self.lineno, self.column);
+            let in_stack = self
+                .stack
+                .as_deref()
+                .and_then(|stack| stack.lines().next())
+                .is_some_and(|frame| frame.ends_with(&location));
+            if !in_stack {
+                write!(f, " at {location}")?;
+            }
         }
         if let Some(s) = &self.stack {
             write!(f, "\n{s}")?;
@@ -216,6 +240,18 @@ impl fmt::Display for CapturedError {
 }
 
 impl std::error::Error for CapturedError {}
+
+impl CapturedError {
+    /// `context: error`, with the error as [`Display`](fmt::Display) formats it, or `context`
+    /// alone if nothing was captured.
+    pub fn with_context(&self, context: &str) -> String {
+        if self.message.is_none() && self.filename.is_none() && self.stack.is_none() {
+            return context.to_string();
+        }
+        let error = self.to_string();
+        format!("{context}: {}", error.trim_end())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Throw helpers

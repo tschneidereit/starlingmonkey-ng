@@ -405,33 +405,24 @@ JS::Result<mozilla::Ok> ToSource(JSContext *cx, std::string &sourceOut, JS::Hand
 
 namespace builtins::web::console {
 
+// `log`, `info` and `debug` print the bare message on stdout. `warn` and `error` print it on
+// stderr, prefixed with the level.
 __attribute__((weak))
 void builtin_impl_console_log(Console::LogType log_ty, const char *msg) {
-  const char *prefix = nullptr;
   switch (log_ty) {
-  case Console::LogType::Log:
-    prefix = "Log";
-    break;
-  case Console::LogType::Debug:
-    prefix = "Debug";
-    break;
-  case Console::LogType::Info:
-    prefix = "Info";
-    break;
   case Console::LogType::Warn:
-    prefix = "Warn";
-    break;
+    fprintf(stderr, "Warn: %s\n", msg);
+    fflush(stderr);
+    return;
   case Console::LogType::Error:
-    prefix = "Error";
-    break;
+    fprintf(stderr, "Error: %s\n", msg);
+    fflush(stderr);
+    return;
   default:
-    prefix = "";
-    break;
+    fprintf(stdout, "%s\n", msg);
+    fflush(stdout);
+    return;
   }
-  MOZ_ASSERT(prefix);
-
-  fprintf(stdout, "%s: %s\n", prefix, msg);
-  fflush(stdout);
 }
 
 template <Console::LogType log_ty>
@@ -470,9 +461,9 @@ static bool console_out(JSContext *cx, unsigned argc, JS::Value *vp) {
 static bool assert_(JSContext *cx, unsigned argc, JS::Value *vp) {
   JS::CallArgs args = CallArgsFromVp(argc, vp);
   args.rval().setUndefined();
-  auto condition = args.get(0).toBoolean();
+  bool condition = JS::ToBoolean(args.get(0));
   // 1. If condition is true, return.
-  if (!condition) {
+  if (condition) {
     return true;
   }
 
@@ -486,11 +477,15 @@ static bool assert_(JSContext *cx, unsigned argc, JS::Value *vp) {
   // 4.3. Otherwise:
   // 4.3.1. Let concat be the concatenation of message, U+003A (:), U+0020
   // SPACE, and first. 4.3.2. Set data[0] to concat.
+  // The data are the arguments after the condition. A string first datum is
+  // joined to the message with ": ", and any other one follows it after a space.
   auto length = args.length();
   if (length > 1) {
-    message += ": ";
+    if (args.get(1).isString()) {
+      message += ":";
+    }
     JS::RootedObjectVector visitedObjects(cx);
-    for (int i = 0; i < length; i++) {
+    for (unsigned i = 1; i < length; i++) {
       JS::HandleValue arg = args.get(i);
       std::string source;
       auto result = ToSource(cx, source, arg, &visitedObjects);
@@ -498,15 +493,11 @@ static bool assert_(JSContext *cx, unsigned argc, JS::Value *vp) {
         return false;
       }
       // strip quotes for direct string logs
-      if (source[0] == '"' && source[source.length() - 1] == '"') {
+      if (source.length() >= 2 && source[0] == '"' && source[source.length() - 1] == '"') {
         source = source.substr(1, source.length() - 2);
       }
-      if (!message.empty()) {
-        message += " ";
-        message += source;
-      } else {
-        message += source;
-      }
+      message += " ";
+      message += source;
     }
   }
 

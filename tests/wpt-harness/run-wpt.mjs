@@ -965,11 +965,11 @@ async function runSingleTest(testPath) {
     }
 
     // Parse results from stdout — look for the WPT_RESULTS_JSON marker.
+    const marker = "WPT_RESULTS_JSON:";
     const lines = stdout.split("\n");
     for (const line of lines) {
-      if (line.startsWith("Log: WPT_RESULTS_JSON:")) {
-        const json = line.slice("Log: WPT_RESULTS_JSON:".length);
-        return { results: JSON.parse(json), stdout, stderr };
+      if (line.startsWith(marker)) {
+        return { results: JSON.parse(line.slice(marker.length)), stdout, stderr };
       }
     }
 

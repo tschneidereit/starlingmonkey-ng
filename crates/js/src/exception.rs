@@ -92,7 +92,10 @@ pub fn report_and_clear(scope: &Scope<'_>, context: &str) {
     }
     // `capture` clears the pending exception as part of extracting it.
     let captured = ExnThrown::capture(scope);
-    eprintln!("[{context}] Uncaught exception: {captured}");
+    eprintln!(
+        "[{context}] Uncaught exception: {}",
+        captured.to_string().trim_end()
+    );
 }
 
 /// Get the `JSErrorReport` from an Error object.

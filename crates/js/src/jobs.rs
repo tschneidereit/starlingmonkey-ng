@@ -16,10 +16,21 @@
 //! jobs::run_jobs(cx);
 //! ```
 
-use crate::gc::scope::Scope;
+use std::cell::RefCell;
+
+use crate::gc::handle::RootedHeap;
+use crate::gc::scope::{RootScope, Scope};
+use mozjs::jsapi::{JSContext as RawJSContext, PromiseRejectionHandlingState};
 use mozjs::rust::wrappers2;
 
 use super::error::ExnThrown;
+
+crate::instance_local! {
+    /// Promises rejected while no handler was attached, in rejection order, until
+    /// [`take_unhandled_rejections`] takes them. A promise that gets a handler first is removed.
+    static UNHANDLED_REJECTIONS: RefCell<Vec<RootedHeap<crate::promise::Promise>>> =
+        const { RefCell::new(Vec::new()) };
+}
 
 /// Enable SpiderMonkey's built-in internal job queue.
 ///
@@ -73,4 +84,65 @@ pub fn stop_draining(scope: &Scope<'_>) {
 /// called between "turns" (e.g. between event loop iterations).
 pub fn clear_kept_objects(scope: &Scope<'_>) {
     unsafe { wrappers2::ClearKeptObjects(scope.cx()) }
+}
+
+/// Track promises that are rejected while no handler is attached, for
+/// [`take_unhandled_rejections`]. Call once per context.
+pub fn track_unhandled_rejections(scope: &Scope<'_>) {
+    // SAFETY: `track_rejection` has the callback signature, and takes no data.
+    unsafe {
+        wrappers2::SetPromiseRejectionTrackerCallback(
+            scope.cx(),
+            Some(track_rejection),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+/// The engine's rejection tracker: records a promise rejected with no handler, and forgets it
+/// again once a handler is attached.
+unsafe extern "C" fn track_rejection(
+    cx: *mut RawJSContext,
+    _muted_errors: bool,
+    promise: mozjs::jsapi::HandleObject,
+    state: PromiseRejectionHandlingState,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: the engine calls the tracker with a valid context. A realm is entered whenever a
+    // promise is rejected or gets a handler, and the check covers any other call.
+    if unsafe { mozjs::jsapi::GetCurrentRealmOrNull(cx) }.is_null() {
+        return;
+    }
+    // SAFETY: a realm is entered, as checked above.
+    let scope = unsafe { RootScope::from_current_realm(cx) };
+    // SAFETY: the engine passes a rooted handle to a live promise.
+    let Some(promise) = (unsafe { crate::Object::from_raw(&scope, promise.get()) })
+        .and_then(|object| object.cast::<crate::Promise>().ok())
+    else {
+        return;
+    };
+    UNHANDLED_REJECTIONS.with(|list| {
+        let mut list = list.borrow_mut();
+        match state {
+            PromiseRejectionHandlingState::Unhandled => list.push(RootedHeap::new(promise)),
+            PromiseRejectionHandlingState::Handled => list.retain(|tracked| *tracked != promise),
+        }
+    });
+}
+
+/// The promises that were rejected with no handler attached since the last call, and still have
+/// none, in rejection order.
+pub fn take_unhandled_rejections<'s>(scope: &'s Scope<'_>) -> Vec<crate::Promise<'s>> {
+    let taken = UNHANDLED_REJECTIONS.with(|list| std::mem::take(&mut *list.borrow_mut()));
+    taken
+        .iter()
+        .map(|tracked| tracked.get(scope))
+        .filter(|promise| promise.is_rejected() && !promise.is_handled())
+        .collect()
+}
+
+/// Forget every tracked rejection. The tracked promises are rooted, so this must run before the
+/// context is destroyed.
+pub fn clear_unhandled_rejections() {
+    UNHANDLED_REJECTIONS.with(|list| list.borrow_mut().clear());
 }

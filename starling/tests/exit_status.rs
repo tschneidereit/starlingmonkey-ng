@@ -108,6 +108,22 @@ fn throwing_script_exits_with_code_one() {
     );
 }
 
+/// A top-level throw in a module file reports where it was thrown.
+#[test]
+fn top_level_throw_reports_its_location() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main.mjs");
+    std::fs::write(&main, "const x = 1;\nthrow new Error('located');").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_starlingmonkey"))
+        .arg(&main)
+        .output()
+        .expect("failed to run starling");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("located"), "stderr: {stderr}");
+    assert!(stderr.contains("main.mjs:2:"), "stderr: {stderr}");
+}
+
 /// A top level that rejects once a timer has fired, after evaluation handed off to the event
 /// loop, reports the error and exits with 1.
 #[test]
