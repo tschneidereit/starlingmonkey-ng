@@ -28,6 +28,9 @@ debugmozjs = ['libstarling/debugmozjs']
 profilemozjs = ['js/profilemozjs']
 jitspew = ['js/jitspew']
 intl = ['js/intl']
+# Route Rust's allocations through wasi-libc's `malloc`, the allocator SpiderMonkey uses, so
+# both sides allocate from one heap.
+libc-alloc = ['dep:libc']
 
 [dependencies]
 # `core-runtime` and `js` carry no direct use in `lib.rs` or `main.rs`: the former is needed by the
@@ -48,6 +51,7 @@ wasip3.workspace = true
 # executor panics the moment such a task is the only thing left to sleep on — any long-lived
 # streamed response (server-sent events, say) hit that.
 wit-bindgen = { workspace = true, features = ["macros", "inter-task-wakeup"] }
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = "3"

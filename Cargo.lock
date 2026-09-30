@@ -2542,6 +2542,7 @@ version = "0.3.0"
 dependencies = [
  "core-runtime",
  "js",
+ "libc",
  "libstarling",
  "tempfile",
  "wasip3",
