@@ -23,7 +23,7 @@ fn run(code: &str) -> String {
     eval_out_with_setup(
         || {
             clear_global_initializers();
-            register_global_initializer(|scope, global| web_streams::add_to_global(scope, global));
+            register_global_initializer(web_streams::add_to_global);
         },
         code,
     )

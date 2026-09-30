@@ -72,7 +72,7 @@ impl Vec2 {
 
     /// A method whose JS name differs from its Rust name.
     #[method(name = "toString")]
-    fn to_display(&self) -> String {
+    fn display(&self) -> String {
         let d = self.data();
         format!("Vec2({}, {})", d.x, d.y)
     }

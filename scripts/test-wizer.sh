@@ -26,11 +26,11 @@ case "${WASM_TARGET:-p2}" in
 esac
 # The pinned toolchain ships no wasm32-wasip3 std.
 if [ "$TARGET" = wasm32-wasip3 ]; then
-    CARGO=(cargo +nightly)
+    CARGO=(cargo "+${STARLING_NIGHTLY:-nightly}")
 else
     CARGO=(cargo)
 fi
-COMPONENT="target/$TARGET/debug/starling.wasm"
+COMPONENT="${CARGO_TARGET_DIR:-target}/$TARGET/debug/starling.wasm"
 WASI_FLAGS=(-Scli=y,inherit-env=y,http=y)
 
 if [[ "${1:-}" != "--no-build" ]]; then
@@ -38,8 +38,8 @@ if [[ "${1:-}" != "--no-build" ]]; then
 fi
 
 if ! command -v wasmtime >/dev/null; then
-    echo "wasmtime is not on PATH; skipping" >&2
-    exit 0
+    echo "wasmtime is not on PATH" >&2
+    exit 1
 fi
 if [[ ! -f "$COMPONENT" ]]; then
     echo "no component at $COMPONENT; run without --no-build" >&2
