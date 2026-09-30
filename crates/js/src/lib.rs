@@ -336,3 +336,9 @@ pub type Float32Array<'s> = Stack<'s, typedarray::Float32Array>;
 
 /// A scope-rooted handle to a JavaScript `Float64Array` object.
 pub type Float64Array<'s> = Stack<'s, typedarray::Float64Array>;
+
+/// A scope-rooted handle to a JavaScript `BigInt64Array` object.
+pub type BigInt64Array<'s> = Stack<'s, typedarray::BigInt64Array>;
+
+/// A scope-rooted handle to a JavaScript `BigUint64Array` object.
+pub type BigUint64Array<'s> = Stack<'s, typedarray::BigUint64Array>;

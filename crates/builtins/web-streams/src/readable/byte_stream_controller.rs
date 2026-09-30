@@ -180,7 +180,7 @@ impl ReadableByteStreamController {
 
     /// <https://streams.spec.whatwg.org/#rbs-controller-byob-request>
     #[getter]
-    fn byob_request<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStreamBYOBRequest<'r>> {
+    pub fn byob_request<'r>(&self, scope: &'r Scope<'_>) -> Option<ReadableStreamBYOBRequest<'r>> {
         // Step 1: Return ! `ByteStreamControllerGetBYOBRequest`(`this`).
         super::algorithms::readable_byte_stream_controller_get_byob_request(scope, self)
     }
@@ -194,7 +194,7 @@ impl ReadableByteStreamController {
 
     /// <https://streams.spec.whatwg.org/#rbs-controller-close>
     #[method]
-    fn close(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
+    pub fn close(&self, scope: &Scope<'_>) -> Result<(), ExnThrown> {
         // Step 1: If `this`.`[[closeRequested]]` is true, throw a ``TypeError`` exception.
         if self.data().close_requested {
             return Err(js::error::throw_type_error(
@@ -217,7 +217,11 @@ impl ReadableByteStreamController {
 
     /// <https://streams.spec.whatwg.org/#rbs-controller-enqueue>
     #[method]
-    fn enqueue(&self, scope: &Scope<'_>, view: js::ArrayBufferView<'_>) -> Result<(), ExnThrown> {
+    pub fn enqueue(
+        &self,
+        scope: &Scope<'_>,
+        view: js::ArrayBufferView<'_>,
+    ) -> Result<(), ExnThrown> {
         // Step 1: If _chunk_.[[ByteLength]] is 0, throw a ``TypeError`` exception.
         if view.byte_length() == 0 {
             return Err(js::error::throw_type_error(
@@ -255,7 +259,7 @@ impl ReadableByteStreamController {
 
     /// <https://streams.spec.whatwg.org/#rbs-controller-error>
     #[method]
-    fn error(&self, scope: &Scope<'_>, e: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
+    pub fn error(&self, scope: &Scope<'_>, e: Option<HandleValue<'_>>) -> Result<(), ExnThrown> {
         // Step 1: Perform ! `ByteStreamControllerError`(`this`, _e_).
         let e = e.unwrap_or(HandleValue::undefined());
         super::algorithms::readable_byte_stream_controller_error(scope, self, e);

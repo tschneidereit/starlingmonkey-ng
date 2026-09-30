@@ -129,3 +129,22 @@ pub fn report_uncatchable(scope: &Scope<'_>) {
 pub fn report_out_of_memory(scope: &Scope<'_>) {
     unsafe { wrappers2::JS_ReportOutOfMemory(scope.cx()) }
 }
+
+/// Whether `value` is an `Error` object: one created by `Error` or one of its
+/// native subclasses, or by a class extending one of those.
+pub fn is_error_object(scope: &Scope<'_>, value: HandleValue<'_>) -> bool {
+    if !value.is_object() {
+        return false;
+    }
+    let obj = scope.root_object(
+        std::ptr::NonNull::new(value.to_object()).expect("an object value is non-null"),
+    );
+    let mut class = mozjs::jsapi::ESClass::Other;
+    // SAFETY: `obj` is rooted on `scope`, and `GetBuiltinClass` only writes `class`.
+    let ok = unsafe { wrappers2::GetBuiltinClass(scope.cx_mut(), obj, &mut class) };
+    // A failed check counts as not an `Error` object, with its exception cleared.
+    if !ok {
+        clear(scope);
+    }
+    ok && class == mozjs::jsapi::ESClass::Error
+}

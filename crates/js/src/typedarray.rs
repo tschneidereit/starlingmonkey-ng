@@ -406,6 +406,25 @@ pub enum ViewKind {
 }
 
 impl ViewKind {
+    /// The name of the view kind's constructor, such as `Uint8Array`.
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewKind::Int8 => "Int8Array",
+            ViewKind::Uint8 => "Uint8Array",
+            ViewKind::Uint8Clamped => "Uint8ClampedArray",
+            ViewKind::Int16 => "Int16Array",
+            ViewKind::Uint16 => "Uint16Array",
+            ViewKind::Int32 => "Int32Array",
+            ViewKind::Uint32 => "Uint32Array",
+            ViewKind::Float16 => "Float16Array",
+            ViewKind::Float32 => "Float32Array",
+            ViewKind::Float64 => "Float64Array",
+            ViewKind::BigInt64 => "BigInt64Array",
+            ViewKind::BigUint64 => "BigUint64Array",
+            ViewKind::DataView => "DataView",
+        }
+    }
+
     /// The size in bytes of one element of this view kind. `DataView` has an
     /// element size of 1, matching the streams spec.
     pub fn element_size(self) -> usize {
@@ -816,6 +835,93 @@ typed_array_marker!(Int32Array, "Int32Array", JSProto_Int32Array, Int32);
 typed_array_marker!(Uint32Array, "Uint32Array", JSProto_Uint32Array, Uint32);
 typed_array_marker!(Float32Array, "Float32Array", JSProto_Float32Array, Float32);
 typed_array_marker!(Float64Array, "Float64Array", JSProto_Float64Array, Float64);
+
+/// The 64-bit integer kinds, which `mozjs::typedarray` has no element tags for,
+/// so the marker is written out against the JSAPI entry points directly.
+// TODO: add element tags to mozjs and remove the need for this.
+macro_rules! bigint_typed_array_marker {
+    ($Marker:ident, $name:literal, $proto:ident, $elem:ty, $new:ident, $data:ident) => {
+        #[doc = concat!("Marker type for JavaScript `", $name, "` objects.")]
+        pub struct $Marker;
+
+        impl JSType for $Marker {
+            type Rooted<'s> = Stack<'s, Self>;
+            const JS_NAME: &'static str = $name;
+
+            fn js_class() -> *const JSClass {
+                crate::class::proto_key_to_class(JSProtoKey::$proto)
+            }
+        }
+
+        impl TypedArrayKind for $Marker {
+            type Element = $elem;
+
+            fn create_new(cx: &mut mozjs::context::JSContext, length: usize) -> *mut JSObject {
+                // SAFETY: `cx` has a realm entered, per the trait's contract.
+                unsafe { mozjs::jsapi::$new(cx.raw_cx(), length) }
+            }
+
+            unsafe fn length_and_data(obj: *mut JSObject) -> (*mut Self::Element, usize) {
+                let mut is_shared = false;
+                let nogc = JS::AutoRequireNoGC { _address: 0 };
+                let data = mozjs::jsapi::$data(obj, &mut is_shared, &nogc);
+                debug_assert!(!is_shared, "expected an unshared typed array");
+                if data.is_null() {
+                    (std::ptr::null_mut(), 0)
+                } else {
+                    (data, mozjs::jsapi::JS_GetTypedArrayLength(obj))
+                }
+            }
+        }
+
+        impl<'s> std::ops::Deref for Stack<'s, $Marker> {
+            type Target = Object<'s>;
+
+            fn deref(&self) -> &Object<'s> {
+                // SAFETY: both wrappers are repr(transparent) over the same handle.
+                unsafe { &*(self as *const Stack<'s, $Marker> as *const Object<'s>) }
+            }
+        }
+
+        impl<'s, 'v> FromJSVal<'s, 'v> for Stack<'s, $Marker> {
+            type Config = ();
+
+            fn from_jsval(
+                scope: &'s Scope<'_>,
+                val: HandleValue<'v>,
+                _option: Self::Config,
+            ) -> Result<Self, ConversionError> {
+                Object::from_value(scope, *val)?
+                    .cast::<Self>()
+                    .map_err(|_| {
+                        const MSG: &std::ffi::CStr = unsafe {
+                            std::ffi::CStr::from_bytes_with_nul_unchecked(
+                                concat!("Value isn't a ", $name, "\0").as_bytes(),
+                            )
+                        };
+                        ConversionError::Failure(std::borrow::Cow::Borrowed(MSG))
+                    })
+            }
+        }
+    };
+}
+
+bigint_typed_array_marker!(
+    BigInt64Array,
+    "BigInt64Array",
+    JSProto_BigInt64Array,
+    i64,
+    JS_NewBigInt64Array,
+    JS_GetBigInt64ArrayData
+);
+bigint_typed_array_marker!(
+    BigUint64Array,
+    "BigUint64Array",
+    JSProto_BigUint64Array,
+    u64,
+    JS_NewBigUint64Array,
+    JS_GetBigUint64ArrayData
+);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
