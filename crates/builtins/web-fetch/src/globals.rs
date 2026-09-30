@@ -6,13 +6,14 @@ use core_runtime::jsglobals;
 
 #[jsglobals]
 pub mod globals {
-    use crate::request::{Request, RequestInfo, RequestInit};
+    use crate::request::{request_info, Request, RequestInit};
     use crate::response::response_from_platform;
     use js::conversion::ToJSVal;
     use js::error::throw_type_error;
     use js::error::ExnThrown;
     use js::gc::handle::RootedHeap;
     use js::gc::scope::Scope;
+    use js::prelude::HandleValue;
     use js::promise::{PromiseFuture, PromiseOutcome};
     use js::Promise;
 
@@ -20,13 +21,29 @@ pub mod globals {
     ///
     /// Note: This skips a lot of machinery relevant to browsers, and in particular their security
     /// model, including CORS, cache, and redirect taint.
+    ///
+    /// `input` is converted to a `RequestInfo` here rather than by the binding, so the adapter
+    /// `register_request_input_adapter` registers can convert other values to a `Request` first.
+    /// A failed conversion rejects the returned promise.
     pub fn fetch<'r>(
         scope: &'r Scope<'_>,
-        input: RequestInfo<'_>,
+        input: HandleValue<'_>,
         init: Option<RequestInit<'_>>,
     ) -> Result<Promise<'r>, ExnThrown> {
         // Step 1: Let _p_ be `a new promise`.
         let p = Promise::new_pending(scope)?;
+        // Note: only an active event loop drives the request, so without one _p_ is rejected
+        // with a `TypeError` explaining why.
+        if core_runtime::event_loop::reject_without_event_loop(scope, &p, "`fetch`")? {
+            return Ok(p);
+        }
+        let input = match request_info(scope, input) {
+            Ok(input) => input,
+            Err(_) => {
+                p.reject_with_pending(scope)?;
+                return Ok(p);
+            }
+        };
 
         // Step 2: Let _requestObject_ be the result of invoking the initial value of `Request` as
         //     constructor with _input_ and _init_ as arguments. If this throws an exception,

@@ -133,6 +133,8 @@ pub struct ModuleState {
     resolver: RefCell<Option<Resolver>>,
     /// Fallback base directory for the entry module (before any module objects exist).
     base_path: RefCell<Option<PathBuf>>,
+    /// The registry key of the entry module recorded last (see [`entry_namespace`]).
+    entry: RefCell<Option<String>>,
 }
 
 /// Run `f` against the current runtime's module state.
@@ -528,13 +530,45 @@ pub fn register_entry_module(
     unsafe { SetModulePrivate(module.as_raw(), &path_str.as_value()) };
     registry(|reg| {
         reg.borrow_mut().insert(
-            key,
+            key.clone(),
             ModuleEntry {
                 module_obj: Heap::from(module),
             },
         );
     });
+    with_state(|state| *state.entry.borrow_mut() = Some(key));
     Ok(())
+}
+
+/// Record `module`, an entry module with no file, as the entry
+/// [`entry_namespace`] reads, under its synthetic `name`. Files are registered
+/// under canonical absolute paths, so only an import whose specifier is `name`
+/// verbatim gets `module`.
+fn record_entry_module(module: Object<'_>, name: &str) {
+    registry(|reg| {
+        reg.borrow_mut().insert(
+            name.to_string(),
+            ModuleEntry {
+                module_obj: Heap::from(module),
+            },
+        );
+    });
+    with_state(|state| *state.entry.borrow_mut() = Some(name.to_string()));
+}
+
+/// The namespace of the entry module [`register_entry_module`] or
+/// `record_entry_module` recorded last, or `None` if there is none. The
+/// namespace is only complete once the module has finished evaluating.
+pub fn entry_namespace<'s>(scope: &'s Scope<'_>) -> Option<Object<'s>> {
+    let key = with_state(|state| state.entry.borrow().clone())?;
+    let module = registry(|reg| {
+        reg.borrow()
+            .get(&key)
+            .map(|entry| entry.module_obj.get(scope))
+    })?;
+    js::module::get_namespace(scope, module.handle())
+        .ok()
+        .and_then(Object::from_handle)
 }
 
 /// Why [`resolve_file_module`] could not produce a module.
@@ -626,6 +660,7 @@ pub(crate) fn clear_module_state(state: &ModuleState) {
     clear_module_registry(state);
     *state.base_path.borrow_mut() = None;
     *state.resolver.borrow_mut() = None;
+    *state.entry.borrow_mut() = None;
 }
 
 /// Register a native module, making it available for `import` from JS.
@@ -863,8 +898,8 @@ pub unsafe fn evaluate_module<'s>(
 
     // If the filename is a path in an existing directory, or a file in the
     // current directory, register the entry as that file's module. Other entries
-    // (eval scripts, synthetic filenames) stay unregistered and resolve their
-    // relative imports against the loader's base path.
+    // (eval scripts, synthetic filenames) are recorded as the entry only, and
+    // resolve their relative imports against the loader's base path.
     let path = Path::new(filename);
     let is_path = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.exists(),
@@ -872,6 +907,8 @@ pub unsafe fn evaluate_module<'s>(
     };
     if is_path {
         register_entry_module(scope, module, path)?;
+    } else {
+        record_entry_module(module, filename);
     }
 
     js::module::load_requested_modules(scope, module).map_err(|_| ExnThrown)?;

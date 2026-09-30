@@ -31,7 +31,7 @@ impl ReadableStreamBYOBRequest {
 
     /// <https://streams.spec.whatwg.org/#rs-byob-request-view>
     #[getter]
-    fn view<'r>(&self, scope: &'r Scope<'_>) -> Option<js::ArrayBufferView<'r>> {
+    pub fn view<'r>(&self, scope: &'r Scope<'_>) -> Option<js::ArrayBufferView<'r>> {
         // WebIDL: Uint8Array
         // Step 1: Return `this`.`[[view]]`.
         //         The slot holds a `Uint8Array`, or `None` after invalidation, which the WebIDL
@@ -41,7 +41,7 @@ impl ReadableStreamBYOBRequest {
 
     /// <https://streams.spec.whatwg.org/#rs-byob-request-respond>
     #[method]
-    fn respond(
+    pub fn respond(
         &self,
         scope: &Scope<'_>,
         bytes_written: EnforceRange<u64>,

@@ -253,6 +253,41 @@ pub enum RequestInfo<'s> {
     String(String),
 }
 
+/// Converts a value `fetch` receives as its input into a `Request`, before the
+/// value is converted to a [`RequestInfo`]. Returns `None` for a value it can't
+/// convert.
+pub type RequestInputAdapter =
+    for<'s> fn(&'s Scope<'_>, HandleValue<'_>) -> Result<Option<Request<'s>>, ExnThrown>;
+
+js::instance_local! {
+    /// The adapter [`register_request_input_adapter`] registered.
+    static REQUEST_INPUT_ADAPTER: std::cell::Cell<Option<RequestInputAdapter>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Register `adapter` to convert the values `fetch` receives as its input,
+/// replacing any adapter registered before.
+pub fn register_request_input_adapter(adapter: RequestInputAdapter) {
+    REQUEST_INPUT_ADAPTER.with(|cell| cell.set(Some(adapter)));
+}
+
+/// Convert `value` to a [`RequestInfo`].
+///
+/// If an adapter was registered with [`register_request_input_adapter`], that'll be tried first.
+/// If that fails to convert, the normal `RequestInfo` conversion is used.
+pub(crate) fn request_info<'s>(
+    scope: &'s Scope<'_>,
+    value: HandleValue<'_>,
+) -> Result<RequestInfo<'s>, ExnThrown> {
+    use js::conversion::FromJSVal;
+    if let Some(adapter) = REQUEST_INPUT_ADAPTER.with(std::cell::Cell::get) {
+        if let Some(request) = adapter(scope, value)? {
+            return Ok(RequestInfo::Request(request));
+        }
+    }
+    RequestInfo::from_jsval_throwing(scope, value, ())
+}
+
 #[webidl_methods]
 impl Request {
     /// Stop reporting the body's bytes to the GC. A compacting GC may have moved the object

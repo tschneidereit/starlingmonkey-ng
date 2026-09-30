@@ -205,6 +205,36 @@ impl ReadableStream {
         Ok(stream)
     }
 
+    /// Create a readable byte stream whose `pull` and `cancel` algorithms are native, as
+    /// [`ReadableStream::new_native`] does for a default stream. `pull` receives the
+    /// stream's [`ReadableByteStreamController`](super::ReadableByteStreamController).
+    ///
+    /// The stream has a high-water mark of `0` and no `autoAllocateChunkSize`, so it pulls
+    /// only when a reader asks for data.
+    pub fn new_native_bytes<'r>(
+        scope: &'r Scope<'_>,
+        underlying_source: impl ToJSVal<'r>,
+        pull: AlgorithmArg<'r>,
+        cancel: AlgorithmArg<'r>,
+    ) -> Result<ReadableStream<'r>, ExnThrown> {
+        let underlying_source = underlying_source.to_jsval_throwing(scope)?;
+        let stream =
+            algorithms::create_readable_byte_stream(scope, AlgorithmArg::None, pull, cancel)?;
+        if let Ok(source) = Object::from_value(scope, underlying_source.get()) {
+            stream.set_native_source(&source);
+        }
+        Ok(stream)
+    }
+
+    /// Create a `ReadableStream` from an async or sync iterable, as `ReadableStream.from`
+    /// does. Throws a `TypeError` if `iterable` is not iterable.
+    pub fn from_iterable<'r>(
+        scope: &'r Scope<'_>,
+        iterable: HandleValue<'_>,
+    ) -> Result<ReadableStream<'r>, ExnThrown> {
+        algorithms::readable_stream_from_iterable(scope, iterable)
+    }
+
     /// Create a `ReadableStream` that yields `bytes` as a single `Uint8Array` chunk
     /// and is then closed. The stream uses native (no-op) start/pull/cancel
     /// algorithms and the default queuing strategy, so it behaves as an ordinary

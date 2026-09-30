@@ -75,6 +75,25 @@ pub fn to_uint64(bi: Handle<*mut BigInt>) -> u64 {
     unsafe { mozjs::jsapi::JS::ToBigUint64(bi.get()) }
 }
 
+/// Convert a `BigInt` to a signed 64-bit integer, or `None` if it is outside
+/// `[-2^63, 2^63)`.
+pub fn fits_i64(bi: Handle<*mut BigInt>) -> Option<i64> {
+    let mut out = 0i64;
+    // SAFETY: `bi` is a rooted handle to a live `BigInt`, and `out` is written
+    // only when the call returns `true`.
+    let fits = unsafe { mozjs::jsapi::JS::detail::BigIntIsInt64(bi.get(), &mut out) };
+    fits.then_some(out)
+}
+
+/// Convert a `BigInt` to an unsigned 64-bit integer, or `None` if it is outside
+/// `[0, 2^64)`.
+pub fn fits_u64(bi: Handle<*mut BigInt>) -> Option<u64> {
+    let mut out = 0u64;
+    // SAFETY: as `fits_i64`.
+    let fits = unsafe { mozjs::jsapi::JS::detail::BigIntIsUint64(bi.get(), &mut out) };
+    fits.then_some(out)
+}
+
 /// Convert a `BigInt` to a string in the given radix (2–36).
 pub fn to_string<'s>(
     scope: &'s Scope<'_>,
