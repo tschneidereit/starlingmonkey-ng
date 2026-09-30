@@ -17,10 +17,12 @@
 
 # The wasm target the `-wasm` recipes build for. `WASM_TARGET=p3 just test-wasm` retargets them;
 # `p2`, `p3` and full triples are all accepted. The pinned toolchain in `rust-toolchain.toml`
-# ships no wasm32-wasip3 std, so that target builds through nightly.
+# ships no wasm32-wasip3 std, so that target builds through the toolchain `STARLING_NIGHTLY` names,
+# `nightly` by default.
 _wasm_target_arg := env_var_or_default("WASM_TARGET", "p2")
 WASM_TARGET := if _wasm_target_arg == "p2" { "wasm32-wasip2" } else if _wasm_target_arg == "p3" { "wasm32-wasip3" } else { _wasm_target_arg }
-_wasm_cargo := if WASM_TARGET == "wasm32-wasip3" { "cargo +nightly" } else { "cargo" }
+NIGHTLY := env_var_or_default("STARLING_NIGHTLY", "nightly")
+_wasm_cargo := if WASM_TARGET == "wasm32-wasip3" { "cargo +" + NIGHTLY } else { "cargo" }
 _wasm_out := "${CARGO_TARGET_DIR:-" + justfile_directory() + "/target}/" + WASM_TARGET
 
 # Build in debug mode.
@@ -99,7 +101,7 @@ fmt-check *ARGS:
 
 # Run clippy lints.
 clippy *ARGS:
-    cargo clippy --features debugmozjs {{ARGS}}
+    cargo clippy --features debugmozjs --all-targets {{ARGS}}
 
 # Run GC zeal stress tests.
 # Defaults to quick tests on the `js` and `core-runtime` packages.

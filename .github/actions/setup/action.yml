@@ -33,14 +33,15 @@ runs:
       shell: bash
       run: rustup target add wasm32-wasip2
 
-    # The pinned toolchain ships no wasm32-wasip3 std, so the justfile builds that target with
-    # `cargo +nightly`. The pinned toolchain is still needed for the host-side test harnesses.
+    # The pinned toolchain ships no wasm32-wasip3 std, so the justfile builds that target with the
+    # nightly toolchain `STARLING_NIGHTLY` names. The pinned toolchain is still needed for the
+    # host-side test harnesses.
     - name: Install nightly Rust toolchain with the wasm32-wasip3 target
       if: inputs.target == 'wasm32-wasip3'
       shell: bash
       run: |
-        rustup toolchain install nightly --profile minimal --target wasm32-wasip3
-        rustc +nightly --version
+        rustup toolchain install "$STARLING_NIGHTLY" --profile minimal --target wasm32-wasip3
+        rustc "+$STARLING_NIGHTLY" --version
 
     - name: Install WASI SDK
       if: inputs.target != 'native'
@@ -55,7 +56,7 @@ runs:
       if: inputs.target != 'native'
       shell: bash
       run: |
-        curl -sSf https://wasmtime.dev/install.sh | bash
+        curl -sSf https://wasmtime.dev/install.sh | bash -s -- --version "v$WASMTIME_VERSION"
         echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
 
     - name: Run sccache-cache

@@ -1209,7 +1209,7 @@ mod tests {
     #[test]
     fn resolve_with_extension_inference() {
         let dir = test_tempdir();
-        std::fs::write(dir.path().join("utils.js"), "export const PI = 3.14;\n").unwrap();
+        std::fs::write(dir.path().join("utils.js"), "export const RATIO = 2.5;\n").unwrap();
 
         let rt = test_runtime();
         rt.reset_module_loader(dir.path().to_path_buf());
@@ -1219,13 +1219,13 @@ mod tests {
             let result = evaluate_module(
                 &scope,
                 r#"
-                    import { PI } from "./utils";
-                    globalThis._pi = PI;
+                    import { RATIO } from "./utils";
+                    globalThis._ratio = RATIO;
                 "#,
                 "entry.mjs",
             );
             assert!(result.is_ok(), "extension inference failed");
-            assert_eq!(read_global_f64(&scope, "globalThis._pi"), 3.14);
+            assert_eq!(read_global_f64(&scope, "globalThis._ratio"), 2.5);
         }
     }
 

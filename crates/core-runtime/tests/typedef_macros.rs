@@ -1036,7 +1036,7 @@ mod implicit_factory_tests {
         }
 
         /// Fallible Rust-side factory, detected by its `Result<Self, E>` shape.
-        fn checked(scope: &Scope<'_>, value: i32) -> Result<Self, ExnThrown> {
+        fn try_new(scope: &Scope<'_>, value: i32) -> Result<Self, ExnThrown> {
             if value < 0 {
                 return Err(throw_type_error(scope, c"value must be non-negative"));
             }
@@ -1052,10 +1052,10 @@ mod implicit_factory_tests {
         let rt = Runtime::init(&RuntimeConfig::default()).expect("runtime init");
         let scope = rt.default_global();
 
-        let ok = Checked::checked(&scope, 7).expect("factory should succeed");
+        let ok = Checked::try_new(&scope, 7).expect("factory should succeed");
         assert_eq!(ok.data().value, 7);
 
-        assert!(Checked::checked(&scope, -1).is_err());
+        assert!(Checked::try_new(&scope, -1).is_err());
         // The error path must leave the thrown exception pending; capture
         // clears it and yields the message.
         let captured = ExnThrown::capture(&scope);

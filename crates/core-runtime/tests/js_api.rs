@@ -41,9 +41,9 @@ fn test_value_constructors() {
     let v = value::from_u32(100);
     assert!(v.is_int32() || v.is_double());
 
-    let v = value::from_f64(3.14);
+    let v = value::from_f64(2.5);
     assert!(v.is_double());
-    assert!((v.to_double() - 3.14).abs() < f64::EPSILON);
+    assert!((v.to_double() - 2.5).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -315,7 +315,7 @@ fn test_js_api_with_runtime() {
         assert!(Int32::is_value(value::from_i32(42)));
         assert!(!Int32::is_value(value::from_f64(42.0)));
 
-        assert!(Double::is_value(value::from_f64(3.14)));
+        assert!(Double::is_value(value::from_f64(2.5)));
 
         // Non-canonical NaNs (e.g. raw Float64Array bits) canonicalize
         // instead of aborting on DoubleValue's bit-pattern assertion.

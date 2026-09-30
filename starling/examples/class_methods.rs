@@ -34,13 +34,13 @@ impl MyClass {
         self.data.clone()
     }
 
-    #[method]
-    fn to_string(&self) -> String {
+    #[method(name = "toString")]
+    fn describe(&self) -> String {
         format!("MyClass({})", self.data().data)
     }
 
     #[method(name = "toJSON")]
-    fn to_json(&self) -> Result<String, ExnThrown> {
+    fn json(&self) -> Result<String, ExnThrown> {
         Ok(self.data().data.clone())
     }
 }
