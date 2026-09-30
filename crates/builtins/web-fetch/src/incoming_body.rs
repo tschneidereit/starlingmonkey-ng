@@ -58,6 +58,10 @@ pub(crate) fn consume_host_body<'r>(
     conversion: ConsumeType,
 ) -> Result<Promise<'r>, ExnThrown> {
     let promise = Promise::new_pending(scope)?;
+    // Only an active event loop drives the host read.
+    if core_runtime::event_loop::reject_without_event_loop(scope, &promise, "reading a body")? {
+        return Ok(promise);
+    }
     let future = async move {
         match host_body.read_all().await {
             Ok(bytes) => PromiseOutcome::Resolve(Box::new(move |scope: &Scope<'_>| {
@@ -330,6 +334,10 @@ fn host_pull(
 ) -> Result<Value, ExnThrown> {
     let state = cast_payload::<HostBodySource>(scope, payload);
     let promise = Promise::new_pending(scope)?;
+    // Only an active event loop drives the host read, and a rejected pull errors the stream.
+    if core_runtime::event_loop::reject_without_event_loop(scope, &promise, "reading a body")? {
+        return Ok(promise.as_value());
+    }
     let controller = ReadableStreamDefaultController::from_jsval_throwing(scope, args.get(0), ())?;
     if let Some(demand) = state.deferred_demand(scope) {
         state.data_mut().deferred_pull = Some(Heap::from(promise));
@@ -356,6 +364,10 @@ fn host_pull_resume(
     let (Some(controller), Some(promise)) = (controller, pull) else {
         return Ok(value::undefined());
     };
+    // Demand can arrive where no event loop is active to drive the host read.
+    if core_runtime::event_loop::reject_without_event_loop(scope, &promise, "reading a body")? {
+        return Ok(value::undefined());
+    }
     start_host_read(scope, state, controller, promise)?;
     Ok(value::undefined())
 }

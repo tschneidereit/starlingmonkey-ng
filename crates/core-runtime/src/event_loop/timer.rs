@@ -15,7 +15,7 @@
 use platform::clock::Instant;
 use std::time::Duration;
 
-use js::error::{throw_error, ExnThrown};
+use js::error::ExnThrown;
 use js::gc::handle::Heap;
 use js::heap::RootedTraceableBox;
 use js::native::Value;
@@ -296,5 +296,8 @@ fn timer_initialization_steps(
         })
     });
 
-    timer_id.ok_or_else(|| throw_error(scope, "No active event loop"))
+    timer_id.ok_or_else(|| {
+        let what = if repeat { "setInterval" } else { "setTimeout" };
+        super::throw_no_event_loop(scope, what)
+    })
 }
