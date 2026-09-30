@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: Apache-2.0-WITH-LLVM-exception
+
+package componentize-js:exported-resource;
+
+// A world that EXPORTS a guest-owned resource.
+//
+// The other worlds only ever import host-owned resources (`resource-type` and
+// `host-thing`), so the exported-resource slab, covering a guest constructing
+// and returning a resource the host then uses and finally drops, was never
+// exercised through the real componentize pipeline. This world closes that gap:
+// `counters.counter` is implemented in guest JS, minted into the slab on the way
+// out, used by the host via methods on the canonical handle, and removed from
+// the slab when the host drops the handle.
+//
+// Kept SYNC: async resources are a separate concern, and this fixture proves
+// the slab lifecycle rather than the async export driver.
+
+interface counters {
+  resource counter {
+    // Construct a counter starting at `start`.
+    constructor(start: u32);
+    // Add `by` to the running value and return the new value.
+    bump: func(by: u32) -> u32;
+    // The current running value.
+    value: func() -> u32;
+    // How many counters the guest has constructed so far (process-global).
+    total-created: static func() -> u32;
+    // How many counters are still live: constructed minus dropped. The guest
+    // decrements this from its drop hook, so the host observes a host-side drop
+    // as `live-count` falling, which gates the drop leg of the lifecycle
+    // e2e-observable in an engine without `Symbol.dispose`.
+    live-count: static func() -> u32;
+  }
+
+  // A freestanding export returning a guest-owned resource: the counter is
+  // minted into the slab here, on the way out.
+  make-counter: func(start: u32) -> counter;
+}
+
+world exported-resource {
+  export counters;
+}

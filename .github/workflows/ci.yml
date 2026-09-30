@@ -91,11 +91,14 @@ jobs:
         run: just ${{ matrix.recipe }} --examples
 
   # ---------------------------------------------------------------------------
-  # The static runtime component: scripts and Wizer snapshots run with it. The runtime is built
-  # for wasm32-wasip3, so this job installs nightly and a wasi-sdk with a sysroot for it.
+  # Componentization suites against the static runtime (`just test-componentize`).
+  # That recipe builds the runtime for wasm32-wasip3, the target the componentizer
+  # links against, so this job installs nightly and a wasi-sdk with a sysroot for it.
+  # The dynamic-library mode is wasm32-wasip2 only and needs a nightly build-std PIC
+  # build of SpiderMonkey, so it is not run here.
   # ---------------------------------------------------------------------------
-  runtime:
-    name: Runtime component
+  componentize:
+    name: Componentize (static runtime)
     runs-on: ubuntu-latest
     env:
       WASMTIME_BACKTRACE_DETAILS: '1'
@@ -107,6 +110,17 @@ jobs:
         with:
           target: wasm32-wasip3
           wasi-sdk-version: ${{ env.WASI_SDK_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      # `--tests` includes the `wit_to_ts` suite, which type-checks its output.
+      - name: Install the TypeScript compiler
+        run: npm ci
+
+      - name: Build the static runtime and run the componentization suites
+        run: just test-componentize
 
       # Runs scripts and a late-rejecting top level with the runtime component itself.
       - name: Run scripts with the runtime component
