@@ -7,6 +7,9 @@ use js::error::{ExnThrown, RangeError};
 use js::gc::scope::Scope;
 use js::{ArrayBuffer, ArrayBufferView, JSString};
 
+use crate::decoder_common::new_decoder;
+use crate::decoder_common::TextDecoderOptions;
+
 /// <https://encoding.spec.whatwg.org/#textdecoder>
 #[webidl_interface]
 pub struct TextDecoder {
@@ -180,13 +183,6 @@ impl TextDecoder<'_> {
     }
 }
 
-fn new_decoder(encoding: &'static encoding_rs::Encoding, ignore_bom: bool) -> encoding_rs::Decoder {
-    if ignore_bom {
-        encoding.new_decoder_without_bom_handling()
-    } else {
-        encoding.new_decoder_with_bom_removal()
-    }
-}
 
 #[webidl_union]
 pub enum ArrayBufferViewOrArrayBuffer<'a> {
@@ -198,13 +194,4 @@ pub enum ArrayBufferViewOrArrayBuffer<'a> {
 pub struct TextDecodeOptions {
     #[webidl(default = false)]
     pub stream: bool,
-}
-
-#[webidl_dictionary]
-#[derive(Default)]
-pub struct TextDecoderOptions {
-    #[webidl(default = false)]
-    pub fatal: bool,
-    #[webidl(default = false, name = "ignoreBOM")]
-    pub ignore_bom: bool,
 }
