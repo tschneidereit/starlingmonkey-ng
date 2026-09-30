@@ -88,8 +88,14 @@ impl ExtendableEvent {
         self.check_can_extend_lifetime(scope, caller)?;
         // Step 3: Add _promise_ to _event_’s `extend lifetime promises`.
         // Skipped in favor of event loop interest-based lifetime tracking.
-        let handle = with_active_event_loop(|el| el.acquire_interest_handle())
-            .expect("no active event loop");
+        // Note: only an active event loop tracks the lifetime, so without one, as in a
+        // synchronous component export, a `TypeError` is thrown.
+        let Some(handle) = with_active_event_loop(|el| el.acquire_interest_handle()) else {
+            return Err(core_runtime::event_loop::throw_no_event_loop(
+                scope,
+                &format!("`{caller}`"),
+            ));
+        };
         // Note: if the allocation of `on_settled` were to fail, this would leak `handle` until
         // the event loop is dropped. Working around that would be more trouble than it's worth.
         let holder = LifetimePromisePayload::new(scope, handle, *self)?;

@@ -364,7 +364,7 @@ impl<'s> Stack<'s, Promise> {
     /// Queue a future that will resolve or reject a JS `Promise`.
     ///
     /// Stores the `Promise` in a `RootedHeap<Promise>` for GC safety
-    /// and queues the future for later execution via `drain_promises`.
+    /// and queues the future for [`poll_pending_futures`] to drive.
     pub fn spawn(&self, js_promise: PromiseFuture) {
         let pending = PendingPromise {
             owner: current_future_owner(|owner_cell| owner_cell.get()),
@@ -373,6 +373,22 @@ impl<'s> Stack<'s, Promise> {
             origin: crate::stack::current_origin(),
         };
         pending_futures(|f| f.borrow_mut().push(pending));
+    }
+
+    /// [`Promise::spawn`], after polling the future once, now, with a waker that
+    /// does nothing. The work of the future's first poll, such as starting host
+    /// I/O, happens before this returns. The event loop's later polls register its
+    /// own waker, and settle the promise as for [`Promise::spawn`].
+    ///
+    /// The future must register the waker of every poll that returns `Pending`,
+    /// not only the first one's, or it is never woken.
+    pub fn spawn_polled(&self, js_promise: PromiseFuture) {
+        let mut future = js_promise.future;
+        let mut first_poll = std::task::Context::from_waker(std::task::Waker::noop());
+        if let std::task::Poll::Ready(outcome) = future.as_mut().poll(&mut first_poll) {
+            future = Box::pin(std::future::ready(outcome));
+        }
+        self.spawn(PromiseFuture { future });
     }
 }
 
@@ -538,8 +554,9 @@ pub enum PromiseOutcome {
 /// code to create a bare SpiderMonkey Promise, spawn the future, and
 /// resolve/reject the promise when the future completes.
 ///
-/// The design is async-runtime agnostic: call `drain_promises` with your
-/// executor in your event loop to resolve/reject completed promises.
+/// The design is async-runtime agnostic: an event loop drives the futures with
+/// [`poll_pending_futures`] and settles their promises with
+/// [`settle_completed_futures`].
 ///
 /// # Example
 ///
@@ -659,8 +676,7 @@ pub fn set_current_future_owner(owner: u64) -> u64 {
 
 /// Take all pending promise futures, returning them for execution.
 ///
-/// This drains the internal queue into the active set managed by
-/// [`drive_pending_futures`]; it is not normally called directly.
+/// [`poll_pending_futures`] moves them into the active set it polls.
 fn take_pending_futures() -> Vec<PendingPromise> {
     pending_futures(|f| std::mem::take(&mut *f.borrow_mut()))
 }
@@ -750,9 +766,9 @@ pub type CompletedFuture = (RootedHeap<Promise>, PromiseOutcome);
 /// spawned futures, poll the matching ones with `task_cx`, and return those that completed. Futures
 /// owned by another loop are left untouched for that loop to drive.
 ///
-/// Polling does not run JS, so it needs no active loop. The caller settles the returned completions
-/// with [`settle_completed_futures`] **with the owning loop active**, so a reaction (a timer, or
-/// releasing the loop's interest) reaches the right loop.
+/// A poll can run JS, such as a stream element's lowering, so the caller polls with the owning loop
+/// active. It settles the returned completions with [`settle_completed_futures`] with that loop
+/// active too, so a reaction (a timer, or releasing the loop's interest) reaches the right loop.
 ///
 /// The event loop calls this from inside its asynchronous wait, so the futures are polled with a
 /// real waker (their I/O readiness wakes the loop). `PromiseFuture`-returning builtins (e.g. `fetch`)
@@ -781,8 +797,11 @@ pub fn poll_pending_futures(
     }
 
     // Restore the still-pending futures. Anything spawned during the polls above landed in
-    // `pending` and is adopted on the next call.
+    // `pending` and is adopted on the next call, which the wake below brings about.
     active_futures(|a| a.borrow_mut().append(&mut still_pending));
+    if pending_futures(|f| !f.borrow().is_empty()) {
+        task_cx.waker().wake_by_ref();
+    }
     completed
 }
 

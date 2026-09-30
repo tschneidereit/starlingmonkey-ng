@@ -112,6 +112,66 @@ pub fn with_event_loop<R>(event_loop: &EventLoop, f: impl FnOnce(&EventLoop) -> 
     f(event_loop)
 }
 
+js::instance_local! {
+    /// Why no event loop is active, set by [`without_event_loop`] for the
+    /// duration of its closure.
+    static NO_LOOP_REASON: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with no active event loop, and `reason` as the explanation
+/// [`throw_no_event_loop`] gives for work that needs one. The previous state is
+/// restored afterwards.
+///
+/// This is mainly useful for running code in sync exports, which mustn't block, and hence
+/// can't perform async operations.
+pub fn without_event_loop<R>(reason: String, f: impl FnOnce() -> R) -> R {
+    /// Restores the previous active loop and reason.
+    struct Restore {
+        prev_loop: Option<*const EventLoop>,
+        prev_reason: Option<String>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT_EVENT_LOOP.with(|el| el.set(self.prev_loop));
+            NO_LOOP_REASON.with(|cell| *cell.borrow_mut() = self.prev_reason.take());
+        }
+    }
+
+    let prev_loop = CURRENT_EVENT_LOOP.with(|el| el.replace(None));
+    let prev_reason = NO_LOOP_REASON.with(|cell| cell.borrow_mut().replace(reason));
+    let _restore = Restore {
+        prev_loop,
+        prev_reason,
+    };
+    f()
+}
+
+/// Throw a `TypeError` whose message is that `what` needs an active event loop,
+/// followed by the reason [`without_event_loop`] set, if any.
+pub fn throw_no_event_loop(scope: &Scope<'_>, what: &str) -> ExnThrown {
+    let message = NO_LOOP_REASON.with(|cell| match &*cell.borrow() {
+        Some(reason) => format!("{what} needs an active event loop, and {reason}"),
+        None => format!("{what} needs an active event loop"),
+    });
+    js::error::TypeError(message).throw(scope)
+}
+
+/// Reject `promise` with the `TypeError` [`throw_no_event_loop`] throws for
+/// `what`, and return `true`, if no event loop is active to drive the work that
+/// would settle it. Otherwise return `false`, and leave `promise` alone.
+pub fn reject_without_event_loop(
+    scope: &Scope<'_>,
+    promise: &js::Promise<'_>,
+    what: &str,
+) -> Result<bool, ExnThrown> {
+    if with_active_event_loop(|_| ()).is_some() {
+        return Ok(false);
+    }
+    throw_no_event_loop(scope, what);
+    promise.reject_with_pending(scope)?;
+    Ok(true)
+}
+
 /// Run a closure with a reference to the active event loop.
 ///
 /// Returns `None` if no event loop is active (i.e. we're not inside a
@@ -220,6 +280,8 @@ pub enum PendingKind {
     Interest,
     /// An async-promise future, such as a `fetch` in flight.
     Future,
+    /// A [`PendingSend`], such as a stream being written.
+    Send,
 }
 
 impl std::fmt::Display for PendingKind {
@@ -229,6 +291,7 @@ impl std::fmt::Display for PendingKind {
             PendingKind::Task(kind) => write!(f, "a queued `{kind}` task"),
             PendingKind::Interest => f.write_str("an operation that keeps the event loop alive"),
             PendingKind::Future => f.write_str("a host operation in flight"),
+            PendingKind::Send => f.write_str("a stream or future being written"),
         }
     }
 }
@@ -405,6 +468,18 @@ pub struct EventLoop {
     /// Shared with this loop's [`InterestHandle`]s, whose release
     /// must wake this loop even when it happens during another loop's turn.
     notify: Rc<Event>,
+    /// Sends [`register_pending_send`](Self::register_pending_send) registered,
+    /// for the loop's driver to take, each with the JS call stack that
+    /// registered it, if origins recording was active during registration.
+    pending_sends: RefCell<Vec<(PendingSend, Option<Rc<str>>)>>,
+}
+
+/// A send, such as a response body's, that the loop's work can feed. The loop's
+/// driver awaits `done` while the loop has work, and calls `abandon` once no more
+/// work is left, after which `done` completes as well.
+pub struct PendingSend {
+    pub done: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
+    pub abandon: Box<dyn FnOnce()>,
 }
 
 impl EventLoop {
@@ -421,6 +496,7 @@ impl EventLoop {
             stop_requested: Cell::new(false),
             interest: InterestTracker::new(Rc::clone(&notify)),
             notify,
+            pending_sends: RefCell::new(Vec::new()),
         }
     }
 
@@ -648,6 +724,26 @@ impl EventLoop {
         self.interest.acquire_handle()
     }
 
+    /// Register `send` for this loop's driver to finish (see [`PendingSend`]).
+    pub fn register_pending_send(&self, send: PendingSend) {
+        let origin = js::stack::current_origin();
+        self.pending_sends.borrow_mut().push((send, origin));
+    }
+
+    /// Take the sends [`register_pending_send`](Self::register_pending_send)
+    /// registered.
+    pub fn take_pending_sends(&self) -> Vec<PendingSend> {
+        std::mem::take(&mut *self.pending_sends.borrow_mut())
+            .into_iter()
+            .map(|(send, _)| send)
+            .collect()
+    }
+
+    /// Whether a send is registered that no driver has taken yet.
+    pub fn has_pending_sends(&self) -> bool {
+        !self.pending_sends.borrow().is_empty()
+    }
+
     /// Returns `true` if at least one external interest is held.
     pub fn has_interest(&self) -> bool {
         self.interest.has_interest()
@@ -701,11 +797,11 @@ impl EventLoop {
         Err(message)
     }
 
-    /// Everything that keeps this loop alive: its tasks, its external interest, and the
-    /// async-promise futures it owns. Each entry's origin is set if origins were being recorded
-    /// when the work was created (see [`js::stack::record_origins`]).
+    /// Everything that keeps this loop alive: its tasks, its external interest, the async-promise
+    /// futures it owns, and its pending sends. Each entry's origin is set if origins were being
+    /// recorded when the work was created (see [`js::stack::record_origins`]).
     ///
-    /// Tasks come first, in the order they were queued, then interest, then futures.
+    /// Tasks come first, in the order they were queued, then interest, then futures, then sends.
     pub fn pending_work(&self) -> Vec<PendingWork> {
         let tasks = self.tasks.borrow();
         let mut entries: Vec<&TaskEntry> = tasks.entries.values().collect();
@@ -736,6 +832,15 @@ impl EventLoop {
                 .map(|origin| PendingWork {
                     kind: PendingKind::Future,
                     origin,
+                }),
+        );
+        work.extend(
+            self.pending_sends
+                .borrow()
+                .iter()
+                .map(|(_, origin)| PendingWork {
+                    kind: PendingKind::Send,
+                    origin: origin.clone(),
                 }),
         );
         work
@@ -851,14 +956,74 @@ unsafe fn settle_completed_futures(
     event_loop: &EventLoop,
     completed: Vec<js::promise::CompletedFuture>,
 ) {
-    if completed.is_empty() {
-        return;
-    }
     with_event_loop(event_loop, |_| {
         // SAFETY: guaranteed by this function's caller.
         let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
+        if completed.is_empty() {
+            // A poll that completed nothing can still have run JS, such as the
+            // lowering of a stream nested in a stream element, which queues
+            // microtasks.
+            if jobs::has_pending_jobs(&scope) {
+                run_microtasks(&scope);
+            }
+            return;
+        }
         js::promise::settle_completed_futures(&scope, completed);
     });
+}
+
+/// Drive `event_loop` until every send registered on it (see [`PendingSend`]) is done. Once the
+/// loop has no work left while a send is unfinished, every unfinished send is abandoned.
+///
+/// # Safety
+///
+/// As for [`run_until`].
+pub async unsafe fn finish_pending_sends<S, F>(
+    raw_cx: *mut js::native::RawJSContext,
+    event_loop: &EventLoop,
+    sleep: S,
+) where
+    S: Fn(Duration) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    let sends = event_loop.take_pending_sends();
+    if sends.is_empty() {
+        return;
+    }
+    let (dones, abandons): (Vec<_>, Vec<_>) = sends
+        .into_iter()
+        .map(|send| (send.done, send.abandon))
+        .unzip();
+    let mut all_done = std::pin::pin!(async {
+        for done in dones {
+            done.await;
+        }
+    });
+    let finished = futures_lite::future::or(
+        async {
+            all_done.as_mut().await;
+            true
+        },
+        async {
+            // SAFETY: guaranteed by this function's caller.
+            unsafe { run_until(raw_cx, event_loop, &sleep, |_| false).await };
+            false
+        },
+    )
+    .await;
+    if !finished {
+        // An abandon can run JS, whose microtasks are drained before the loop
+        // steps again.
+        with_event_loop(event_loop, |_| {
+            for abandon in abandons {
+                abandon();
+            }
+            // SAFETY: guaranteed by this function's caller.
+            let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
+            run_microtasks(&scope);
+        });
+        all_done.await;
+    }
 }
 
 /// Runs the event loop in an async loop, calling `should_stop` each turn, and returns when it
@@ -919,7 +1084,9 @@ pub async unsafe fn run_until<S, F>(
                 // loop active, same as in the await arm.
                 futures_lite::future::yield_now().await;
                 let completed = std::future::poll_fn(|cx| {
-                    std::task::Poll::Ready(js::promise::poll_pending_futures(owner, cx))
+                    std::task::Poll::Ready(with_event_loop(event_loop, |_| {
+                        js::promise::poll_pending_futures(owner, cx)
+                    }))
                 })
                 .await;
                 // SAFETY: guaranteed by this function's caller.
@@ -941,14 +1108,21 @@ pub async unsafe fn run_until<S, F>(
                     }
                 };
                 let notified = event_loop.notified();
-                // Poll *this loop's* async-promise futures with the real task waker so their I/O
+                // Poll this loop's async-promise futures with the real task waker so their I/O
                 // readiness wakes this await; complete once one settles, stashing the completions to
-                // settle below. Polling runs no JS, so it needs no active loop and does not borrow
-                // `event_loop` (which `timer_wait`/`notified` borrow).
+                // settle below. The loop is active during the polls, since one can run JS, such as
+                // the lowering of a stream nested in a stream element, which starts work of its own.
+                // A poll that left jobs queued completes this branch as well, so they are drained
+                // below, since the jobs can start work, such as a write, that the futures wait on.
                 let mut completed = Vec::new();
                 let drive_futures = std::future::poll_fn(|cx| {
-                    let done = js::promise::poll_pending_futures(owner, cx);
-                    if done.is_empty() {
+                    let (done, jobs) = with_event_loop(event_loop, |_| {
+                        let done = js::promise::poll_pending_futures(owner, cx);
+                        // SAFETY: guaranteed by this function's caller.
+                        let scope = unsafe { js::gc::scope::RootScope::from_current_realm(raw_cx) };
+                        (done, jobs::has_pending_jobs(&scope))
+                    });
+                    if done.is_empty() && !jobs {
                         std::task::Poll::Pending
                     } else {
                         completed = done;
