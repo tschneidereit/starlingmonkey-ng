@@ -10,6 +10,64 @@
 
 #![cfg(target_arch = "wasm32")]
 
+/// With the `libc-alloc` feature, Rust allocations go through wasi-libc's `malloc`, which
+/// SpiderMonkey's `js_malloc` also ends in, so one allocator owns the heap. Alignments above
+/// `max_align_t` (16 on wasm32) go through `posix_memalign`.
+#[cfg(feature = "libc-alloc")]
+mod libc_alloc {
+    use std::alloc::{GlobalAlloc, Layout};
+
+    struct LibcAlloc;
+
+    const MAX_ALIGN: usize = 16;
+
+    // SAFETY: every method forwards to the C allocator with a layout it accepts, and
+    // `dealloc`/`realloc` only receive pointers `alloc` returned.
+    unsafe impl GlobalAlloc for LibcAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if layout.align() <= MAX_ALIGN {
+                return libc::malloc(layout.size()).cast();
+            }
+            let mut out = std::ptr::null_mut();
+            if libc::posix_memalign(&mut out, layout.align(), layout.size()) != 0 {
+                return std::ptr::null_mut();
+            }
+            out.cast()
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            if layout.align() <= MAX_ALIGN {
+                return libc::calloc(1, layout.size()).cast();
+            }
+            let out = self.alloc(layout);
+            if !out.is_null() {
+                std::ptr::write_bytes(out, 0, layout.size());
+            }
+            out
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+            libc::free(ptr.cast());
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            if layout.align() <= MAX_ALIGN {
+                return libc::realloc(ptr.cast(), new_size).cast();
+            }
+            let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+            let out = self.alloc(new_layout);
+            if !out.is_null() {
+                std::ptr::copy_nonoverlapping(ptr, out, layout.size().min(new_size));
+                self.dealloc(ptr, layout);
+            }
+            out
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: LibcAlloc = LibcAlloc;
+}
+
 /// Runs the static constructors at most once.
 ///
 /// `--wrap=__wasm_call_ctors` (see `build.rs`) redirects every reference to
