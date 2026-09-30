@@ -24,6 +24,7 @@ pub fn register_builtins() {
     runtime::register_global_initializer(web_url::add_to_global);
     runtime::register_global_initializer(web_fetch::add_to_global);
     runtime::register_global_initializer(fetch_event::add_to_global);
+    runtime::register_global_initializer(web_file::add_to_global);
     // SAFETY: a global initializer runs with the new global's realm entered, and `global` is
     // that global.
     runtime::register_global_initializer(|scope, global| unsafe {

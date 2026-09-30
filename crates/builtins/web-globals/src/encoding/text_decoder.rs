@@ -30,7 +30,7 @@ pub struct TextDecoder {
 impl TextDecoder<'_> {
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder>
     #[constructor]
-    fn new(
+    pub fn new(
         &self,
         label: Option<String>,
         options: Option<TextDecoderOptions>,
@@ -83,7 +83,7 @@ impl TextDecoder<'_> {
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder-decode>
     #[method]
-    fn decode<'r>(
+    pub fn decode<'r>(
         &self,
         scope: &'r Scope<'_>,
         input: Option<ArrayBufferViewOrArrayBuffer<'_>>,
